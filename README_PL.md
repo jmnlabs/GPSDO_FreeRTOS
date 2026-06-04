@@ -13,7 +13,7 @@ na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
 | Projekt PCB (prototyp) | **Scrachi** (forum EEVBlog) — [post z plikami](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/825/) · [profil](https://www.eevblog.com/forum/profile/?u=762266) |
 | Wątek projektowy | [Yet another DIY GPSDO](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/) — EEVBlog Forum |
 
-Firmware został napisany od podstaw jako port oryginalnego kodu André Balsy
+Firmware został napisany od podstaw jako port oryginalnego kodu André Balsa
 na architekturę FreeRTOS, z pełnym przeprojektowaniem zadań, synchronizacji
 i wyświetlania. Konstrukcja sprzętowa bazuje na schemacie z projektu v0.06c
 z wykorzystaniem PCB udostępnionych przez użytkownika Scrachi na forum EEVBlog.

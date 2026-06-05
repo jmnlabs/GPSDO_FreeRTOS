@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.24
+# GPSDO FreeRTOS v0.25
 
 Firmware czasu rzeczywistego (FreeRTOS) dla oscylatora sterowanego GPS (GPSDO)
 na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
@@ -13,7 +13,7 @@ na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
 | Projekt PCB (prototyp) | **Scrachi** (forum EEVBlog) — [post z plikami](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/825/) · [profil](https://www.eevblog.com/forum/profile/?u=762266) |
 | Wątek projektowy | [Yet another DIY GPSDO](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/) — EEVBlog Forum |
 
-Firmware został napisany od podstaw jako port oryginalnego kodu André Balsa
+Firmware został napisany od podstaw jako port oryginalnego kodu André Balsy
 na architekturę FreeRTOS, z pełnym przeprojektowaniem zadań, synchronizacji
 i wyświetlania. Konstrukcja sprzętowa bazuje na schemacie z projektu v0.06c
 z wykorzystaniem PCB udostępnionych przez użytkownika Scrachi na forum EEVBlog.
@@ -233,6 +233,7 @@ Komendy zakończone `\r\n` lub `\n`.
 | Komenda | Opis |
 |---------|------|
 | `H` | Wyświetl pomoc |
+| `V` | Wersja, autorzy i linki GitHub |
 | `RH` | Tryb raportowania: czytelny (domyślny) |
 | `RD` | Tryb raportowania: rozdzielany tabulatorem |
 | `RP` | Wstrzymaj raporty serial/BT |
@@ -273,7 +274,7 @@ Komendy zakończone `\r\n` lub `\n`.
 
 | Komenda | Opis |
 |---------|------|
-| `ES` | Zapisz parametry do EEPROM (PWM, algo, czas, PID) |
+| `ES` | Zapisz wszystkie parametry do EEPROM |
 | `ER` | Odczytaj parametry z EEPROM |
 | `EE` | Wymaż EEPROM (przywróć domyślne) |
 
@@ -281,7 +282,7 @@ Komendy zakończone `\r\n` lub `\n`.
 
 ## EEPROM
 
-EEPROM (emulowane w pamięci Flash STM32) przechowuje 134 bajty:
+EEPROM (emulowane w pamięci Flash STM32) przechowuje 142 bajty:
 
 | Adres | Rozmiar | Zawartość |
 |-------|---------|-----------|
@@ -291,6 +292,8 @@ EEPROM (emulowane w pamięci Flash STM32) przechowuje 134 bajty:
 | 9 | 1 B | Przesunięcie czasu (±23 h) |
 | 10–121 | 112 B | PID: g_pid[3..9] × {Kp, Ki, Kd, I_LIMIT} |
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
+| 134–137 | 4 B | g_pressure_offset (komenda PO) |
+| 138–141 | 4 B | g_altitude_offset (komenda AO) |
 
 ---
 
@@ -349,10 +352,9 @@ Plik `gpsdo_config.h` steruje konfiguracją. Najważniejsze przełączniki:
   Adafruit AHTX0, Adafruit BMP280, Adafruit INA219,
   hd44780 (dla LCD), EEPROM (STM32)
 - **Ustawienia kompilacji**: Tools → C Runtime Library → Newlib Nano + Float Printf/Scanf
-  USB support CDC → (generic Serial supersede U(S)ART)
 
 ---
 
 ## Licencja
 
-Opublikowane na tych samych warunkach co oryginalny projekt André Balsa.
+Opublikowane na tych samych warunkach co oryginalny projekt André Balsy.

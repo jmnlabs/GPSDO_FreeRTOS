@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.cpp — Shared state instances and EEPROM helpers
  *
- * Part of GPSDO FreeRTOS v0.24
+ * Part of GPSDO FreeRTOS v0.25
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -19,6 +19,8 @@
  *   [9]        g_time_offset
  *   [10..121]  g_pid[3..9]: 7 x {Kp, Ki, Kd, I_LIMIT} as float
  *   [122..133] g_blend_crossover, g_blend_scale, g_nn_max_step
+ *   [134..137] g_pressure_offset (float)
+ *   [138..141] g_altitude_offset (float)
  */
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
@@ -72,14 +74,16 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_ALGO         8u   /* [8]     active_algo (0..9) */
 #define EE_TIME_OFFSET  9u   /* [9]     g_time_offset as uint8_t */
 
-/* PID parameters for algos 3-9 (v0.24+):
+/* PID parameters for algos 3-9 (v0.25+):
  *   7 algos × 4 floats (Kp,Ki,Kd,I_LIMIT) × 4 bytes = 112 bytes [10..121]
  *   Blend/NN params: 3 floats × 4 bytes = 12 bytes [122..133] */
 #define EE_PID_START    10u  /* g_pid[3..9] starts here */
 #define EE_BLEND_CROSS  122u /* g_blend_crossover as float */
 #define EE_BLEND_SCALE  126u /* g_blend_scale as float */
 #define EE_NN_MAX_STEP  130u /* g_nn_max_step as float */
-/* Total used: 134 bytes (well within 1024-byte EEPROM page) */
+#define EE_PRESS_OFF    134u /* g_pressure_offset as float */
+#define EE_ALT_OFF      138u /* g_altitude_offset as float */
+/* Total used: 142 bytes (well within 1024-byte EEPROM page) */
 
 /* ---- float ↔ EEPROM byte helpers ---- */
 static void ee_write_float(uint16_t addr, float val)
@@ -104,6 +108,8 @@ static float ee_read_float(uint16_t addr)
  * without moving its definition.
  */
 extern int8_t g_time_offset;
+extern float  g_pressure_offset;
+extern float  g_altitude_offset;
 
 /* ---- eeprom_save -------------------------------------------------------
  * Saves current PWM, active algorithm and time offset to EEPROM.
@@ -144,6 +150,8 @@ void eeprom_save(void)
     ee_write_float(EE_BLEND_CROSS, (float)g_blend_crossover);
     ee_write_float(EE_BLEND_SCALE, (float)g_blend_scale);
     ee_write_float(EE_NN_MAX_STEP, (float)g_nn_max_step);
+    ee_write_float(EE_PRESS_OFF,   g_pressure_offset);
+    ee_write_float(EE_ALT_OFF,     g_altitude_offset);
 
     eeprom_buffer_flush();
     g_eeprom_valid = true;
@@ -218,6 +226,12 @@ void eeprom_recall(void)
         if (isfinite(bc) && bc > 0.0f && bc < 1.0f)     g_blend_crossover = (double)bc;
         if (isfinite(bs) && bs > 0.0f && bs < 1.0f)     g_blend_scale     = (double)bs;
         if (isfinite(ns) && ns >= 1.0f && ns <= 10000.0f) g_nn_max_step    = (double)ns;
+    }
+    {
+        float po = ee_read_float(EE_PRESS_OFF);
+        float ao = ee_read_float(EE_ALT_OFF);
+        if (isfinite(po) && po >= -500.0f && po <= 5000.0f) g_pressure_offset = po;
+        if (isfinite(ao) && ao >= -500.0f && ao <= 10000.0f) g_altitude_offset = ao;
     }
 
     /* Apply PWM immediately to DAC */

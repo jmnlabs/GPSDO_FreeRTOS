@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.24
+# GPSDO FreeRTOS v0.25
 
 Real-time (FreeRTOS) firmware for a GPS-Disciplined Oscillator (GPSDO)
 on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
@@ -233,6 +233,7 @@ Commands terminated by `\r\n` or `\n`.
 | Command | Description |
 |---------|-------------|
 | `H` | Display help |
+| `V` | Version, authors and GitHub links |
 | `RH` | Report mode: human-readable (default) |
 | `RD` | Report mode: tab-delimited |
 | `RP` | Pause serial/BT reports |
@@ -273,7 +274,7 @@ Commands terminated by `\r\n` or `\n`.
 
 | Command | Description |
 |---------|-------------|
-| `ES` | Save parameters to EEPROM (PWM, algo, time, PID) |
+| `ES` | Save all parameters to EEPROM |
 | `ER` | Recall parameters from EEPROM |
 | `EE` | Erase EEPROM (restore defaults) |
 
@@ -281,7 +282,7 @@ Commands terminated by `\r\n` or `\n`.
 
 ## EEPROM
 
-EEPROM (emulated in STM32 Flash) stores 134 bytes:
+EEPROM (emulated in STM32 Flash) stores 142 bytes:
 
 | Address | Size | Content |
 |---------|------|---------|
@@ -291,6 +292,8 @@ EEPROM (emulated in STM32 Flash) stores 134 bytes:
 | 9 | 1 B | Time offset (±23 h) |
 | 10–121 | 112 B | PID: g_pid[3..9] × {Kp, Ki, Kd, I_LIMIT} |
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
+| 134–137 | 4 B | g_pressure_offset (PO command) |
+| 138–141 | 4 B | g_altitude_offset (AO command) |
 
 ---
 
@@ -349,7 +352,6 @@ The file `gpsdo_config.h` controls the build. Key switches:
   Adafruit AHTX0, Adafruit BMP280, Adafruit INA219,
   hd44780 (for LCD), EEPROM (STM32)
 - **Build settings**: Tools → C Runtime Library → Newlib Nano + Float Printf/Scanf
-  USB support CDC → (generic Serial supersede U(S)ART)
 
 ---
 

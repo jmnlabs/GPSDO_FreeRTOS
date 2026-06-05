@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.24
+ * Part of GPSDO FreeRTOS v0.25
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -33,7 +33,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.24-rtos"
+#define PROGRAM_VERSION  "v0.25-rtos"
 
 /* ---- Serial output macro ----
  * When GPSDO_BLUETOOTH is defined, all user-facing output goes to Serial2.

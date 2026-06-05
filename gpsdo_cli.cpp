@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.24
+ * Part of GPSDO FreeRTOS v0.25
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -86,7 +86,7 @@ static void print_help(void)
 {
     cli_putln(PROGRAM_NAME " " PROGRAM_VERSION " by " AUTHOR_NAME);
     cli_putln("Commands (case-sensitive, end with Enter):");
-    cli_putln("  V           version info");
+    cli_putln("  V           Version, authors and links");
     cli_putln("  H / ?       this help");
     cli_putln("  F           flush ring buffers");
     cli_putln("  C           start auto-calibration");
@@ -143,7 +143,13 @@ static void dispatch(char *line)
 
     /* ---- version ---- */
     if (strcmp(verb, "V") == 0) {
-        cli_putln(PROGRAM_NAME " " PROGRAM_VERSION " by " AUTHOR_NAME);
+        cli_putln(PROGRAM_NAME " " PROGRAM_VERSION);
+        cli_putln("FreeRTOS port by J. M. Niewinski");
+        cli_putln("https://github.com/jmnlabs/GPSDO_FreeRTOS");
+        cli_putln("Programming assistant: Claude AI (Anthropic)");
+        cli_putln("Based on GPSDO v0.06c by " AUTHOR_NAME);
+        cli_putln("https://github.com/AndrewBCN/STM32-GPSDO");
+        cli_putln("PCB design: Scrachi (EEVBlog forum)");
         return;
     }
 

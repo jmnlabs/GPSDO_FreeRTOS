@@ -349,9 +349,10 @@ Plik `gpsdo_config.h` steruje konfiguracją. Najważniejsze przełączniki:
   Adafruit AHTX0, Adafruit BMP280, Adafruit INA219,
   hd44780 (dla LCD), EEPROM (STM32)
 - **Ustawienia kompilacji**: Tools → C Runtime Library → Newlib Nano + Float Printf/Scanf
+  USB support CDC → (generic Serial supersede U(S)ART)
 
 ---
 
 ## Licencja
 
-Opublikowane na tych samych warunkach co oryginalny projekt André Balsy.
+Opublikowane na tych samych warunkach co oryginalny projekt André Balsa.

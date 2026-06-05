@@ -349,6 +349,7 @@ The file `gpsdo_config.h` controls the build. Key switches:
   Adafruit AHTX0, Adafruit BMP280, Adafruit INA219,
   hd44780 (for LCD), EEPROM (STM32)
 - **Build settings**: Tools → C Runtime Library → Newlib Nano + Float Printf/Scanf
+  USB support CDC → (generic Serial supersede U(S)ART)
 
 ---
 

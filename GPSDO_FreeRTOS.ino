@@ -3,6 +3,7 @@
  *
  * Part of GPSDO FreeRTOS v0.24
  * Author:   J. M. Niewiński
+ * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
  * AI:       Claude (Anthropic)
  *
@@ -121,9 +122,10 @@ void setup()
 
     OUT_SERIAL.println("\r\n================================================");
     OUT_SERIAL.println(PROGRAM_NAME " " PROGRAM_VERSION);
-    OUT_SERIAL.println("Based on original GPSDO v0.06c by " AUTHOR_NAME);
+    OUT_SERIAL.println("FreeRTOS port by J. M. Niewinski  with Claude AI");
+    OUT_SERIAL.println("https://github.com/jmnlabs/GPSDO_FreeRTOS");
+    OUT_SERIAL.println("Based on GPSDO v0.06c by " AUTHOR_NAME);
     OUT_SERIAL.println("https://github.com/AndrewBCN/STM32-GPSDO/tree/main/software/GPSDO_V006c");
-    OUT_SERIAL.println("FreeRTOS port by Jaroslaw Marek Niewinski  with Claude AI support");
     OUT_SERIAL.println("Type H = help  SW = stack diagnostics");
     OUT_SERIAL.println("================================================\r\n");
 

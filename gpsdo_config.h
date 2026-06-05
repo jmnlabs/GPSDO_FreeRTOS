@@ -3,6 +3,7 @@
  *
  * Part of GPSDO FreeRTOS v0.24
  * Author:   J. M. Niewiński
+ * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
  * AI:       Claude (Anthropic)
  *
@@ -48,9 +49,9 @@ extern "C" {
 /* ── Feature switches ────────────────────────────────────────────────── */
 
 /* ── OLED display type — select exactly one, or comment all out ──────── */
-//#define GPSDO_OLED_SH1106     /* SH1106  128x64 I2C — original hardware */
-//#define GPSDO_OLED_SSD1306    /* SSD1306 128x64 I2C                     */
-#define GPSDO_OLED_SSD1309    /* SSD1309 128x64 I2C (same init as 1306) */
+//#define GPSDO_OLED_SH1106        /* SH1106  128x64 I2C — original hardware */
+/* #define GPSDO_OLED_SSD1306 */ /* SSD1306 128x64 I2C                     */
+#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
 
 /* ── LCD 20x4 I2C — independent of OLED, enable or comment out ──────── */
 //#define GPSDO_LCD_20x4     /* HD44780 20x4 via PCF8574T I2C expander */

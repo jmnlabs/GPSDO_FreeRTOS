@@ -7,7 +7,7 @@ on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
 
 | Role | Person / source |
 |------|-----------------|
-| FreeRTOS port author, algorithms 3–9 | **J. M. Niewiński** |
+| FreeRTOS port author, algorithms 3–9 | **J. M. Niewiński** — [repository](https://github.com/jmnlabs/GPSDO_FreeRTOS) |
 | Programming assistant (Anthropic) | **Claude AI** |
 | Original firmware v0.06c author | **André Balsa** — [repository](https://github.com/AndrewBCN/STM32-GPSDO/tree/main/software/GPSDO_V006c) |
 | PCB design (prototype) | **Scrachi** (EEVBlog forum) — [post with files](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/825/) · [profile](https://www.eevblog.com/forum/profile/?u=762266) |
@@ -30,29 +30,30 @@ of 10⁻¹⁰–10⁻¹², while preserving the OCXO's short-term stability.
 ### Hardware principle of operation
 
 ```
-               ┌─────────────┐
-   GPS Antenna ┤  u-blox     ├── NMEA (Serial1, 38400 Bd)
-               │  NEO-6M/7M  ├── 1PPS ────────────────────────┐
-               └─────────────┘                                 │
-                                                               ▼
-               ┌─────────────┐                        ┌──────────────┐
-               │   STM32     │◄── TIM2 ETR ───────────┤    OCXO      │
-               │  F411CE     │                        │  10 MHz      │
-               │  BlackPill  │── PWM (PB9) ──► RC ──►│  EFC (Vctl)  │
-               └──────┬──────┘    LP filter           └──────────────┘
-                      │
-          ┌───────────┼───────────┐
-          │           │           │
-        I2C bus     Serial      GPIO
-          │           │           │
-    ┌─────┼─────┐     │       TM1637
-    │     │     │     │       (clock)
-   OLED  Sen-  LCD   BT
-  128x64 sors  20x4  HC-06
-         │
-    ┌────┼────┐
-   AHT  BMP  INA
-   20   280  219
+                                           10 MHz
+               ┌─────────────┐      ┌──────────────┐
+   GPS Antenna ┤  u-blox     │      │    OCXO      ├── TIM2 ETR (PA15) ──┐
+               │  NEO-6M/7M  │      │  10 MHz      │                     │
+               └──┬──────┬───┘      └──────▲───────┘                     │
+                  │      │                 │                              │
+        NMEA      │  1PPS (PB10)     PWM (PB9)                           │
+     (Serial1)    │      │           + RC filter                         │
+                  │      │                 │                              │
+               ┌──▼──────▼─────────────────┴──────┐                      │
+               │          STM32 F411CE             │◄─────────────────────┘
+               │          BlackPill                │
+               └──────┬───────────┬───────┬───────┘
+                      │           │       │
+                    I2C bus    Serial    GPIO
+                      │           │       │
+                ┌─────┼─────┐     │    TM1637
+                │     │     │     │    (clock)
+               OLED  Sen-  LCD   BT
+              128x64 sors  20x4  HC-06
+                     │
+                ┌────┼────┐
+               AHT  BMP  INA
+               20   280  219
 ```
 
 **The control loop** operates as follows:
@@ -84,28 +85,6 @@ OLED and LCD can operate simultaneously (different I2C addresses).
 LCD and TM1637 **cannot** operate simultaneously (bus conflict).
 
 ---
-## File Structure
-
-All source files reside in **one folder**:
-
-```
-GPSDO_FreeRTOS/
-├── GPSDO_FreeRTOS.ino        — setup() + empty loop()
-├── gpsdo_config.h            — all compile-time switches (display, pins, tuning)
-├── gpsdo_state.h             — shared data types and RTOS handle declarations
-├── gpsdo_state.cpp           — global instances, EEPROM helpers
-├── gpsdo_isr.cpp             — bare-metal ISRs (notify/queue only, < 1 µs)
-├── gpsdo_freq.cpp            — vFreqRelayTask  (ring-buffer frequency counter)
-├── gpsdo_gps.cpp             — vGpsTask        (NMEA parser, UBX config, tunnel)
-├── gpsdo_cli.cpp             — vCliTask        (serial command interpreter)
-├── gpsdo_control.cpp         — vControlTask    (warmup, calibration, PWM DAC)
-├── gpsdo_tasks.cpp           — vSensorTask + vDisplayTask + vUptimeTask
-├── GPSDO_algorithms.cpp/.h   — control-loop algorithm implementations
-├── TM1637Display.cpp/.h      — local TM1637 library (4- and 6-digit, custom mapping)
-├── gpsdo.jflash              — J-Flash programming configuration
-├── README.md                 — this file
-└── README_PL.md              — Polish version
-```
 
 ## Software architecture
 

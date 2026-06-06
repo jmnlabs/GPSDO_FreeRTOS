@@ -1,9 +1,9 @@
-  AppVersion = 94400
+  AppVersion = 94000
   FileVersion = 2
 [GENERAL]
   aATEModuleSel[24] = 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
   ConnectMode = 0
-  CurrentFile = "D:\GPSDO_FreeRTOS\build\STMicroelectronics.stm32.GenF4\GPSDO_FreeRTOS.ino.hex"
+  CurrentFile = "C:\GPSDO_FreeRTOS_v0_28\GPSDO_FreeRTOS\build\STMicroelectronics.stm32.GenF4\GPSDO_FreeRTOS.ino.hex"
   DataFileSAddr = 0x00000000
   GUIMode = 0
   HostName = ""

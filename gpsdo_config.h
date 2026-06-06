@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.25
+ * Part of GPSDO FreeRTOS v0.28
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -33,7 +33,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.25-rtos"
+#define PROGRAM_VERSION  "v0.28-rtos"
 
 /* ---- Serial output macro ----
  * When GPSDO_BLUETOOTH is defined, all user-facing output goes to Serial2.
@@ -50,15 +50,15 @@ extern "C" {
 
 /* ── OLED display type — select exactly one, or comment all out ──────── */
 //#define GPSDO_OLED_SH1106        /* SH1106  128x64 I2C — original hardware */
-/* #define GPSDO_OLED_SSD1306 */ /* SSD1306 128x64 I2C                     */
+//#define GPSDO_OLED_SSD1306       /* SSD1306 128x64 I2C                     */
 #define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
 
 /* ── LCD 20x4 I2C — independent of OLED, enable or comment out ──────── */
 //#define GPSDO_LCD_20x4     /* HD44780 20x4 via PCF8574T I2C expander */
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
-#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
-/* #define GPSDO_TM1637      */  /* 4-digit TM1637: HH:MM                  */
+#define GPSDO_TM1637_6          /* 6-digit TM1637: HH:MM:SS               */
+//#define GPSDO_TM1637            /* 4-digit TM1637: HH:MM                  */
 
 /* ── OLED page alternation: seconds per page ─────────────────────────── */
 #define OLED_PAGE_SWITCH_SECS   10u   /* flip between page A and B every N seconds */
@@ -137,8 +137,54 @@ extern "C" {
 #define LED_SLOW_BLINK_MS  1000u   /* Yellow LED slow pulse — manual holdover */
 #define LED_FAST_BLINK_MS   200u   /* Yellow LED fast pulse — fix lost / auto holdover */
 
-/* ── Default PWM ─────────────────────────────────────────────────────── */
-#define DEFAULT_PWM_OUTPUT  40908u
+/* ── OCXO selection ───────────────────────────────────────────────────
+ *
+ * Uncomment exactly ONE OCXO define.  It sets compile-time defaults for:
+ *   - PID coefficients (Kp, Ki, Kd, I_LIMIT) for algorithms 3-9
+ *   - Algorithm 8 blend crossover / scale
+ *   - Algorithm 9 NN max step
+ *
+ * Both OCXOs: supply 5 V, EFC input 0..4 V (full range).
+ * PWM DAC is limited to 0..3.3 V (STM32 Vcc) — only 82.5% of EFC range.
+ *
+ * CTI OSC5A2B02  — Kv = 7.50 Hz/V,  EFC range: −10 to +20 Hz (30 Hz)
+ *                  PWM-accessible: −10 to +14.75 Hz (24.75 Hz), 0.378 mHz/LSB
+ * Vectron C4550  — Kv = 10.00 Hz/V, EFC range: ±20 Hz (40 Hz, symmetric)
+ *                  PWM-accessible: −20 to +13.00 Hz (33.00 Hz), 0.504 mHz/LSB
+ *
+ * Scale factor Vectron/CTI = 1.333 — Vectron gains = CTI × 0.75
+ * All parameters can be overridden at runtime via CLI (KP/KI/KD/IL).
+ * ──────────────────────────────────────────────────────────────────── */
+//#define GPSDO_OCXO_CTI_OSC5A2B02     /* CTI OSC5A2B02  10 MHz OCXO  (DIP, HCMOS) */
+#define GPSDO_OCXO_VECTRON_C4550     /* Vectron C4550A1-0213  10 MHz OCXO  (SMD, HCMOS) */
+
+#if defined(GPSDO_OCXO_CTI_OSC5A2B02) && defined(GPSDO_OCXO_VECTRON_C4550)
+  #error "Select only one OCXO: GPSDO_OCXO_CTI_OSC5A2B02 or GPSDO_OCXO_VECTRON_C4550"
+#endif
+
+/* ── Default PWM ─────────────────────────────────────────────────────
+ *
+ * PWM DAC output range: 0..3.3 V (STM32 Vcc).
+ * EFC input range of both OCXOs: 0..4 V — only 0..3.3 V is accessible.
+ *
+ * CTI OSC5A2B02  — nominal 0-Hz point ≈ 1.33 V (asymmetric -1/+2 ppm),
+ *                  unit-to-unit variance is significant; calibration
+ *                  corrects automatically. Safe start: 1.65 V midpoint.
+ *                  → DEFAULT_PWM = 32767  (1.65 V = midpoint 0..3.3 V)
+ *
+ * Vectron C4550  — nominal 0-Hz point = 2.00 V (symmetric ±2 ppm),
+ *                  within accessible 0..3.3 V PWM range.
+ *                  → DEFAULT_PWM = 39718  (2.00 V)
+ *
+ * Accessible tuning ranges (limited by 3.3 V PWM max):
+ *   CTI:     −10 Hz (0 V) to +14.75 Hz (3.3 V) — 24.75 Hz of 30 Hz total
+ *   Vectron: −20 Hz (0 V) to +13.00 Hz (3.3 V) — 33.00 Hz of 40 Hz total
+ * ──────────────────────────────────────────────────────────────────── */
+#if defined(GPSDO_OCXO_VECTRON_C4550)
+  #define DEFAULT_PWM_OUTPUT  39718u   /* Vectron: 0-Hz nominal at 2.00 V */
+#else
+  #define DEFAULT_PWM_OUTPUT  32767u   /* CTI:     safe midpoint at 1.65 V */
+#endif
 
 /* ── RTOS task priorities ────────────────────────────────────────────── */
 #define PRI_ISR_RELAY    (configMAX_PRIORITIES - 1)

@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.25
+# GPSDO FreeRTOS v0.28
 
 Real-time (FreeRTOS) firmware for a GPS-Disciplined Oscillator (GPSDO)
 on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
@@ -234,11 +234,15 @@ Commands terminated by `\r\n` or `\n`.
 |---------|-------------|
 | `H` | Display help |
 | `V` | Version, authors and GitHub links |
+| `F` | Flush frequency ring buffers (restart averaging) |
+| `C` | Start auto-calibration sequence |
+| `T` | GPS tunnel mode — pass-through to GPS UART (exits after 300 s) |
+| `SP <n>` | Set PWM DAC directly (1–65535), bypasses algorithm |
 | `RH` | Report mode: human-readable (default) |
 | `RD` | Report mode: tab-delimited |
-| `RP` | Pause serial/BT reports |
-| `RR` | Resume serial/BT reports |
-| `SW` | FreeRTOS stack diagnostics |
+| `RP` | Pause serial/BT data stream |
+| `RR` | Resume serial/BT data stream |
+| `SW` | FreeRTOS task stack watermarks (diagnostics) |
 
 ### Control
 
@@ -294,6 +298,36 @@ EEPROM (emulated in STM32 Flash) stores 142 bytes:
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
 | 134–137 | 4 B | g_pressure_offset (PO command) |
 | 138–141 | 4 B | g_altitude_offset (AO command) |
+
+---
+
+## Supported OCXOs
+
+Two 10 MHz oscillators are supported with factory-tuned PID coefficients.
+Select one in `gpsdo_config.h`; all parameters can still be adjusted at runtime via CLI.
+
+| Parameter | CTI OSC5A2B02 | Vectron C4550A1-0213 |
+|-----------|--------------|---------------------|
+| Supply voltage | 5 V | 5 V |
+| EFC input range | 0 – 4.0 V | 0 – 4.0 V |
+| PWM-accessible range | 0 – 3.3 V | 0 – 3.3 V |
+| Full tuning range | −10 / +20 Hz (30 Hz) | ±20 Hz (40 Hz) |
+| Accessible tuning | −10 to +14.75 Hz (24.75 Hz) | −20 to +13 Hz (33 Hz) |
+| EFC gain Kv | 7.50 Hz/V | 10.00 Hz/V |
+| Sensitivity/LSB | 0.378 mHz/LSB | 0.504 mHz/LSB |
+| Default PWM | 32767 (~1.65 V) | 39718 (~2.0 V) |
+| Nominal EFC (0 Hz) | ~1.33 V (unit-dependent) | 2.00 V (symmetric) |
+| Stability | ±10 ppb | ±10 ppb (SC cut) |
+| Current (warm) | ~250 mA | ~200 mA |
+| Phase noise @ 10 Hz | −120 dBc/Hz | −120 dBc/Hz |
+| Crystal cut | AT | SC |
+| Package | DIP-5 | SMD (11.25 × 12.7 mm) |
+| Output | HCMOS 5 V | HCMOS 5 V |
+
+The STM32 PWM DAC is limited to 0–3.3 V (Vcc), so only 82.5% of the 0–4 V EFC
+range is accessible. The Vectron has 1.33× higher sensitivity (10 vs 7.5 Hz/V);
+its PID gains are scaled by 0.75. CTI default PWM starts at the accessible midpoint
+(1.65 V); Vectron starts at its exact nominal (2.0 V). Calibration corrects both.
 
 ---
 

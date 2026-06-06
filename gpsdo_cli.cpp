@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.25
+ * Part of GPSDO FreeRTOS v0.28
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -84,14 +84,20 @@ extern void eeprom_erase(void);
  * ----------------------------------------------------------------------- */
 static void print_help(void)
 {
-    cli_putln(PROGRAM_NAME " " PROGRAM_VERSION " by " AUTHOR_NAME);
+    cli_putln(PROGRAM_NAME " " PROGRAM_VERSION);
+    cli_putln("FreeRTOS port by J. M. Niewinski");
+    cli_putln("https://github.com/jmnlabs/GPSDO_FreeRTOS");
+    cli_putln("Programming assistant: Claude AI (Anthropic)");
+    cli_putln("Based on GPSDO v0.06c by " AUTHOR_NAME);
+    cli_putln("https://github.com/AndrewBCN/STM32-GPSDO");
+    cli_putln("PCB design: Scrachi (EEVBlog forum)");
     cli_putln("Commands (case-sensitive, end with Enter):");
     cli_putln("  V           Version, authors and links");
     cli_putln("  H / ?       this help");
-    cli_putln("  F           flush ring buffers");
-    cli_putln("  C           start auto-calibration");
-    cli_putln("  T           GPS tunnel mode (exits after 300s)");
-    cli_putln("  SP <n>      set PWM (1-65535)");
+    cli_putln("  F           Flush frequency ring buffers");
+    cli_putln("  C           start auto-Calibration");
+    cli_putln("  T           GPS Tunnel mode (exits after 300s)");
+    cli_putln("  SP <n>      Set PWM DAC directly (1-65535)");
     cli_putln("  up1 / up10  increase PWM by 1 / 10");
     cli_putln("  dp1 / dp10  decrease PWM by 1 / 10");
     cli_putln("  RH / RD     Human readable / Tab Delimited reporting");

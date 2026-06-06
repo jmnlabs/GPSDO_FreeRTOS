@@ -1,7 +1,7 @@
 /**
  * GPSDO_algorithms.cpp — Control loop algorithm implementations
  *
- * Part of GPSDO FreeRTOS v0.25
+ * Part of GPSDO FreeRTOS v0.28
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -24,6 +24,7 @@
  */
 
 #include "GPSDO_algorithms.h"
+#include "gpsdo_config.h"
 #include "gpsdo_state.h"
 #include <string.h>
 #include <math.h>
@@ -74,26 +75,71 @@ static void set_trend(const char *s)
 /* ======================================================================
  * RUNTIME-TUNABLE PARAMETERS
  *
- * Defaults match the original const values. Modified via CLI commands
- * KP/KI/KD/IL (algos 3-7), BC/BS (algo 8 blend), NS (algo 9 NN).
- * Indices 0-2 are unused (original algos have no PID coefficients).
+ * Compile-time defaults depend on the OCXO selected in gpsdo_config.h.
+ * All values can be overridden at runtime via CLI (KP/KI/KD/IL/BC/BS/NS)
+ * and persisted to EEPROM with ES.
+ *
+ * Physical basis for the two supported OCXOs:
+ *   CTI OSC5A2B02   — supply 5V, EFC 0..4V, Kv = 7.50  Hz/V, Δf = 30 Hz, 0.378 mHz/LSB
+ *   Vectron C4550   — supply 5V, EFC 0..4V, Kv = 10.00 Hz/V, Δf = 40 Hz, 0.504 mHz/LSB
+ * Scale factor Vectron/CTI = 1.333 → Vectron gains = CTI × 0.75
+ *
+ * PWM DAC: 16-bit, Vcc = 3.3 V, 1 LSB = 50.35 µV
  * ====================================================================== */
-PidParams_t g_pid[10] = {
-    /* [0] */  { 0.0,    0.0,     0.0,      0.0    },
-    /* [1] */  { 0.0,    0.0,     0.0,      0.0    },
-    /* [2] */  { 0.0,    0.0,     0.0,      0.0    },
-    /* [3] */  { 80.0,   0.8,     200.0,    10000.0 },  /* FLL PID manual */
-    /* [4] */  { 30.0,   0.003,   0.0,      8000.0  },  /* PLL PI manual (no D) */
-    /* [5] */  { 40.0,   0.01,    800.0,    12000.0 },  /* PLL PID manual */
-    /* [6] */  { 234.0,  0.301,   17082.0,  15000.0 },  /* FLL PID genetic */
-    /* [7] */  { 70.0,   0.181,   2548.0,   12000.0 },  /* PLL PID genetic */
-    /* [8] */  { 0.0,    0.0,     0.0,      15000.0 },  /* hybrid: uses [6]+[7] */
-    /* [9] */  { 0.0,    0.0,     0.0,      500.0   },  /* NN: I_LIMIT = I_SCALE */
-};
 
-double g_blend_crossover = 0.02;    /* algo 8: sigmoid centre (Hz) */
-double g_blend_scale     = 0.01;    /* algo 8: sigmoid width  (Hz) */
-double g_nn_max_step     = 200.0;   /* algo 9: max delta PWM per step (LSB) */
+/* ---- CTI OSC5A2B02 defaults ---------------------------------------- */
+#if defined(GPSDO_OCXO_CTI_OSC5A2B02) || !defined(GPSDO_OCXO_VECTRON_C4550)
+PidParams_t g_pid[10] = {
+    /* [0] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [1] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [2] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [3]  FLL PID manual     Kv=7.50 Hz/V */
+               { 80.0,   0.80,     200.0,     10000.0 },
+    /* [4]  PLL PI  manual                   */
+               { 30.0,   0.003,    0.0,       8000.0  },
+    /* [5]  PLL PID manual                   */
+               { 40.0,   0.010,    800.0,     12000.0 },
+    /* [6]  FLL PID genetic                  */
+               { 234.0,  0.301,    17082.0,   15000.0 },
+    /* [7]  PLL PID genetic                  */
+               { 70.0,   0.181,    2548.0,    12000.0 },
+    /* [8]  hybrid (uses [6]+[7]) IL only    */
+               { 0.0,    0.0,      0.0,       15000.0 },
+    /* [9]  NN  I_LIMIT = normalisation bound */
+               { 0.0,    0.0,      0.0,       500.0   },
+};
+double g_blend_crossover = 0.020;   /* Hz — sigmoid centre */
+double g_blend_scale     = 0.010;   /* Hz — sigmoid width  */
+double g_nn_max_step     = 200.0;   /* LSB — max PWM delta  */
+
+/* ---- Vectron C4550A1-0213 defaults --------------------------------- */
+#elif defined(GPSDO_OCXO_VECTRON_C4550)
+/* Supply: 5V, EFC: 0..4V, SC cut, ±2 ppm, Kv = 10.00 Hz/V
+ * Scale factor vs CTI = 10.00/7.50 = 1.333 → gains = CTI × 0.75
+ * DEFAULT_PWM = 39718 (~2.0V) same as CTI (identical EFC range)       */
+PidParams_t g_pid[10] = {
+    /* [0] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [1] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [2] */  { 0.0,    0.0,      0.0,       0.0     },
+    /* [3]  FLL PID manual     Kv=10.00 Hz/V */
+               { 60.0,   0.60,     150.0,     7500.0  },
+    /* [4]  PLL PI  manual                   */
+               { 22.5,   0.00225,  0.0,       6000.0  },
+    /* [5]  PLL PID manual                   */
+               { 30.0,   0.0075,   600.0,     9000.0  },
+    /* [6]  FLL PID genetic                  */
+               { 175.5,  0.226,    12812.0,   11250.0 },
+    /* [7]  PLL PID genetic                  */
+               { 52.5,   0.136,    1911.0,    9000.0  },
+    /* [8]  hybrid (uses [6]+[7]) IL only    */
+               { 0.0,    0.0,      0.0,       11250.0 },
+    /* [9]  NN                               */
+               { 0.0,    0.0,      0.0,       375.0   },
+};
+double g_blend_crossover = 0.027;   /* Hz — wider range → higher crossover */
+double g_blend_scale     = 0.013;
+double g_nn_max_step     = 150.0;   /* LSB — smaller step for higher sensitivity */
+#endif
 
 /* ======================================================================
  * ALGORITHM DISPATCHER

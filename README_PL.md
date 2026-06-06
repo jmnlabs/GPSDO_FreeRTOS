@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.25
+# GPSDO FreeRTOS v0.28
 
 Firmware czasu rzeczywistego (FreeRTOS) dla oscylatora sterowanego GPS (GPSDO)
 na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
@@ -234,11 +234,15 @@ Komendy zakończone `\r\n` lub `\n`.
 |---------|------|
 | `H` | Wyświetl pomoc |
 | `V` | Wersja, autorzy i linki GitHub |
+| `F` | Wyczyść bufory kołowe częstotliwości (restart uśredniania) |
+| `C` | Uruchom sekwencję auto-kalibracji |
+| `T` | Tryb tunelu GPS — przepuszczenie UART GPS (wyłącza się po 300 s) |
+| `SP <n>` | Ustaw PWM DAC bezpośrednio (1–65535), omija algorytm |
 | `RH` | Tryb raportowania: czytelny (domyślny) |
 | `RD` | Tryb raportowania: rozdzielany tabulatorem |
-| `RP` | Wstrzymaj raporty serial/BT |
-| `RR` | Wznów raporty serial/BT |
-| `SW` | Diagnostyka stosów FreeRTOS |
+| `RP` | Wstrzymaj strumień danych serial/BT |
+| `RR` | Wznów strumień danych serial/BT |
+| `SW` | Diagnostyka stosów zadań FreeRTOS |
 
 ### Sterowanie
 
@@ -294,6 +298,37 @@ EEPROM (emulowane w pamięci Flash STM32) przechowuje 142 bajty:
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
 | 134–137 | 4 B | g_pressure_offset (komenda PO) |
 | 138–141 | 4 B | g_altitude_offset (komenda AO) |
+
+---
+
+## Obsługiwane oscylatory OCXO
+
+Firmware wspiera dwa oscylatory 10 MHz z fabrycznymi współczynnikami PID.
+Wybierz jeden w `gpsdo_config.h`; parametry można zmienić w czasie pracy przez CLI.
+
+| Parametr | CTI OSC5A2B02 | Vectron C4550A1-0213 |
+|----------|--------------|---------------------|
+| Napięcie zasilania | 5 V | 5 V |
+| Zakres wejścia EFC | 0 – 4,0 V | 0 – 4,0 V |
+| Zakres dostępny z PWM | 0 – 3,3 V | 0 – 3,3 V |
+| Pełny zakres dostrajania | −10 / +20 Hz (30 Hz) | ±20 Hz (40 Hz) |
+| Dostępny zakres (PWM) | −10 do +14,75 Hz (24,75 Hz) | −20 do +13 Hz (33 Hz) |
+| Czułość EFC Kv | 7,50 Hz/V | 10,00 Hz/V |
+| Czułość/LSB | 0,378 mHz/LSB | 0,504 mHz/LSB |
+| Domyślny PWM | 32767 (~1,65 V) | 39718 (~2,0 V) |
+| Nom. EFC (0 Hz) | ~1,33 V (zależy od egzemplarza) | 2,00 V (symetrycznie) |
+| Stabilność | ±10 ppb | ±10 ppb (kryształ SC) |
+| Prąd (po rozgrzaniu) | ~250 mA | ~200 mA |
+| Szum fazowy @ 10 Hz | −120 dBc/Hz | −120 dBc/Hz |
+| Rodzaj kryształu | AT | SC |
+| Obudowa | DIP-5 | SMD (11,25 × 12,7 mm) |
+| Wyjście | HCMOS 5 V | HCMOS 5 V |
+
+PWM DAC STM32 jest ograniczony do 0–3,3 V (Vcc), więc dostępne jest tylko 82,5%
+zakresu EFC 0–4 V. Vectron ma 1,33× wyższą czułość (10 vs 7,5 Hz/V), a jego
+wzmocnienia PID są przeskalowane przez 0,75. CTI startuje od środka dostępnego
+zakresu (1,65 V); Vectron od dokładnej wartości nominalnej (2,0 V). Kalibracja
+koryguje obie wartości automatycznie.
 
 ---
 

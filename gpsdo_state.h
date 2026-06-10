@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO FreeRTOS v0.28
+ * Part of GPSDO FreeRTOS v0.29
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa

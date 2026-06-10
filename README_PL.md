@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.28
+# GPSDO FreeRTOS v0.29
 
 Firmware czasu rzeczywistego (FreeRTOS) dla oscylatora sterowanego GPS (GPSDO)
 na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
@@ -208,6 +208,45 @@ Holdover na linii 3: `[H]` (ręczny) lub `[A]` (automatyczny) — blink 500 ms.
 
 ---
 
+## Synchronizacja picDIV
+
+Opcjonalny picDIV (rodzina PD11/PD13/PD17 Toma Van Baaka, leapsecond.com)
+dzieli 10 MHz z OCXO do czystego wyjścia 1PPS z jitterem <2 ps.
+STM32 steruje pinem Arm (PB3); GPS 1PPS jest podłączony sprzętowo
+bezpośrednio do pinu Sync.
+
+**Sekwencja uzbrojenia** (komenda `AP`):
+
+1. STM32 ściąga Arm do LOW — wyjście dividera zatrzymuje się
+2. Arm trzymany LOW przez 1,0–1,2 s (specyfikacja wymaga >1 s)
+3. STM32 zwalnia Arm (HIGH)
+4. Divider startuje zsynchronizowany z najbliższym zboczem narastającym GPS 1PPS
+
+Uzbrojenie jest odraczane gdy brak fixa GPS — bez zbocza 1PPS na Sync
+divider pozostałby zatrzymany z martwym wyjściem.
+
+**Synchronizacja długoterminowa — ważne:**
+
+Wyjście picDIV jest spójne fazowo z **OCXO**, nie z GPS.
+Zachowanie po uzbrojeniu zależy od aktywnego algorytmu:
+
+| Typ algorytmu | Częstotliwość | Faza | Zachowanie picDIV |
+|--------------|---------------|------|-------------------|
+| FLL (0, 3, 6, 8*) | ograniczona | random walk | 1PPS powoli dryfuje od GPS |
+| PLL (4, 5, 7) | ograniczona | ograniczona | 1PPS pozostaje zgrany z GPS |
+
+*Algorytm 8 działa jak FLL przy dużych błędach, PLL blisko locka.
+
+FLL zeruje tylko średni błąd częstotliwości; każda mała resztka całkuje
+się do fazy, więc 1PPS picDIV wykonuje random walk względem GPS
+(typowo µs/dzień przy średnim błędzie 1e-11). Jeśli długoterminowe
+zgranie 1PPS ma znaczenie — używaj algorytmu PLL (`LA 4`, `LA 5` lub
+`LA 7`) albo okresowo ponawiaj uzbrojenie (`AP`). Uzbrajaj dopiero gdy
+pętla zgłosi lock (trend `hit`) — uzbrojenie w trakcie zbiegania
+natychmiast rozpoczyna dryf fazy.
+
+---
+
 ## Automatyczny holdover
 
 Gdy GPS traci fix podczas normalnej pracy (np. odłączenie anteny):
@@ -251,7 +290,7 @@ Komendy zakończone `\r\n` lub `\n`.
 | `MH` | Włącz tryb holdover (ręczny) |
 | `MD` | Włącz tryb dyscyplinowany |
 | `LA [0-9]` | Wybierz / pokaż algorytm sterowania |
-| `AP` | Włącz sekwencję picDIV |
+| `AP` | Uzbrój picDIV — zatrzymuje wyjście na 1,0–1,2 s, resynchronizuje z GPS 1PPS |
 
 ### Dostrajanie algorytmów
 

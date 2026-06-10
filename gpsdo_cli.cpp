@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.28
+ * Part of GPSDO FreeRTOS v0.2
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -84,13 +84,7 @@ extern void eeprom_erase(void);
  * ----------------------------------------------------------------------- */
 static void print_help(void)
 {
-    cli_putln(PROGRAM_NAME " " PROGRAM_VERSION);
-    cli_putln("FreeRTOS port by J. M. Niewinski");
-    cli_putln("https://github.com/jmnlabs/GPSDO_FreeRTOS");
-    cli_putln("Programming assistant: Claude AI (Anthropic)");
-    cli_putln("Based on GPSDO v0.06c by " AUTHOR_NAME);
-    cli_putln("https://github.com/AndrewBCN/STM32-GPSDO");
-    cli_putln("PCB design: Scrachi (EEVBlog forum)");
+    cli_putln(PROGRAM_NAME " " PROGRAM_VERSION " by " AUTHOR_NAME);
     cli_putln("Commands (case-sensitive, end with Enter):");
     cli_putln("  V           Version, authors and links");
     cli_putln("  H / ?       this help");
@@ -233,8 +227,13 @@ static void dispatch(char *line)
 
     /* ---- arm picDIV ---- */
     if (strcmp(verb, "AP") == 0) {
+#ifdef GPSDO_PICDIV
         xEventGroupSetBits(xSysEvents, EVT_ARM_PICDIV);
-        cli_putln("picDIV arm requested");
+        cli_putln("picDIV arm requested (1.0-1.2s output gap, then syncs to 1PPS)");
+        cli_putln("Note: use a PLL algorithm (LA 4/5/7) to keep phase locked long-term");
+#else
+        cli_putln("picDIV support not compiled in (GPSDO_PICDIV)");
+#endif
         return;
     }
 

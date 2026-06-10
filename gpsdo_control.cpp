@@ -1,7 +1,7 @@
 /**
  * gpsdo_control.cpp — vControlTask — OCXO control loop
  *
- * Part of GPSDO FreeRTOS v0.28
+ * Part of GPSDO FreeRTOS v0.29
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,9 @@ bool   g_show_local_time = true;
 bool   g_report_paused  = false;
 
 /* picDIV arm sequencing */
-static uint32_t s_arm_started_ms = 0;
+static uint32_t s_arm_started_ms  = 0;     /* timestamp of arm LOW edge      */
+static bool     s_arm_active      = false; /* true while Arm pin is held LOW */
+static bool     s_arm_wait_warned = false; /* one-shot no-fix warning        */
 
 /* Simple integer moving average (N=10) without heap alloc */
 typedef struct {
@@ -114,9 +116,15 @@ static void do_calibration(void)
     }
 
     xEventGroupClearBits(xSysEvents, EVT_NEED_CALIBRATION);
-    xEventGroupSetBits(xSysEvents, EVT_ARM_PICDIV);
 
+    /* Do NOT auto-arm the picDIV here: the discipline loop has not yet
+     * converged after calibration, so the OCXO frequency still carries an
+     * error and the picDIV phase would immediately start drifting from
+     * GPS.  Arm manually (AP command) once the loop reports lock.        */
     OUT_SERIAL.println("Calibration done");
+#ifdef GPSDO_PICDIV
+    OUT_SERIAL.println("Tip: arm picDIV (AP) after the loop locks (trend 'hit')");
+#endif
 }
 
 /* ---- OCXO warmup ------------------------------------------------------ */
@@ -154,19 +162,55 @@ void vControlTask(void *pvParameters)
         if (xEventGroupGetBits(xSysEvents) & EVT_NEED_CALIBRATION)
             do_calibration();
 
-        /* picDIV arm sequence */
+        /* ---- picDIV arm sequence ----------------------------------------
+         *
+         * Per picDIV spec (PD11/PD13/PD17): holding Arm (pin 4) LOW for
+         * >1 s stops the divider; it then synchronizes its output to the
+         * next rising edge of Sync (pin 5), which is wired to GPS 1PPS.
+         *
+         * Critical conditions checked here:
+         *  1. GPS fix must be present — with no 1PPS on Sync the divider
+         *     stays stopped forever (dead output).  Arming is deferred
+         *     until fix returns (event bit stays set).
+         *  2. A dedicated bool flag (not the timestamp) tracks the pulse,
+         *     avoiding a stuck-LOW edge case at millis() wrap.
+         *  3. Arm LOW duration: PICDIV_ARM_MS (1001 ms) checked on a
+         *     200 ms loop → actual LOW time 1.0–1.2 s, per spec.
+         *
+         * NOTE on long-term sync: the picDIV output is phase-coherent
+         * with the OCXO, not with GPS.  FLL algorithms (0,3,6) bound only
+         * frequency — phase performs a random walk and the picDIV 1PPS
+         * slowly drifts from GPS 1PPS.  Use a PLL algorithm (4,5,7) to
+         * bound phase, or re-arm (AP) when drift accumulates.
+         * ---------------------------------------------------------------- */
+#ifdef GPSDO_PICDIV
         if (xEventGroupGetBits(xSysEvents) & EVT_ARM_PICDIV) {
-#ifdef GPSDO_PICDIV
-            digitalWrite(PIN_PICDIV_ARM, LOW);
-            s_arm_started_ms = millis();
-            xEventGroupClearBits(xSysEvents, EVT_ARM_PICDIV);
-#endif
+            bool fix_ok = false;
+            if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                fix_ok = gGps.pos_valid;
+                xSemaphoreGive(xGpsMutex);
+            }
+            if (fix_ok && !s_arm_active) {
+                digitalWrite(PIN_PICDIV_ARM, LOW);
+                s_arm_active     = true;
+                s_arm_started_ms = millis();
+                xEventGroupClearBits(xSysEvents, EVT_ARM_PICDIV);
+                OUT_SERIAL.println("picDIV: armed (output stopped, waiting for 1PPS sync)");
+            } else if (!fix_ok && !s_arm_wait_warned) {
+                s_arm_wait_warned = true;   /* warn once, keep event bit set */
+                OUT_SERIAL.println("picDIV: no GPS fix - arming deferred until fix");
+            }
         }
-#ifdef GPSDO_PICDIV
-        if (s_arm_started_ms > 0 && (millis() - s_arm_started_ms) > PICDIV_ARM_MS) {
+        if (s_arm_active && (millis() - s_arm_started_ms) > PICDIV_ARM_MS) {
             digitalWrite(PIN_PICDIV_ARM, HIGH);
-            s_arm_started_ms = 0;
+            s_arm_active      = false;
+            s_arm_wait_warned = false;
+            OUT_SERIAL.println("picDIV: arm released - output syncs on next 1PPS edge");
         }
+#else
+        /* No picDIV support compiled in — just clear the request */
+        if (xEventGroupGetBits(xSysEvents) & EVT_ARM_PICDIV)
+            xEventGroupClearBits(xSysEvents, EVT_ARM_PICDIV);
 #endif
 
         /* ---- ADC readings ---- */

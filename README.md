@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.28
+# GPSDO FreeRTOS v0.29
 
 Real-time (FreeRTOS) firmware for a GPS-Disciplined Oscillator (GPSDO)
 on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
@@ -208,6 +208,45 @@ Holdover on line 3: `[H]` (manual) or `[A]` (automatic) — 500 ms blink.
 
 ---
 
+## picDIV synchronization
+
+The optional picDIV (PD11/PD13/PD17 family by Tom Van Baak, leapsecond.com)
+divides the OCXO 10 MHz down to a clean 1PPS output with <2 ps jitter.
+The STM32 controls its Arm pin (PB3); the GPS 1PPS drives its Sync pin
+directly in hardware.
+
+**Arm sequence** (`AP` command):
+
+1. STM32 pulls Arm LOW — divider output stops
+2. Arm held LOW for 1.0–1.2 s (spec requires >1 s)
+3. STM32 releases Arm (HIGH)
+4. Divider restarts synchronized to the next GPS 1PPS rising edge
+
+Arming is refused (deferred) when there is no GPS fix — without a 1PPS
+edge on Sync the divider would stay stopped with a dead output.
+
+**Long-term synchronization — important:**
+
+The picDIV output is phase-coherent with the **OCXO**, not with GPS.
+What happens after arming depends on the active control algorithm:
+
+| Algorithm type | Frequency | Phase | picDIV behaviour |
+|---------------|-----------|-------|-----------------|
+| FLL (0, 3, 6, 8*) | bounded | random walk | 1PPS slowly drifts from GPS |
+| PLL (4, 5, 7) | bounded | bounded | 1PPS stays aligned with GPS |
+
+*Algorithm 8 behaves as FLL for large errors, PLL near lock.
+
+An FLL only zeroes the average frequency error; each small residual
+integrates into phase, so the picDIV 1PPS performs a random walk relative
+to GPS (typically µs/day at 1e-11 average error). If long-term 1PPS
+alignment matters, run a PLL algorithm (`LA 4`, `LA 5` or `LA 7`) or
+re-arm (`AP`) periodically. Arm only after the loop reports lock
+(trend `hit`) — arming during convergence starts the phase drift
+immediately.
+
+---
+
 ## Automatic holdover
 
 When GPS loses fix during normal operation (e.g. antenna disconnected):
@@ -251,7 +290,7 @@ Commands terminated by `\r\n` or `\n`.
 | `MH` | Enable holdover mode (manual) |
 | `MD` | Enable disciplined mode |
 | `LA [0-9]` | Select / show control algorithm |
-| `AP` | Arm picDIV sequence |
+| `AP` | Arm picDIV — stops output 1.0–1.2 s, resyncs to GPS 1PPS |
 
 ### Algorithm tuning
 

@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.28
+ * Part of GPSDO FreeRTOS v0.29
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -33,7 +33,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.28-rtos"
+#define PROGRAM_VERSION  "v0.29-rtos"
 
 /* ---- Serial output macro ----
  * When GPSDO_BLUETOOTH is defined, all user-facing output goes to Serial2.
@@ -51,14 +51,14 @@ extern "C" {
 /* ── OLED display type — select exactly one, or comment all out ──────── */
 //#define GPSDO_OLED_SH1106        /* SH1106  128x64 I2C — original hardware */
 //#define GPSDO_OLED_SSD1306       /* SSD1306 128x64 I2C                     */
-#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
+//#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
 
 /* ── LCD 20x4 I2C — independent of OLED, enable or comment out ──────── */
-//#define GPSDO_LCD_20x4     /* HD44780 20x4 via PCF8574T I2C expander */
+#define GPSDO_LCD_20x4     /* HD44780 20x4 via PCF8574T I2C expander */
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
-#define GPSDO_TM1637_6          /* 6-digit TM1637: HH:MM:SS               */
-//#define GPSDO_TM1637            /* 4-digit TM1637: HH:MM                  */
+//#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
+//#define GPSDO_TM1637             /* 4-digit TM1637: HH:MM                  */
 
 /* ── OLED page alternation: seconds per page ─────────────────────────── */
 #define OLED_PAGE_SWITCH_SECS   10u   /* flip between page A and B every N seconds */
@@ -90,7 +90,7 @@ extern "C" {
 
 #define GPSDO_PWM_DAC
 #define GPSDO_AHT10
-#define GPSDO_BMP280_I2C
+//#define GPSDO_BMP280_I2C
 #define GPSDO_INA219
 #define GPSDO_BLUETOOTH
 #define GPSDO_VCC

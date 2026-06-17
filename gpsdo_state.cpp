@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.cpp — Shared state instances and EEPROM helpers
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -12,7 +12,7 @@
  * primitives.  Provides eeprom_save(), eeprom_recall() and eeprom_erase()
  * for persistent storage of PWM, algorithm, time offset and PID parameters.
  *
- * EEPROM layout (134 bytes, signature "GPSD2"):
+ * EEPROM layout (144 bytes, signature "GPSD2"):
  *   [0..5]     signature (6 B)
  *   [6..7]     pwm_output (uint16_t big-endian)
  *   [8]        active_algo
@@ -21,6 +21,8 @@
  *   [122..133] g_blend_crossover, g_blend_scale, g_nn_max_step
  *   [134..137] g_pressure_offset (float)
  *   [138..141] g_altitude_offset (float)
+ *   [142]      g_tz_auto (0 = manual offset, 1 = auto from GPS)
+ *   [143]      g_svin_enabled (0 = survey-in off, 1 = on)  (v0.47+)
  */
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
@@ -74,7 +76,7 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_ALGO         8u   /* [8]     active_algo (0..9) */
 #define EE_TIME_OFFSET  9u   /* [9]     g_time_offset as uint8_t */
 
-/* PID parameters for algos 3-9 (v0.25+):
+/* PID parameters for algos 3-9 (v0.47+):
  *   7 algos × 4 floats (Kp,Ki,Kd,I_LIMIT) × 4 bytes = 112 bytes [10..121]
  *   Blend/NN params: 3 floats × 4 bytes = 12 bytes [122..133] */
 #define EE_PID_START    10u  /* g_pid[3..9] starts here */
@@ -83,7 +85,9 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_NN_MAX_STEP  130u /* g_nn_max_step as float */
 #define EE_PRESS_OFF    134u /* g_pressure_offset as float */
 #define EE_ALT_OFF      138u /* g_altitude_offset as float */
-/* Total used: 142 bytes (well within 1024-byte EEPROM page) */
+#define EE_TZ_AUTO      142u /* g_tz_auto (0=manual, 1=auto)  (v0.47+) */
+#define EE_SVIN_EN      143u /* g_svin_enabled (0=off, 1=on)  (v0.47+) */
+/* Total used: 144 bytes (well within 1024-byte EEPROM page) */
 
 /* ---- float ↔ EEPROM byte helpers ---- */
 static void ee_write_float(uint16_t addr, float val)
@@ -152,6 +156,8 @@ void eeprom_save(void)
     ee_write_float(EE_NN_MAX_STEP, (float)g_nn_max_step);
     ee_write_float(EE_PRESS_OFF,   g_pressure_offset);
     ee_write_float(EE_ALT_OFF,     g_altitude_offset);
+    eeprom_buffered_write_byte(EE_TZ_AUTO, g_tz_auto ? 1u : 0u);
+    eeprom_buffered_write_byte(EE_SVIN_EN, g_svin_enabled ? 1u : 0u);
 
     eeprom_buffer_flush();
     g_eeprom_valid = true;
@@ -232,6 +238,17 @@ void eeprom_recall(void)
         float ao = ee_read_float(EE_ALT_OFF);
         if (isfinite(po) && po >= -500.0f && po <= 5000.0f) g_pressure_offset = po;
         if (isfinite(ao) && ao >= -500.0f && ao <= 10000.0f) g_altitude_offset = ao;
+    }
+    {
+        /* tz_auto: only 0/1 are valid; 0xFF (fresh flash) → manual */
+        uint8_t tz = eeprom_buffered_read_byte(EE_TZ_AUTO);
+        g_tz_auto = (tz == 1u);
+    }
+    {
+        /* svin_enabled: 0xFF (fresh flash) → default ON, so timing modules
+         * still survey-in out of the box; explicit 0 disables it. */
+        uint8_t sv = eeprom_buffered_read_byte(EE_SVIN_EN);
+        g_svin_enabled = (sv != 0u);   /* 1 or 0xFF → on; 0 → off */
     }
 
     /* Apply PWM immediately to DAC */

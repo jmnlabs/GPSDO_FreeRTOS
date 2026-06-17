@@ -1,7 +1,7 @@
 /**
  * gpsdo_freq.cpp — vFreqRelayTask — frequency measurement processing
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa

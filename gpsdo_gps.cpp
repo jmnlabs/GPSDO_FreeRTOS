@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -21,6 +21,7 @@
 #include "gpsdo_state.h"
 #include <Arduino.h>
 #include <TinyGPS++.h>
+#include <string.h>
 
 static TinyGPSPlus gps;
 
@@ -196,6 +197,190 @@ static uint8_t ubx_reduce_nmea(void)
     flush_rx(150);
     return ok;
 }
+
+/* ======================================================================
+ * Survey-in / Time Mode for LEA-6T / LEA-M8T timing receivers
+ * ====================================================================== */
+#ifdef GPSDO_GPS_TIMING
+
+/* Start survey-in. The LEA-6T and LEA-M8T accept different Time Mode
+ * commands, so try each (both verified in u-center) and stop at the first
+ * ACK:
+ *   1. CFG-TMODE2 (0x06 0x3D), 28-byte payload  — LEA-M8T
+ *   2. CFG-TMODE  (0x06 0x1D), 28-byte payload  — LEA-6T (u-blox 6)
+ * Returns true on the first ACK. Caller logs which (if any) succeeded. */
+static bool ubx_start_survey_in(void)
+{
+    const uint32_t dur = GPSDO_SVIN_MIN_SECS;     /* seconds */
+    const uint32_t acc = GPSDO_SVIN_ACC_LIMIT;    /* mm      */
+
+    /* ---- Variant 1: CFG-TMODE2 (0x3D), 28-byte payload (LEA-M8T) ----
+     * timeMode u1@0, reserved1 u1@1, flags u2@2, ecef/lat i4@4..15,
+     * fixedPosAcc u4@16, svinMinDur u4@20, svinAccLimit u4@24. */
+    {
+        uint8_t m[8 + 28];
+        memset(m, 0, sizeof(m));
+        m[0]=0xB5; m[1]=0x62; m[2]=0x06; m[3]=0x3D; m[4]=28; m[5]=0x00;
+        m[6+0]=0x01;            /* timeMode = 1 (survey-in) */
+        m[6+20]=dur&0xFF; m[6+21]=(dur>>8)&0xFF; m[6+22]=(dur>>16)&0xFF; m[6+23]=(dur>>24)&0xFF;
+        m[6+24]=acc&0xFF; m[6+25]=(acc>>8)&0xFF; m[6+26]=(acc>>16)&0xFF; m[6+27]=(acc>>24)&0xFF;
+        ubx_cksum(m, sizeof(m));
+        send_ubx(m, sizeof(m));
+        if (get_ubx_ack(m, 1500) == +1) {
+            OUT_SERIAL.println("LEA-T: accepted CFG-TMODE2 (28B)");
+            return true;
+        }
+    }
+    flush_rx(150);
+
+    /* ---- Variant 2: CFG-TMODE (0x1D), 28-byte payload (LEA-6T) ----
+     * u-blox 6 original Time Mode: timeMode u4@0 (note: u4, not u1+flags),
+     * fixedPosX i4@4, fixedPosY i4@8, fixedPosZ i4@12, fixedPosVar u4@16,
+     * svinMinDur u4@20, svinAccLimit u4@24. timeMode=1 = survey-in. */
+    {
+        uint8_t m[8 + 28];
+        memset(m, 0, sizeof(m));
+        m[0]=0xB5; m[1]=0x62; m[2]=0x06; m[3]=0x1D; m[4]=28; m[5]=0x00;
+        m[6+0]=0x01; m[6+1]=0x00; m[6+2]=0x00; m[6+3]=0x00;  /* timeMode u4 = 1 */
+        m[6+20]=dur&0xFF; m[6+21]=(dur>>8)&0xFF; m[6+22]=(dur>>16)&0xFF; m[6+23]=(dur>>24)&0xFF;
+        m[6+24]=acc&0xFF; m[6+25]=(acc>>8)&0xFF; m[6+26]=(acc>>16)&0xFF; m[6+27]=(acc>>24)&0xFF;
+        ubx_cksum(m, sizeof(m));
+        send_ubx(m, sizeof(m));
+        if (get_ubx_ack(m, 1500) == +1) {
+            OUT_SERIAL.println("LEA-T: accepted CFG-TMODE (0x1D, 28B)");
+            return true;
+        }
+    }
+    flush_rx(150);
+
+    return false;   /* none ACKed — caller falls back to monitoring */
+}
+
+
+/* Poll TIM-SVIN (0x0D 0x04) and parse the survey-in status.
+ * Fills *dur [s], *acc_mm, *valid, *active. Returns true if a TIM-SVIN
+ * frame was decoded. Used by both LEA-6T and LEA-M8T (28-byte payload,
+ * confirmed in u-center: B5 62 0D 04 1C 00 ...). */
+static bool ubx_poll_svin(uint32_t *dur, uint32_t *acc_mm,
+                          bool *valid, bool *active)
+{
+    const uint8_t cls = 0x0D, id = 0x04;   /* TIM-SVIN, 28-byte payload */
+    uint8_t poll[8] = { 0xB5,0x62, cls, id, 0,0, 0,0 };
+    ubx_cksum(poll, sizeof(poll));
+    send_ubx(poll, sizeof(poll));
+
+    /* Read the response with a yielding window. The previous (pre-v0.47)
+     * version waited up to 1000 ms with a busy delay(), which starved the
+     * display task. This version yields with vTaskDelay() between reads, so
+     * the display task keeps running even though the window is generous
+     * enough (~500 ms) to reliably catch the module's TIM-SVIN reply (its
+     * response latency can be 100-200 ms). Non-UBX bytes (NMEA) seen while
+     * scanning are forwarded to TinyGPS++ so the position fix is not
+     * disrupted by polling. */
+    uint8_t buf[44]; uint8_t n = 0;
+    int state = 0;
+    const uint8_t MAX_SLICES = 50;          /* 50 × 10 ms = 500 ms cap */
+    for (uint8_t slice = 0; slice < MAX_SLICES; slice++) {
+        while (Serial1.available()) {
+            uint8_t b = Serial1.read();
+            if (state == 0) { if (b == 0xB5) state = 1; else gps.encode(b); }
+            else if (state == 1) { state = (b == 0x62) ? 2 : 0; }
+            else if (state == 2) { state = (b == cls) ? 3 : 0; }
+            else if (state == 3) { state = (b == id) ? 4 : 0; n = 0; }
+            else { if (n < sizeof(buf)) buf[n++] = b;
+                   if (n >= sizeof(buf)) goto done; }
+        }
+        if (n >= 28) break;                 /* full payload already in */
+        vTaskDelay(pdMS_TO_TICKS(10));      /* yield — does NOT starve displays */
+    }
+done:
+    if (n < 28) return false;
+    /* TIM-SVIN payload (buf[0..1] = length, payload starts at buf[2]):
+     *   dur(u4)@0, meanX/Y/Z(i4)@4..15, meanV(u4)@16, obs(u4)@20,
+     *   valid(u1)@24, active(u1)@25.
+     * meanV is the position VARIANCE in mm² — take the square root to get a
+     * 1-sigma accuracy in mm. Early in the survey the receiver reports
+     * 0xFFFFFFFF ("no estimate yet"); we clamp that to 65535 mm. */
+    *dur    = buf[2+0] | (buf[2+1]<<8) | (buf[2+2]<<16) | ((uint32_t)buf[2+3]<<24);
+    uint32_t meanV = buf[2+16]| (buf[2+17]<<8)| (buf[2+18]<<16)| ((uint32_t)buf[2+19]<<24);
+    /* integer sqrt (Newton) — meanV up to ~4e9 fits in u32 */
+    uint32_t r = meanV, x = (meanV >> 1) + 1;
+    if (meanV > 1) { while (x < r) { r = x; x = (meanV / x + x) >> 1; } }
+    else           { r = meanV; }
+    if (r > 65535u) r = 65535u;
+    *acc_mm = r;                    /* sqrt(variance) = 1-sigma accuracy [mm] */
+    *valid  = buf[2+24] != 0;
+    *active = buf[2+25] != 0;
+    return true;
+}
+
+
+/* Non-blocking survey-in monitor — called periodically from vGpsTask AFTER
+ * the scheduler is running. Polls TIM-SVIN once and updates the display
+ * state. Clears g_svin_pending / g_svin_active when survey-in completes or
+ * a safety deadline passes. Called from vGpsTask (scheduler running); the
+ * underlying poll yields with vTaskDelay during its short read window, so
+ * it does not starve the display task. */
+static void ubx_poll_svin_step(void)
+{
+    static uint32_t svin_deadline = 0;
+    static uint8_t  no_reply = 0;
+    if (svin_deadline == 0) {
+        /* Safety backstop tied to the configured minimum: 3 × SVIN_MIN, but
+         * never less than 600 s, so a slow-converging survey (weak signal /
+         * small antenna) is given a fair chance before we give up and run
+         * with whatever fix the module has. */
+        uint32_t cap = GPSDO_SVIN_MIN_SECS * 3u;
+        if (cap < 600u) cap = 600u;
+        svin_deadline = millis() + cap * 1000u;
+    }
+
+    uint32_t dur=0, acc=0; bool valid=false, active=false;
+    static bool ever_replied = false;
+    if (ubx_poll_svin(&dur, &acc, &valid, &active)) {
+        no_reply = 0;
+        ever_replied = true;
+        g_svin_dur   = (uint16_t)dur;
+        g_svin_acc_m = (uint16_t)(acc / 1000u);   /* mm → m for display */
+        OUT_SERIAL.print("LEA-T: svin dur="); OUT_SERIAL.print(dur);
+        OUT_SERIAL.print("s acc=");             OUT_SERIAL.print(acc);
+        OUT_SERIAL.print("mm valid=");          OUT_SERIAL.print(valid);
+        OUT_SERIAL.print(" active=");           OUT_SERIAL.println(active);
+
+        /* Survey-in is done when EITHER:
+         *   (a) the receiver flags the mean position valid (valid=1) — it has
+         *       settled, regardless of whether 'active' has flipped yet (some
+         *       firmware leaves active=1 briefly after valid goes high), OR
+         *   (b) the user's own criteria are met: accuracy below the limit AND
+         *       at least the minimum duration elapsed. This covers receivers
+         *       that are slow to raise 'valid' even after converging. */
+        bool user_ok = (acc <= GPSDO_SVIN_ACC_LIMIT) &&
+                       (dur >= GPSDO_SVIN_MIN_SECS);
+        if (valid || user_ok) {
+            OUT_SERIAL.print("LEA-T: survey-in complete (");
+            OUT_SERIAL.print(valid ? "valid flag" : "acc+time criteria");
+            OUT_SERIAL.println(") — time-only fix active");
+            g_svin_active = false; g_svin_pending = false;
+            return;
+        }
+    } else if (!ever_replied) {
+        /* No TIM-SVIN frame AND we have never had one. The module is likely
+         * not running a survey (plain nav mode, or TIM-SVIN output off) —
+         * stop monitoring after ~30 consecutive misses rather than waiting
+         * the full safety window. Once a survey HAS replied we never give up
+         * here (occasional misses are tolerated; the survey is in progress). */
+        if (++no_reply >= 30) {
+            OUT_SERIAL.println("LEA-T: no TIM-SVIN response — not in survey mode, stopping monitor");
+            g_svin_active = false; g_svin_pending = false;
+            return;
+        }
+    }
+    if (millis() > svin_deadline) {
+        OUT_SERIAL.println("LEA-T: survey-in safety timeout — continuing anyway");
+        g_svin_active = false; g_svin_pending = false;
+    }
+}
+#endif /* GPSDO_GPS_TIMING */
 
 /*
  * ubx_config — send UBX-CFG-NAV5 (stationary navigation engine).
@@ -461,6 +646,13 @@ void vGpsTask(void *pvParameters)
                     gGps.sats      = (uint8_t)gps.satellites.value();
                     gGps.hdop      = gps.hdop.value();
                     gGps.pos_valid = true;
+                    /* Time Mode detection: a timing receiver in time-only mode
+                     * keeps a valid (frozen) position but stops optimising it,
+                     * so HDOP is reported as ~99.99 (value >= 5000 = 50.00).
+                     * A normal navigation fix with that HDOP would be unusable,
+                     * so treat "valid position + absurd HDOP" as Time Mode and
+                     * show HDOP:TIME instead of a meaningless number.        */
+                    gGps.time_mode = (gGps.hdop >= 5000);
                     last_pos_valid_ms = millis();   /* genuine fix — reset position timer */
                     had_pos = true;
                 } else if (location_fresh) {
@@ -528,6 +720,7 @@ void vGpsTask(void *pvParameters)
         if (had_pos && (millis() - last_pos_valid_ms) > POS_LOST_TIMEOUT_MS) {
             if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                 gGps.pos_valid = false;
+                gGps.time_mode = false;
                 gGps.lat       = 0.0f;
                 gGps.lon       = 0.0f;
                 gGps.alt       = 0.0f;
@@ -541,6 +734,19 @@ void vGpsTask(void *pvParameters)
             }
             had_pos = false;
         }
+
+#ifdef GPSDO_GPS_TIMING
+        /* Survey-in progress monitor (scheduler is running now, so this is
+         * the safe place to poll — never in gpsdo_gps_init()). Throttle to
+         * ~1 Hz so it does not interfere with NMEA draining. */
+        if (g_svin_pending) {
+            static uint32_t next_svin_poll = 0;
+            if (millis() >= next_svin_poll) {
+                next_svin_poll = millis() + 1000u;
+                ubx_poll_svin_step();
+            }
+        }
+#endif
 
         /* Yield between bursts — allows higher-priority tasks to run */
         vTaskDelay(pdMS_TO_TICKS(GPS_YIELD_MS));
@@ -716,6 +922,37 @@ void gpsdo_gps_init(void)
     /* ---- Step 3: send UBX-CFG-NAV5 at working baud ---- */
     OUT_SERIAL.print("GPS: sending UBX config at "); OUT_SERIAL.print(working_baud); OUT_SERIAL.println(" baud");
     bool cfg_ok = ubx_config();
+
+#ifdef GPSDO_GPS_TIMING
+    /* LEA-6T/M8T: replace plain stationary mode with survey-in → Time Mode.
+     * Survey-in can be disabled at runtime (CLI "SV 0", stored in EEPROM) —
+     * handy for bench testing, where you may want plain nav mode.
+     * IMPORTANT: only SEND the survey-in start here. The progress-polling
+     * loop must NOT run before the scheduler — it uses vTaskDelay(), which
+     * hangs the system if called before vTaskStartScheduler(). Monitoring
+     * happens in vGpsTask once the scheduler is running. */
+    if (!g_svin_enabled) {
+        OUT_SERIAL.println("LEA-T: survey-in DISABLED (SV 0) — staying in nav mode");
+    } else {
+        OUT_SERIAL.println("LEA-T: starting survey-in (Time Mode)");
+        if (ubx_start_survey_in()) {
+            OUT_SERIAL.println("LEA-T: survey-in command accepted");
+        } else {
+            /* No variant ACKed. The module is usually ALREADY in Time Mode
+             * (its survey config was stored in flash, e.g. via u-center), so
+             * a fresh command is rejected — but it is still timing. Monitor
+             * anyway: TIM-SVIN polling reports the stored survey's progress;
+             * if the module is merely in nav mode the poll finds nothing and
+             * the monitor stops itself. */
+            OUT_SERIAL.println("LEA-T: no start command ACKed — module may already be timing");
+            OUT_SERIAL.println("LEA-T: monitoring via TIM-SVIN");
+        }
+        /* Ask vGpsTask to poll TIM-SVIN once the scheduler runs. */
+        g_svin_active = true;
+        g_svin_pending = true;
+        g_svin_dur = 0; g_svin_acc_m = 0;
+    }
+#endif
 
     /* ---- Step 3: optional upgrade to 38400 ---- */
 #ifdef GPSDO_PREFER_38400

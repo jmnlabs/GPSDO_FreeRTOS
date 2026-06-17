@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -113,6 +113,7 @@ typedef struct {
     uint16_t year;
     bool     valid;      /* true = time received (enables display) */
     bool     pos_valid;  /* true = position fix acquired */
+    bool     time_mode;  /* true = receiver in Time Mode (HDOP not meaningful) */
     uint32_t fix_time_ms;
 } GpsData_t;
 
@@ -144,6 +145,7 @@ typedef struct {
 #define EVT_ARM_PICDIV        (1u << 3)
 #define EVT_REPORT_TAB        (1u << 4)
 #define EVT_HALF_SECOND       (1u << 5)
+#define EVT_NEED_TUNE         (1u << 6)   /* CT: calibrate K + auto-tune PID */
 
 /* ---- RTOS handles ------------------------------------------------------ */
 extern SemaphoreHandle_t xFreqMutex;
@@ -184,6 +186,26 @@ extern float  g_aht_temp, g_aht_humi;
 extern float  g_ina_volt, g_ina_curr;
 extern bool   g_eeprom_valid;
 extern bool   g_report_paused;        /* true = serial/BT reports paused */
+extern bool   g_tz_auto;              /* true = timezone derived from GPS */
+extern bool   g_svin_enabled;         /* true = run survey-in on timing rx */
+
+/* Calibration progress — shown on displays during C / CT.
+ * Simple scalar types: written by vControlTask, read by vDisplayTask;
+ * single-word access is atomic on Cortex-M, no mutex needed. */
+extern volatile bool     g_calib_active;     /* true while C/CT running   */
+extern volatile uint16_t g_calib_remaining;  /* seconds left in this step */
+
+/* Warmup progress — shown on displays during OCXO warmup at boot. */
+extern volatile bool     g_warmup_active;    /* true while warming up      */
+extern volatile uint16_t g_warmup_remaining; /* seconds left in warmup     */
+
+/* Survey-in progress — shown on displays during LEA-T Time Mode survey-in.
+ * g_svin_dur counts elapsed seconds; g_svin_acc_m is the current accuracy in
+ * metres (sqrt of TIM-SVIN meanV variance), both for the display. */
+extern volatile bool     g_svin_active;      /* true while survey-in running */
+extern volatile bool     g_svin_pending;     /* true = vGpsTask must poll svin */
+extern volatile uint16_t g_svin_dur;         /* elapsed survey-in seconds    */
+extern volatile uint16_t g_svin_acc_m;       /* current mean 3D accuracy [m] */
 
 /* ---- LTIC (Lars TIC) phase data --------------------------------------- */
 /* Written by SensorTask (ADC read + discharge under task context),        */

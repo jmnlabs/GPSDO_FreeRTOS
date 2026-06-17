@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.29
+# GPSDO FreeRTOS v0.47
 
 Real-time (FreeRTOS) firmware for a GPS-Disciplined Oscillator (GPSDO)
 on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
@@ -30,30 +30,31 @@ of 10⁻¹⁰–10⁻¹², while preserving the OCXO's short-term stability.
 ### Hardware principle of operation
 
 ```
-                                           10 MHz
-               ┌─────────────┐      ┌──────────────┐
-   GPS Antenna ┤  u-blox     │      │    OCXO      ├── TIM2 ETR (PA15) ──┐
-               │  NEO-6M/7M  │      │  10 MHz      │                     │
-               └──┬──────┬───┘      └──────▲───────┘                     │
-                  │      │                 │                              │
-        NMEA      │  1PPS (PB10)     PWM (PB9)                           │
-     (Serial1)    │      │           + RC filter                         │
-                  │      │                 │                              │
-               ┌──▼──────▼─────────────────┴──────┐                      │
-               │          STM32 F411CE             │◄─────────────────────┘
-               │          BlackPill                │
-               └──────┬───────────┬───────┬───────┘
-                      │           │       │
-                    I2C bus    Serial    GPIO
-                      │           │       │
-                ┌─────┼─────┐     │    TM1637
-                │     │     │     │    (clock)
-               OLED  Sen-  LCD   BT
-              128x64 sors  20x4  HC-06
-                     │
-                ┌────┼────┐
-               AHT  BMP  INA
-               20   280  219
+                                            10 MHz
+               ┌─────────────┐       ┌──────────────┐
+   GPS Antenna ┤  u-blox     │       │    OCXO      ├── TIM2 ETR (PA15) ──┐
+               │  NEO-6M/7M  │       │  10 MHz      │                     │
+               └──┬──────┬───┘       └──────▲───────┘                     │
+                  │      │                  │                             │
+        NMEA      │  1PPS (PB10)      PWM (PB9)                           │
+     (Serial1)    │      │            + RC filter                         │
+                  │      │                  │                             │
+               ┌──▼──────▼──────────────────┴───────┐                     │
+               │           STM32 F411CE             │◄────────────────────┘
+               │           BlackPill                │
+               └───┬─────────┬─────────┬───────┬────┘
+                   │         │         │       │
+                I2C bus    SPI1     Serial2  GPIO
+                   │         │         │       │
+        ┌──────┬───┼───┬─────┤         │    TM1637
+        │      │   │   │     │         │    (clock,
+      OLED   LCD  HT16K33  TFT        BT     PA8/PB4)
+     128x64  20x4 (clock) 240x320   HC-06
+        │                ILI9341/
+     Sensors:            ST7789
+   ┌────┼────┐
+  AHT  BMP  INA
+  20   280  219
 ```
 
 **The control loop** operates as follows:
@@ -80,6 +81,8 @@ of 10⁻¹⁰–10⁻¹², while preserving the OCXO's short-term stability.
 - **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309)
 - **LCD 20×4** I2C (HD44780 + PCF8574T)
 - **TM1637** (4- or 6-digit clock display)
+- **TFT 240×320** SPI (ILI9341 / ST7789, TFT_eSPI library)
+- **HT16K33** 4-digit 7-segment clock with colon, I2C addr 0x70 (HH:MM)
 
 OLED and LCD can operate simultaneously (different I2C addresses).
 LCD and TM1637 **cannot** operate simultaneously (bus conflict).
@@ -122,12 +125,27 @@ Ten algorithms selectable via the `LA n` command:
 | 1 | Drift | — | 1000 s | OCXO drift measurement only |
 | 2 | Random | — | 5 s | Noise floor measurement — diagnostic |
 | 3 | FLL PID | avg100 | 100 s | General purpose, conservative |
-| 4 | PLL PI | phase10k | 10 s | Low phase noise, slow pull-in |
-| 5 | PLL PID | phase1k | 10 s | Balanced: speed + noise |
+| 4 | PLL PI+D | true phase | 10 s | Low noise; Kd = frequency damping (required) |
+| 5 | PLL PID | true phase | 10 s | Balanced: speed + noise |
 | 6 | FLL PID (GA) | avg100 | 100 s | Genetically optimised coefficients |
-| 7 | PLL PID (GA) | phase1k | 10 s | Genetically optimised coefficients |
+| 7 | PLL PID (GA) | true phase | 10 s | Genetically optimised coefficients |
 | 8 | Hybrid | FLL+PLL | 100 s | Automatic FLL↔PLL sigmoid blend |
 | 9 | Neural net | e/∫e/de | 10 s | Experimental — single-layer perceptron |
+
+PLL algorithms (4, 5, 7 and the PLL branch of 8) use a **two-timescale**
+design tuned for "fast capture, gentle phase-hold":
+
+- the dominant term acts on the **frequency error** (Kp ≈ 0.4/K), pulling
+  the frequency to target quickly and without overshoot;
+- small phase terms (Kd proportional, Ki integral on accumulated phase)
+  remove slow drift with tiny steps.
+
+Every correction passes through a shared output stage that applies a
+**slew-rate limit** (max ~12 LSB/step for the PLLs, 40 for the hybrid) and a
+**dead-zone** near lock. The slew limit spreads a large overnight phase
+drift over several periods instead of one big PWM jump that would disturb
+the OCXO; the dead-zone lets the PWM sit still in steady state so the OCXO
+free-runs on its own short-term stability.
 
 Algorithms 3–9 have runtime-tunable PID parameters (`Kp`, `Ki`, `Kd`,
 `I_LIMIT`) configurable via CLI commands (`KP`, `KI`, `KD`, `IL`) —
@@ -187,6 +205,94 @@ Line 2 rotates every `LCD_LINE2_SWITCH_SECS` seconds:
 | 5 | BMP280 | `BMP:23.4C 1013.2hPa` |
 
 Holdover on line 3: `[H]` (manual) or `[A]` (automatic) — 500 ms blink.
+
+---
+
+## TFT 240×320 display layout (ILI9341 / ST7789, TFT_eSPI)
+
+Cheap SPI TFT modules are supported in landscape orientation (320×240),
+driven over hardware SPI1. Both controllers are tested and working with the same `User_Setup.h` — switching between them requires only changing the driver define (`ST7789_DRIVER` ↔ `ILI9341_DRIVER`). The `TFT_RGB_ORDER` / `TFT_INVERSION_OFF` lines are needed for correct colours on ST7789 modules and are harmless on ILI9341. Independent of the I2C displays — OLED, LCD
+and TFT can all run simultaneously.
+
+**Wiring (hardware SPI1):**
+
+| TFT pin | STM32 pin |
+|---------|-----------|
+| SCK | PA5 (SPI1 SCLK) |
+| SDI | PA7 (SPI1 MOSI) |
+| RES | PB15 |
+| D/C | PB12 |
+| CS | PB13 |
+
+**Screen layout:**
+
+```
+┌────────────────────────────────────────────┐
+│ GPSDO v0.47-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
+├────────────────────────────────────────────┤
+│                                            │
+│        10000000.0000 Hz                    │ ← frequency (large, colour-coded)
+│                                            │
+├────────────────────────────────────────────┤
+│ UTC:12:32:45 Thu     │ Sat: 9 HDOP:0.90    │
+│ 11/06/2026           │ Lat: 52.123456      │
+│ Up 000d 02:15:33     │ Lon: 23.123456      │
+│ Algo:5  hit          │ Alt:  175m          │
+│ PWM:44653 V:1.97     │ IN:12.05V  250mA    │
+├────────────────────────────────────────────┤
+│ BMP:23.4C 1013.2hPa  │ AHT:22.1C 45.3%rH   │
+├────────────────────────────────────────────┤
+│          DISCIPLINED  FIX OK               │ ← status bar (colour-coded)
+└────────────────────────────────────────────┘
+```
+
+**Colour coding:**
+
+| Element | Colour | Meaning |
+|---------|--------|---------|
+| Frequency | green | locked — best average within 1e-10 (10000s) or 1e-9 (1000s) of 10 MHz |
+| Frequency | white | adjusting |
+| Frequency | orange | holdover |
+| Frequency | red | no signal |
+| Status bar | green | disciplined, fix OK |
+| Status bar | orange | manual holdover |
+| Status bar | red | auto-holdover (fix lost) / waiting for fix |
+
+Updates are selective — each value cell caches its previous string and is
+redrawn only on change, keeping SPI traffic minimal at the 1 Hz refresh.
+
+**TFT_eSPI library configuration (required):**
+
+TFT_eSPI is configured in the *library*, not the sketch. Edit
+`Arduino/libraries/TFT_eSPI/User_Setup.h` to contain:
+
+```c
+#define ST7789_DRIVER          // or ILI9341_DRIVER
+#define TFT_WIDTH  240
+#define TFT_HEIGHT 320
+#define TFT_MISO PA6      // required on STM32 even if display has no MISO
+#define TFT_MOSI PA7
+#define TFT_SCLK PA5
+#define TFT_CS   PB13
+#define TFT_DC   PB12
+#define TFT_RST  PB15
+#define TFT_RGB_ORDER TFT_BGR   // colour order Blue-Green-Red
+#define TFT_INVERSION_OFF       // fixes inverted colours on some ST7789 modules
+#define LOAD_GLCD
+#define LOAD_FONT2
+#define LOAD_FONT4
+#define SPI_FREQUENCY 27000000
+```
+
+**Troubleshooting:** if the firmware freezes at the OLED version splash after
+enabling TFT, check the serial output. The message `TFT: init start ...` is
+printed immediately before `TFT_eSPI::init()` — if it is the last line, the
+hang is inside the library: verify that `User_Setup.h` contains exactly the
+pins above (including `TFT_MISO PA6`) and the correct driver define. The
+DisplayTask stack is automatically raised to 768 words when `GPSDO_TFT` is
+enabled — if you modified stack sizes manually, restore that value.
+
+Then enable `GPSDO_TFT_ST7789` or `GPSDO_TFT_ILI9341` in `gpsdo_config.h`.
 
 ---
 
@@ -274,7 +380,8 @@ Commands terminated by `\r\n` or `\n`.
 | `H` | Display help |
 | `V` | Version, authors and GitHub links |
 | `F` | Flush frequency ring buffers (restart averaging) |
-| `C` | Start auto-calibration sequence |
+| `C` | Start auto-calibration (PWM centring only) |
+| `CT` | Calibrate + auto-tune: measure K, derive PID for all algos 3-9 |
 | `T` | GPS tunnel mode — pass-through to GPS UART (exits after 300 s) |
 | `SP <n>` | Set PWM DAC directly (1–65535), bypasses algorithm |
 | `RH` | Report mode: human-readable (default) |
@@ -309,9 +416,11 @@ Commands terminated by `\r\n` or `\n`.
 
 | Command | Description |
 |---------|-------------|
-| `TO [n]` | Show / set local time offset (hours) |
+| `TO [n]` | Show / set local time offset manually (hours, −23..23) |
+| `TO A` | Auto timezone: zone from GPS position + EU DST rule |
 | `PO [f]` | Show / set pressure offset |
 | `AO [f]` | Show / set altitude offset |
+| `SV [0\|1]` | Survey-in / Time Mode on timing receiver (saved by `ES`, applied at next boot) |
 
 ### EEPROM
 
@@ -325,7 +434,7 @@ Commands terminated by `\r\n` or `\n`.
 
 ## EEPROM
 
-EEPROM (emulated in STM32 Flash) stores 142 bytes:
+EEPROM (emulated in STM32 Flash) stores 144 bytes:
 
 | Address | Size | Content |
 |---------|------|---------|
@@ -337,36 +446,143 @@ EEPROM (emulated in STM32 Flash) stores 142 bytes:
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
 | 134–137 | 4 B | g_pressure_offset (PO command) |
 | 138–141 | 4 B | g_altitude_offset (AO command) |
+| 142 | 1 B | timezone mode (0 = manual, 1 = auto `TO A`) |
+| 143 | 1 B | survey-in enable (0 = off, 1 = on, `SV` command) |
+
+
 
 ---
 
-## Supported OCXOs
+## GPS timing receivers (LEA-6T / LEA-M8T)
 
-Two 10 MHz oscillators are supported with factory-tuned PID coefficients.
-Select one in `gpsdo_config.h`; all parameters can still be adjusted at runtime via CLI.
+NEO-6M / NEO-8M modules work out of the box (default). For a u-blox timing
+receiver, enable the option in `gpsdo_config.h`:
 
-| Parameter | CTI OSC5A2B02 | Vectron C4550A1-0213 |
-|-----------|--------------|---------------------|
-| Supply voltage | 5 V | 5 V |
-| EFC input range | 0 – 4.0 V | 0 – 4.0 V |
-| PWM-accessible range | 0 – 3.3 V | 0 – 3.3 V |
-| Full tuning range | −10 / +20 Hz (30 Hz) | ±20 Hz (40 Hz) |
-| Accessible tuning | −10 to +14.75 Hz (24.75 Hz) | −20 to +13 Hz (33 Hz) |
-| EFC gain Kv | 7.50 Hz/V | 10.00 Hz/V |
-| Sensitivity/LSB | 0.378 mHz/LSB | 0.504 mHz/LSB |
-| Default PWM | 32767 (~1.65 V) | 39718 (~2.0 V) |
-| Nominal EFC (0 Hz) | ~1.33 V (unit-dependent) | 2.00 V (symmetric) |
-| Stability | ±10 ppb | ±10 ppb (SC cut) |
-| Current (warm) | ~250 mA | ~200 mA |
-| Phase noise @ 10 Hz | −120 dBc/Hz | −120 dBc/Hz |
-| Crystal cut | AT | SC |
-| Package | DIP-5 | SMD (11.25 × 12.7 mm) |
-| Output | HCMOS 5 V | HCMOS 5 V |
+```c
+#define GPSDO_GPS_TIMING            // u-blox LEA-6T / LEA-M8T timing receiver
+#define GPSDO_SVIN_MIN_SECS   120   // min survey-in duration [s]
+#define GPSDO_SVIN_ACC_LIMIT  2000  // accuracy limit [mm]
+```
 
-The STM32 PWM DAC is limited to 0–3.3 V (Vcc), so only 82.5% of the 0–4 V EFC
-range is accessible. The Vectron has 1.33× higher sensitivity (10 vs 7.5 Hz/V);
-its PID gains are scaled by 0.75. CTI default PWM starts at the accessible midpoint
-(1.65 V); Vectron starts at its exact nominal (2.0 V). Calibration corrects both.
+The LEA-6T and LEA-M8T accept **different** Time Mode commands, so the
+firmware tries each in turn and keeps the first that is ACKed: `CFG-TMODE2`
+(0x06 0x3D, used by the LEA-M8T) and the older `CFG-TMODE` (0x06 0x1D, used
+by the u-blox 6 LEA-6T). Progress is read back with `TIM-SVIN` (0x0D 0x04) on
+both. (The newer `CFG-TMODE3` / `NAV-SVIN` pair exists only on high-precision
+firmware such as NEO-M8P / ZED-F9P, not on these timing units — verified in
+u-center against a LEA-M8T-0 / TIM 1.10 and a LEA-6T.)
+
+At every power-up the receiver runs a **survey-in**: it averages the
+antenna position, then switches to a fixed-position **time-only** solution.
+This gives a markedly cleaner 1PPS — single-satellite timing with no
+navigation jitter — which directly improves phase stability. Survey-in ends
+when either the minimum duration **or** the accuracy limit is reached.
+
+Progress is shown on all displays as `SVIN <seconds> <accuracy>m`. The
+position keeps streaming in NMEA throughout Time Mode (the frozen, averaged
+fix), so the location display and automatic timezone (`TO A`) keep working —
+in fact more stably, since the position no longer wanders.
+
+> **Antenna matters.** Run survey-in only with a good outdoor antenna that
+> has a clear, full view of the sky. Survey-in averages the antenna position
+> and only completes once the accuracy limit is met; with an indoor or
+> obstructed antenna it may converge slowly or stall at a poor accuracy
+> (tens of metres). On a proper outdoor/rooftop antenna both the LEA-6T and
+> LEA-M8T complete within the configured time and switch cleanly to Time
+> Mode. (In testing the older LEA-6T proved noticeably more sensitive in
+> marginal conditions than the LEA-M8T.)
+
+In Time Mode the receiver stops optimising position, so the reported HDOP
+becomes meaningless (~99.99). The displays and the human-readable serial
+report show `HDOP:TIME` in that state instead of the bogus number; the
+tab-delimited log keeps the raw value for plotting.
+
+With neither option defined, NEO modules use the existing stationary-mode
+path unchanged.
+
+---
+
+## Auto-tuning (`CT` command)
+
+`CT` measures the oscillator's plant gain and derives PID coefficients for
+all algorithms from it — no manual tuning, no risky forced oscillation.
+
+Procedure (~3 minutes, deterministic):
+
+1. Drive the PWM to three points (1.5 / 2.0 / 2.5 V), settling at each.
+2. Least-squares fit of frequency vs PWM → **K** [Hz/LSB], the plant gain,
+   plus the PWM that yields exactly 10 MHz.
+3. Compute coefficients from K:
+   - **PLL (4, 5, 7):** Kp = 0.40/K on frequency; Kd = 2.0, Ki = 0.02 on phase
+   - **FLL (3, 6):** Kp = 0.35/K; Ki = Kp/300; Kd = Kp·73
+   - **NN (9):** max step = 0.05/K
+4. Apply the centred PWM and the new coefficients, print before/after.
+
+The result is sanity-checked (K must be 0.1–2 mHz/LSB and the GPS must hold
+a fix); on failure the parameters are left unchanged. Run `ES` afterwards to
+save the tuned values to EEPROM. Unlike relay-feedback auto-tuning, `CT`
+never destabilises the loop — the loop time constant here is hundreds of
+seconds, so forced oscillation would take hours and be corrupted by thermal
+drift; deriving the gains directly from a measured K is both faster and safer.
+
+---
+
+## Automatic timezone (`TO A`)
+
+Local time can follow the GPS position automatically. In auto mode the
+firmware recomputes the UTC offset continuously from latitude/longitude
+and the date:
+
+- **Inside Europe** (lat 35–72, lon −11–42): a compact civil-zone rule set
+  (UTC+0 west of −7.5°, UTC+1 for the CET belt including all of Poland,
+  UTC+2 for the Baltics/Finland/Balkans), plus the **EU DST rule** —
+  +1 h from the last Sunday of March 01:00 UTC to the last Sunday of
+  October 01:00 UTC.
+- **Outside Europe**: solar zone `round(lon/15)`, without DST (rules vary
+  too much worldwide to guess safely).
+
+`TO <n>` switches back to a fixed manual offset. The mode and offset are
+saved with `ES` and restored at boot.
+
+---
+
+## Startup hardware report
+
+Every optional device reports its detection result on serial/Bluetooth at
+boot, giving a complete inventory of what was found:
+
+```
+HW: AHT10/AHT20 sensor    OK  (I2C 0x38)
+HW: BMP280 sensor         OK  (I2C 0x77)
+HW: INA219 sensor         not found
+HW: OLED 128x64           OK  (I2C 0x3C)
+HW: LCD 20x4              OK  (I2C expander)
+HW: HT16K33 clock display OK  (I2C 0x70)
+HW: TFT 240x320           enabled (SPI1, write-only - not verifiable)
+HW: TM1637 clock display  enabled (GPIO PA8/PB4, write-only - not verifiable)
+```
+
+A missing device reports `not found` and the firmware continues without it.
+
+---
+
+## Oscillator (OCXO)
+
+The firmware works with any 10 MHz voltage-controlled OCXO whose EFC input
+sits within the 0–3.3 V range delivered by the STM32 PWM DAC (a 0–4 V EFC
+oscillator works too — about 82.5% of its range is reachable). The oscillator
+type does **not** need to be selected at compile time.
+
+Instead, run the **`CT` (Calibrate & Tune)** command once after warm-up: it
+measures the actual control gain *K* [Hz/LSB] from a three-point PWM sweep,
+finds the PWM value for exactly 10 MHz, and derives every PID coefficient for
+the fitted oscillator. Save with `ES`. Before the first `CT`, the loop starts
+from a universal mid-range PWM (32767 ≈ 1.65 V), which is safe for any
+0–4 V EFC unit.
+
+This replaces the earlier per-oscillator coefficient tables — one calibration
+adapts the loop to whatever crystal is installed, including unit-to-unit
+variation between two nominally identical parts.
 
 ---
 
@@ -379,6 +595,8 @@ The file `gpsdo_config.h` controls the build. Key switches:
 #define GPSDO_OLED_SSD1309       // or SH1106, SSD1306
 #define GPSDO_LCD_20x4           // HD44780 20x4 I2C
 #define GPSDO_TM1637_6           // 6-digit TM1637 (HH:MM:SS)
+#define GPSDO_TFT_ST7789         // or GPSDO_TFT_ILI9341 — 240x320 SPI TFT
+#define GPSDO_HT16K33            // 4-digit HT16K33 clock, I2C 0x70
 
 // Sensors:
 #define GPSDO_AHT10              // AHT10/20 temperature + humidity
@@ -394,6 +612,21 @@ The file `gpsdo_config.h` controls the build. Key switches:
 #define GPSDO_UBX_CONFIG         // NEO-6M/7M UBX configuration
 #define GPSDO_GEN_2kHz_PB5       // 2 kHz generator on PB5
 ```
+
+### Serial buffer (`build_opt.h`)
+
+The sketch folder also contains `build_opt.h`, which STM32duino passes to
+the whole build (including the core) as compiler flags:
+
+```
+-DSERIAL_RX_BUFFER_SIZE=256 -DSERIAL_TX_BUFFER_SIZE=512
+```
+
+This enlarges the GPS serial RX buffer from the 64-byte default so NMEA
+sentences are not dropped or merged at 38400 baud when the GPS task is
+briefly preempted. A plain `#define` in the sketch would not work — the
+core's `HardwareSerial.cpp` is a separate translation unit that only sees
+compiler flags. The file is picked up automatically; nothing to enable.
 
 ---
 
@@ -414,6 +647,8 @@ The file `gpsdo_config.h` controls the build. Key switches:
 | PA9/PA10 | Serial1 TX/RX — GPS NMEA |
 | PA2/PA3 | Serial2 TX/RX — Bluetooth HC-06 |
 | PB6/PB7 | I2C1 SCL/SDA — OLED, LCD, sensors |
+| PA5/PA7 | SPI1 SCK/MOSI — TFT display |
+| PB12/PB13/PB15 | TFT D/C, CS, RES |
 
 ---
 
@@ -423,7 +658,7 @@ The file `gpsdo_config.h` controls the build. Key switches:
 - **IDE**: Arduino IDE with STM32duino core ≥ 2.2.0
 - **Libraries**: STM32duino FreeRTOS, TinyGPS++, U8g2,
   Adafruit AHTX0, Adafruit BMP280, Adafruit INA219,
-  hd44780 (for LCD), EEPROM (STM32)
+  hd44780 (for LCD), TFT_eSPI (for TFT), EEPROM (STM32)
 - **Build settings**: Tools → C Runtime Library → Newlib Nano + Float Printf/Scanf
 
 ---

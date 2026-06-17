@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -9,7 +9,7 @@
  *
  *
  * vSensorTask   — reads AHT/BMP/INA sensors every 2 s under xWireMutex
- * vDisplayTask  — drives OLED, LCD, TM1637, serial report, and LEDs
+ * vDisplayTask  — drives OLED, LCD, TFT, TM1637, serial report, and LEDs
  * vUptimeTask   — increments uptime counter, formats dd hh:mm:ss
  *
  * Display update uses dirty-flag comparison per row — only changed rows
@@ -26,6 +26,23 @@
 #include "gpsdo_state.h"
 #include <Arduino.h>
 #include <string.h>
+#include <Wire.h>
+
+/* ----------------------------------------------------------------------
+ * i2c_probe — robust device-presence check.
+ *
+ * Dual verification: address ACK (endTransmission == 0) AND a 1-byte
+ * read-back (requestFrom > 0).  A lone ACK check is unreliable on some
+ * STM32duino core versions, which can return 0 for absent devices and
+ * produce false "OK" detections in the startup hardware report.
+ * Caller must hold xWireMutex.
+ * ---------------------------------------------------------------------- */
+static bool i2c_probe(uint8_t addr)
+{
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() != 0) return false;
+    return Wire.requestFrom(addr, (uint8_t)1) > 0;
+}
 
 /* ---- Sensor data globals ---------------------------------------------- */
 float  g_bmp_temp = 0.0f, g_bmp_pres = 0.0f, g_bmp_alti = 0.0f;
@@ -107,6 +124,10 @@ static void ltic_read(void)
   static const bool s_ina_ok = false;
 #endif
 
+/* Set true by vSensorTask once all sensor detection has completed, so the
+ * TFT boot splash (in vDisplayTask) can wait briefly for valid flags. */
+static volatile bool s_sensors_probed = false;
+
 extern float g_pressure_offset;
 extern float g_altitude_offset;
 
@@ -117,9 +138,13 @@ void vSensorTask(void *pvParameters)
 {
     (void)pvParameters;
 
+    /* ---- Hardware detection report (sensors) ----
+     * Every optional I2C device reports both outcomes so the startup log
+     * gives a complete picture of what was found on the bus.            */
 #ifdef GPSDO_AHT10
     s_aht_ok = s_aht.begin();
-    if (!s_aht_ok) OUT_SERIAL.println("AHT10 not found");
+    OUT_SERIAL.println(s_aht_ok ? "HW: AHT10/AHT20 sensor    OK  (I2C 0x38)"
+                                : "HW: AHT10/AHT20 sensor    not found");
 #endif
 #ifdef GPSDO_BMP280_I2C
     s_bmp_ok = s_bmp.begin(0x77, 0x58);
@@ -129,14 +154,19 @@ void vSensorTask(void *pvParameters)
                           Adafruit_BMP280::SAMPLING_X16,
                           Adafruit_BMP280::FILTER_X16,
                           Adafruit_BMP280::STANDBY_MS_500);
+        OUT_SERIAL.println("HW: BMP280 sensor         OK  (I2C 0x77)");
     } else {
-        OUT_SERIAL.println("BMP280 not found");
+        OUT_SERIAL.println("HW: BMP280 sensor         not found");
     }
 #endif
 #ifdef GPSDO_INA219
     s_ina_ok = s_ina.begin();
-    if (s_ina_ok) s_ina.setCalibration_32V_1A();
-    else          OUT_SERIAL.println("INA219 not found");
+    if (s_ina_ok) {
+        s_ina.setCalibration_32V_1A();
+        OUT_SERIAL.println("HW: INA219 sensor         OK  (I2C 0x40)");
+    } else {
+        OUT_SERIAL.println("HW: INA219 sensor         not found");
+    }
 #endif
 
 #ifdef GPSDO_LTIC
@@ -144,8 +174,10 @@ void vSensorTask(void *pvParameters)
     pinMode(PIN_LTIC_VPHASE, INPUT_ANALOG);
     analogRead(PIN_LTIC_VPHASE);   /* dummy read to settle ADC mux */
     ltic_read();
-    OUT_SERIAL.println("LTIC PA1 configured");
+    OUT_SERIAL.println("HW: LTIC phase input      OK  (PA1 analog)");
 #endif
+
+    s_sensors_probed = true;   /* signal vDisplayTask the flags are valid */
 
     for (;;)
     {
@@ -328,6 +360,8 @@ static void print_tab_report(const GpsData_t *g, const FreqSnap_t *f,
     p = sd  (buf, p, f->avg10000, 4);               buf[p++] = '\t';
     p = sd  (buf, p, f->avg20000, 5);               buf[p++] = '\t';
     p = si  (buf, p, g->sats);                      buf[p++] = '\t';
+    /* Tab format keeps numeric HDOP (99.99 in Time Mode) for machine
+     * parsing/plotting; the human-readable report shows HDOP:TIME. */
     p = sd  (buf, p, (double)g->hdop/100.0, 2);     buf[p++] = '\t';
     p = si  (buf, p, c->pwm_output);                buf[p++] = '\t';
     p = sd  (buf, p, (c->avg_vctl_adc/4096.0)*3.3, 3);        buf[p++] = '\t';
@@ -380,7 +414,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
         p=sa(buf,p," Lon: "); p=sd(buf,p,g->lon,6);
         p=sa(buf,p," Alt: "); p=sd(buf,p,g->alt,1);
         p=sa(buf,p,"m Sat:"); p=si(buf,p,g->sats);
-        p=sa(buf,p," HDOP:"); p=sd(buf,p,(double)g->hdop/100.0,2);
+        if (g->time_mode) { p=sa(buf,p," HDOP:TIME"); }
+        else { p=sa(buf,p," HDOP:"); p=sd(buf,p,(double)g->hdop/100.0,2); }
         buf[p++]='\r'; buf[p++]='\n';
     } else {
         p=sa(buf,p,"GPS: no position fix yet\r\n");
@@ -554,6 +589,442 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif /* GPSDO_OLED */
 
 /* ======================================================================
+ * TFT 240x320 SPI  (TFT_eSPI library, ILI9341 / ST7789)
+ *
+ * Landscape 320x240, hardware SPI1 (PA5/PA7), exclusive bus — no mutex
+ * needed (only vDisplayTask touches it).
+ *
+ * Layout (landscape 320 x 240):
+ *
+ *  y=  0..23  ── header bar (navy):  "GPSDO v0.xx"      "LMT 14:32:45 Thu"
+ *  y= 30..62  ── FREQUENCY, font 4 doubled, centred, colour-coded:
+ *                  green  = locked (trend "hit")
+ *                  white  = adjusting
+ *                  orange = holdover
+ *                  red    = no signal
+ *  y= 70..151 ── info grid, font 2, two columns (left x=8, right x=168):
+ *                  UTC:12:32:45 Thu  │  Sat: 9 HDOP:0.90
+ *                  11/06/2026        │  Lat: 52.123456
+ *                  Up 000d 02:15:33  │  Lon: 23.123456
+ *                  Algo:5  hit       │  Alt: 175m
+ *                  PWM:44653 V:1.97  │  IN:12.05V 250mA
+ *  y=156..195 ── sensor row, font 2:
+ *                  BMP:23.4C 1013hPa │  AHT:22.1C 45.3%rH
+ *  y=204..239 ── status bar, font 4, full width, colour-coded background:
+ *                  green  "DISCIPLINED  FIX OK"
+ *                  orange "HOLDOVER (manual)"
+ *                  red    "HOLDOVER (fix lost)" / "WAITING FOR GPS FIX"
+ *
+ * Selective redraw: every value cell caches its previous string and is
+ * redrawn only on change (setTextPadding clears the old glyphs).
+ * ====================================================================== */
+#ifdef GPSDO_TFT
+  #include <TFT_eSPI.h>
+
+  /* Forward declarations — implementations are further down this file */
+  static const char *day_of_week_str(uint8_t day, uint8_t month, uint16_t year);
+  static void apply_time_offset(uint8_t  utc_h,  uint8_t utc_m,  uint8_t utc_s,
+                                uint8_t  utc_day, uint8_t utc_mon, uint16_t utc_yr,
+                                uint8_t *lh, uint8_t *lm, uint8_t *ls,
+                                uint8_t *ld, uint8_t *lmo, uint16_t *lyr);
+
+  static TFT_eSPI s_tft;
+  static bool     s_tft_ok = false;
+
+  /* Colours (RGB565) */
+  #define TFT_COL_BG      TFT_BLACK
+  #define TFT_COL_HEADER  0x0A33u        /* dark navy           */
+  #define TFT_COL_LABEL   0x8C51u        /* mid grey            */
+  #define TFT_COL_VALUE   TFT_WHITE
+  #define TFT_COL_LOCK    0x07E0u        /* green               */
+  #define TFT_COL_HOLD    0xFC60u        /* orange              */
+  #define TFT_COL_ALERT   0xF800u        /* red                 */
+  #define TFT_COL_SINEL   0x3D7Fu        /* blue  (left wave)   */
+  #define TFT_COL_SINER   0xFD80u        /* amber (right wave)  */
+
+  /* Grid geometry */
+  #define TFT_ROW_H       16             /* font 2 row height   */
+  #define TFT_GRID_Y      70
+  #define TFT_COL_L       8
+  #define TFT_COL_R       168
+  #define TFT_SENS_Y      156
+  #define TFT_STATUS_Y    204
+
+  /* Previous-value cache for selective redraw */
+  static char tft_prev[16][28];
+
+  /* Draw a value string only when it changed.
+   * slot: cache index, x/y: position, pad: text padding px, col: colour */
+  static void tft_val(uint8_t slot, int32_t x, int32_t y,
+                      uint16_t pad, uint16_t col, const char *s)
+  {
+      if (strncmp(tft_prev[slot], s, sizeof(tft_prev[0]) - 1) == 0)
+          return;
+      strncpy(tft_prev[slot], s, sizeof(tft_prev[0]) - 1);
+      tft_prev[slot][sizeof(tft_prev[0]) - 1] = '\0';
+      s_tft.setTextColor(col, TFT_COL_BG);
+      s_tft.setTextPadding(pad);
+      s_tft.drawString(s, x, y, 2);
+  }
+
+  /* One-time hardware init only (no layout — splash draws first) */
+  static void tft_init(void)
+  {
+      /* Diagnostic marker — if this is the last serial message, the hang
+       * is inside TFT_eSPI init(): check User_Setup.h pin config first. */
+      OUT_SERIAL.println("TFT: init start (SPI1 PA5/PA7, CS=PB13 DC=PB12 RST=PB15)");
+      vTaskDelay(pdMS_TO_TICKS(50));   /* let serial flush + bus settle */
+
+      s_tft.init();
+      s_tft.setRotation(1);              /* landscape 320x240, USB right */
+      s_tft.fillScreen(TFT_COL_BG);
+      s_tft_ok = true;
+      OUT_SERIAL.println("HW: TFT 240x320           enabled (SPI1, write-only - not verifiable)");
+  }
+
+  /* Draw the static operating-screen layout (header + separators).
+   * Called once after the splash, before the live update loop starts. */
+  static void tft_draw_layout(void)
+  {
+      s_tft.fillScreen(TFT_COL_BG);
+      memset(tft_prev, 0, sizeof(tft_prev));
+
+      s_tft.fillRect(0, 0, 320, 24, TFT_COL_HEADER);
+      s_tft.setTextDatum(TL_DATUM);
+      s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
+      s_tft.setTextPadding(0);
+      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, 6, 4, 2);
+
+      s_tft.drawFastHLine(0,  66, 320, TFT_COL_LABEL);
+      s_tft.drawFastHLine(0, 152, 320, TFT_COL_LABEL);
+      s_tft.drawFastHLine(0, 200, 320, TFT_COL_LABEL);
+  }
+
+  /* Animated boot splash: credits first, then two phase-shifted sine waves
+   * (blue above, amber below) whose phase slowly converges until they
+   * coincide and merge into a single thick green 10 MHz wave — a visual
+   * metaphor for GPS and OCXO pulling into phase lock. A hardware
+   * checklist follows. Purely cosmetic; runs once before the layout. */
+  static void tft_splash(bool oled_ok, bool lcd_ok, bool ht_ok,
+                         bool aht_ok, bool bmp_ok, bool ina_ok)
+  {
+      s_tft.fillScreen(TFT_COL_BG);
+
+      /* Header bar */
+      s_tft.fillRect(0, 0, 320, 26, TFT_COL_HEADER);
+      s_tft.setTextDatum(TL_DATUM);
+      s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
+      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, 6, 5, 2);
+
+      /* --- credits drawn FIRST, and they persist through the animation --- */
+      s_tft.setTextDatum(MC_DATUM);
+      s_tft.setTextColor(TFT_COL_LOCK, TFT_COL_BG);
+      s_tft.drawString("GPSDO", 160, 48, 6);
+      s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
+      s_tft.drawString("GPS-Disciplined OCXO", 160, 80, 4);
+      s_tft.setTextColor(0x8410, TFT_COL_BG);
+      s_tft.drawString("jmnlabs + with Claude (Anthropic)", 160, 214, 1);
+
+      /* --- two phase-shifted waves converging to synchronism ---
+       * Animation requires redrawing each frame, so each wave is erased
+       * (drawn in background colour) before the next frame is drawn. The
+       * waves live in a band around y=150, clear of the credits above. */
+      const int   yc    = 130;     /* wave centre line               */
+      const float SPL_AMP    = 15.0f;  /* amplitude px                   */
+      const float SPL_WCYC   = 5.0f;   /* cycles across the screen       */
+      const float SPL_PH0    = 2.5f;   /* initial phase offset [rad]     */
+      const int   SPL_GAP   = 12;     /* initial vertical separation px */
+      const int   STEP   = 4;      /* x sampling step                */
+
+      #define WAVE_Y(xx,yoff,ph) \
+          (yc + (yoff) + (int)(SPL_AMP * sinf((float)(xx)/320.0f*6.2831853f*SPL_WCYC + (ph))))
+
+      const int FRAMES = 64;       /* convergence frames             */
+      for (int fr = 0; fr <= FRAMES; fr++) {
+          float k    = (float)fr / (float)FRAMES;     /* 0..1 */
+          float ease = k * k * (3.0f - 2.0f * k);     /* smoothstep */
+          float ph   = SPL_PH0 * (1.0f - ease);           /* phase → 0 */
+          int   g    = (int)(SPL_GAP * (1.0f - ease));   /* gap → 0   */
+
+          int ptx = 0, pty = WAVE_Y(0, -g, ph);
+          int pbx = 0, pby = WAVE_Y(0, +g, 0.0f);
+
+          /* erase previous frame band, then draw current two waves */
+          s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+                         2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+
+          for (int x = STEP; x <= 320; x += STEP) {
+              int ty = WAVE_Y(x, -g, ph);
+              int by = WAVE_Y(x, +g, 0.0f);
+              /* 2px thickness: draw the segment twice, offset by 1px */
+              s_tft.drawLine(ptx, pty,   x, ty,   TFT_COL_SINEL);
+              s_tft.drawLine(ptx, pty+1, x, ty+1, TFT_COL_SINEL);
+              s_tft.drawLine(pbx, pby,   x, by,   TFT_COL_SINER);
+              s_tft.drawLine(pbx, pby+1, x, by+1, TFT_COL_SINER);
+              ptx = x; pty = ty; pbx = x; pby = by;
+          }
+          vTaskDelay(pdMS_TO_TICKS(45));    /* ~2.9 s convergence */
+      }
+
+      /* --- merge: erase band, draw one thick (4px) green wave --- */
+      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+                     2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+      {
+          int px0 = 0, py0 = WAVE_Y(0, 0, 0.0f);
+          for (int x = STEP; x <= 320; x += STEP) {
+              int y = WAVE_Y(x, 0, 0.0f);
+              for (int t = -1; t <= 2; t++)   /* 4px thickness */
+                  s_tft.drawLine(px0, py0+t, x, y+t, TFT_COL_LOCK);
+              px0 = x; py0 = y;
+          }
+      }
+      #undef WAVE_Y
+
+      /* hold the synchronised wave so the eye can rest */
+      vTaskDelay(pdMS_TO_TICKS(1800));
+
+      /* clear the wave band to make room for the checklist */
+      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+                     2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+
+      /* --- hardware checklist (rows light up sequentially) --- */
+      struct { const char *label; bool ok; bool show; } rows[] = {
+          { "OCXO  discipline loop", true,   true   },
+#ifdef GPSDO_GPS_TIMING
+          { "GPS   LEA timing (SVIN)", true,  true  },
+#else
+          { "GPS   NEO receiver",     true,  true   },
+#endif
+          { "OLED  128x64",          oled_ok, true  },
+          { "LCD   20x4",            lcd_ok,
+#ifdef GPSDO_LCD_20x4
+                                              true
+#else
+                                              false
+#endif
+          },
+          { "HT16K33 clock",         ht_ok,
+#ifdef GPSDO_HT16K33
+                                              true
+#else
+                                              false
+#endif
+          },
+          { "Sensors AHT/BMP/INA",   (aht_ok||bmp_ok||ina_ok), true },
+      };
+
+      s_tft.setTextDatum(TL_DATUM);
+      /* brief pause so the eye moves from the wave to the checklist before
+       * the first item appears (otherwise the first rows are missed) */
+      vTaskDelay(pdMS_TO_TICKS(600));
+      int y = 120;
+      for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
+          if (!rows[i].show) continue;
+          uint16_t col = rows[i].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
+          s_tft.setTextColor(col, TFT_COL_BG);
+          s_tft.drawString(rows[i].ok ? "[x]" : "[ ]", 36, y, 2);
+          s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
+          s_tft.drawString(rows[i].label, 72, y, 2);
+          y += 15;
+          vTaskDelay(pdMS_TO_TICKS(650));   /* slower sequential reveal */
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(1800));       /* final hold before operating screen */
+  }
+
+  /* Per-second update — called from vDisplayTask main loop */
+  static void tft_update(const GpsData_t *g, const FreqSnap_t *f,
+                         const CtrlData_t *c, const Uptime_t *u,
+                         bool aht_ok, bool bmp_ok, bool ina_ok)
+  {
+      char s[28];
+
+      /* ---- header right: LMT clock + day ---- */
+      if (g->valid) {
+          uint8_t lh, lm, ls, ld, lmo; uint16_t lyr;
+          apply_time_offset(g->hours, g->mins, g->secs,
+                            g->day, g->month, g->year,
+                            &lh, &lm, &ls, &ld, &lmo, &lyr);
+          snprintf(s, sizeof(s), "LMT %02d:%02d:%02d %s",
+                   lh, lm, ls, day_of_week_str(ld, lmo, lyr));
+      } else {
+          snprintf(s, sizeof(s), "LMT --:--:-- ---");
+      }
+      s_tft.setTextDatum(TR_DATUM);
+      s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
+      s_tft.setTextPadding(150);
+      s_tft.drawString(s, 314, 4, 2);
+      s_tft.setTextDatum(TL_DATUM);
+
+      /* ---- frequency, font 4 size 2, centred, colour-coded ----
+       * Lock detection is algorithm-independent: based on the actual
+       * deviation of the best available average from 10 MHz, since most
+       * algorithms never emit the "hit" trend string (algos 3-5 only on
+       * an exact 0.0 PID output, 6-9 never).  Thresholds:
+       *   10000-s window: |e| ≤ 1.0 mHz  (1e-10)
+       *    1000-s window: |e| ≤ 10  mHz  (1e-9)                          */
+      {
+          uint16_t fcol = TFT_COL_VALUE;
+          bool locked = false;
+          bool busy = (g_svin_active || g_warmup_active || g_calib_active);
+          if (busy) {
+              if (g_svin_active)
+                  snprintf(s, sizeof(s), "SVIN %us %um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
+              else if (g_warmup_active)
+                  snprintf(s, sizeof(s), "WARMUP %us", (unsigned)g_warmup_remaining);
+              else
+                  snprintf(s, sizeof(s), "CAL %us", (unsigned)g_calib_remaining);
+              fcol = TFT_COL_HOLD;
+              static uint16_t prev_cf = 0;
+              if (prev_cf != fcol) { tft_prev[0][0] = '\0'; prev_cf = fcol; }
+              s_tft.setTextDatum(TC_DATUM);
+              if (strncmp(tft_prev[0], s, sizeof(tft_prev[0])-1) != 0) {
+                  strncpy(tft_prev[0], s, sizeof(tft_prev[0])-1);
+                  s_tft.setTextColor(fcol, TFT_COL_BG);
+                  s_tft.setTextPadding(316);
+                  s_tft.drawString(s, 160, 34, 4);
+              }
+              s_tft.setTextDatum(TL_DATUM);
+              /* Do NOT return — fall through so the PWM/Vctl cell (slot 5)
+               * keeps updating live during calibration. The info grid below
+               * shows current PWM and Vctl, which is exactly what the user
+               * wants to watch while C/CT sweeps the DAC. */
+          } else {
+          if      (f->full10000) { double e = f->avg10000 - 10000000.0;
+                                   locked = (e > -0.001 && e < 0.001); }
+          else if (f->full1000)  { double e = f->avg1000  - 10000000.0;
+                                   locked = (e > -0.010 && e < 0.010); }
+          if (strncmp(c->trendstr,"hit",3) == 0) locked = true;
+
+          if      (c->holdover_mode) fcol = TFT_COL_HOLD;
+          else if (locked)           fcol = TFT_COL_LOCK;
+
+          if      (f->full10000) { static char ff[16]; dtostrf(f->avg10000,14,4,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full1000)  { static char ff[16]; dtostrf(f->avg1000, 14,3,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full100)   { static char ff[16]; dtostrf(f->avg100,  14,2,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full10)    { static char ff[16]; dtostrf(f->avg10,   14,1,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->calcfreqint > 0) { snprintf(s,sizeof(s),"%14ld Hz",(long)f->calcfreqint); }
+          else { snprintf(s,sizeof(s),"   no signal   "); fcol = TFT_COL_ALERT; }
+
+          /* colour participates in cache key: append colour marker */
+          static uint16_t prev_fcol = 0;
+          if (prev_fcol != fcol) { tft_prev[0][0] = '\0'; prev_fcol = fcol; }
+
+          s_tft.setTextDatum(TC_DATUM);
+          if (strncmp(tft_prev[0], s, sizeof(tft_prev[0])-1) != 0) {
+              strncpy(tft_prev[0], s, sizeof(tft_prev[0])-1);
+              /* Fixed-width font 1 at size 3 (18x24): the frequency digits
+               * keep a constant column position instead of shifting as the
+               * value changes — much easier to read at a glance. */
+              s_tft.setTextColor(fcol, TFT_COL_BG);
+              s_tft.setTextPadding(316);
+              s_tft.setTextFont(1);
+              s_tft.setTextSize(3);
+              s_tft.drawString(s, 160, 30);
+              s_tft.setTextSize(1);
+          }
+          s_tft.setTextDatum(TL_DATUM);
+          }
+      }
+
+      /* ---- info grid, left column ---- */
+      if (g->valid)
+          snprintf(s,sizeof(s),"UTC:%02d:%02d:%02d %s", g->hours,g->mins,g->secs,
+                   day_of_week_str(g->day,g->month,g->year));
+      else snprintf(s,sizeof(s),"UTC:--:--:--");
+      tft_val(1, TFT_COL_L, TFT_GRID_Y+0*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+
+      if (g->valid) snprintf(s,sizeof(s),"%02d/%02d/%04d", g->day,g->month,g->year);
+      else          snprintf(s,sizeof(s),"--/--/----");
+      tft_val(2, TFT_COL_L, TFT_GRID_Y+1*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+
+      snprintf(s,sizeof(s),"Up %s %s", u->days_str, u->time_str);
+      tft_val(3, TFT_COL_L, TFT_GRID_Y+2*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+
+      snprintf(s,sizeof(s),"Algo:%u  %s", c->active_algo, c->trendstr);
+      tft_val(4, TFT_COL_L, TFT_GRID_Y+3*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+
+      { static char fv[8];
+        double vctl = ((double)c->avg_vctl_adc / 4096.0) * 3.3;
+        dtostrf(vctl, 5, 3, fv);
+        snprintf(s,sizeof(s),"PWM:%5u V:%s", c->pwm_output, fv); }
+      tft_val(5, TFT_COL_L, TFT_GRID_Y+4*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+
+      /* ---- info grid, right column ---- */
+      if (g->pos_valid) {
+          if (g->time_mode) {
+              snprintf(s,sizeof(s),"Sat:%2d HDOP:TIME", g->sats);
+          } else {
+              static char fhd[8]; dtostrf((double)g->hdop/100.0,4,2,fhd);
+              snprintf(s,sizeof(s),"Sat:%2d HDOP:%s", g->sats, fhd);
+          }
+      } else snprintf(s,sizeof(s),"Sat:%2d  no fix", g->sats);
+      tft_val(6, TFT_COL_R, TFT_GRID_Y+0*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+
+      if (g->pos_valid) { static char fl[12]; dtostrf(g->lat,10,6,fl);
+          snprintf(s,sizeof(s),"Lat:%s",fl); }
+      else snprintf(s,sizeof(s),"Lat: ---");
+      tft_val(7, TFT_COL_R, TFT_GRID_Y+1*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+
+      if (g->pos_valid) { static char fn[12]; dtostrf(g->lon,10,6,fn);
+          snprintf(s,sizeof(s),"Lon:%s",fn); }
+      else snprintf(s,sizeof(s),"Lon: ---");
+      tft_val(8, TFT_COL_R, TFT_GRID_Y+2*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+
+      if (g->pos_valid) snprintf(s,sizeof(s),"Alt:%5dm",(int)g->alt);
+      else              snprintf(s,sizeof(s),"Alt: ---");
+      tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+
+      if (ina_ok) { static char fv[10],fi[10];
+          dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
+          snprintf(s,sizeof(s),"INA:%sV %smA",fv,fi); }
+      else snprintf(s,sizeof(s),"INA: ---");
+      tft_val(10, TFT_COL_R, TFT_GRID_Y+4*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+
+      /* ---- sensor row ---- */
+      if (bmp_ok) { static char ft[8],fp[10];
+          dtostrf(g_bmp_temp,4,2,ft); dtostrf(g_bmp_pres,7,2,fp);
+          snprintf(s,sizeof(s),"BMP:%sC %shPa",ft,fp); }
+      else snprintf(s,sizeof(s),"BMP: ---");
+      tft_val(11, TFT_COL_L, TFT_SENS_Y, 156, TFT_COL_VALUE, s);
+
+      if (aht_ok) { static char ft[8],fh[8];
+          dtostrf(g_aht_temp,4,2,ft); dtostrf(g_aht_humi,4,2,fh);
+          snprintf(s,sizeof(s),"AHT:%sC %s%%rH",ft,fh); }
+      else snprintf(s,sizeof(s),"AHT: ---");
+      tft_val(12, TFT_COL_R, TFT_SENS_Y, 148, TFT_COL_VALUE, s);
+
+      /* ---- status bar (full redraw only on state change) ---- */
+      {
+          /* states: 0=no fix, 1=disciplined, 2=manual HO, 3=auto HO */
+          uint8_t st;
+          if      (c->holdover_mode && c->holdover_auto) st = 3;
+          else if (c->holdover_mode)                     st = 2;
+          else if (g->pos_valid)                         st = 1;
+          else                                           st = 0;
+
+          static uint8_t prev_st = 0xFF;
+          if (st != prev_st) {
+              prev_st = st;
+              uint16_t bg; const char *txt;
+              switch (st) {
+                  case 1:  bg = TFT_COL_LOCK;  txt = "DISCIPLINED  FIX OK";   break;
+                  case 2:  bg = TFT_COL_HOLD;  txt = "HOLDOVER (manual)";     break;
+                  case 3:  bg = TFT_COL_ALERT; txt = "HOLDOVER (fix lost)";   break;
+                  default: bg = TFT_COL_ALERT; txt = "WAITING FOR GPS FIX";   break;
+              }
+              s_tft.fillRect(0, TFT_STATUS_Y, 320, 36, bg);
+              s_tft.setTextDatum(MC_DATUM);
+              s_tft.setTextColor(TFT_BLACK, bg);
+              s_tft.setTextPadding(0);
+              s_tft.drawString(txt, 160, TFT_STATUS_Y + 18, 4);
+              s_tft.setTextDatum(TL_DATUM);
+          }
+      }
+  }
+#endif /* GPSDO_TFT */
+
+/* ======================================================================
  * TM1637
  *
  * GPSDO_TM1637_6 — 6-digit: HH:MM:SS, colon blinks on even seconds
@@ -594,10 +1065,78 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       SEG_C | SEG_D | SEG_E | SEG_G,   /* o */
       SEG_C | SEG_D | SEG_E | SEG_G    /* o */
   };
+  /* "CAL " — shown during C/CT calibration */
+  static const uint8_t seg_cal[] = {
+      SEG_A | SEG_D | SEG_E | SEG_F,                 /* C */
+      SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G, /* A */
+      SEG_D | SEG_E | SEG_F,                         /* L */
+      0, 0, 0                                        /* blank */
+  };
 #endif
+
+/* ======================================================================
+ * HT16K33 — 4-digit 7-segment clock display with colon, I2C (addr 0x70)
+ *
+ * Self-contained minimal driver (no external library).  Targets the
+ * common Adafruit-style 0.56" clock backpack and its AliExpress clones:
+ * display RAM layout — digits at addresses 0,2,6,8; colon at address 4
+ * (bit 1).  Shows HH:MM, colon blinks each second, "oooo" when no fix.
+ *
+ * Shares the I2C bus → every transaction is wrapped in xWireMutex by
+ * the caller (vDisplayTask).
+ * ====================================================================== */
+#ifdef GPSDO_HT16K33
+  #include <Wire.h>
+
+  /* 7-segment encoding: bit0=A .. bit6=G */
+  static const uint8_t ht_digit[10] = {
+      0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+  };
+  #define HT_SEG_o   0x5C            /* lowercase o = c+d+e+g */
+  static bool s_ht_ok = false;
+
+  static bool ht_cmd(uint8_t cmd)
+  {
+      Wire.beginTransmission(HT16K33_I2C_ADDR);
+      Wire.write(cmd);
+      return Wire.endTransmission() == 0;
+  }
+
+  /* Write 4 digit patterns + colon state to display RAM */
+  static void ht_write(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3,
+                       bool colon)
+  {
+      Wire.beginTransmission(HT16K33_I2C_ADDR);
+      Wire.write((uint8_t)0x00);          /* RAM address 0 */
+      Wire.write(d0); Wire.write((uint8_t)0x00);
+      Wire.write(d1); Wire.write((uint8_t)0x00);
+      Wire.write((uint8_t)(colon ? 0x02 : 0x00));  /* addr 4: colon */
+      Wire.write((uint8_t)0x00);
+      Wire.write(d2); Wire.write((uint8_t)0x00);
+      Wire.write(d3); Wire.write((uint8_t)0x00);
+      Wire.endTransmission();
+  }
+
+  /* Init: oscillator on, display on, brightness; returns true if ACKed */
+  static bool ht_init(void)
+  {
+      if (!ht_cmd(0x21)) return false;             /* oscillator on      */
+      ht_cmd(0x81);                                 /* display on, no blink */
+      ht_cmd(0xE0 | (HT16K33_BRIGHTNESS & 0x0F));   /* brightness         */
+      ht_write(HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);
+      return true;
+  }
+#endif /* GPSDO_HT16K33 */
 
 extern int8_t g_time_offset;
 extern bool   g_show_local_time;
+extern volatile bool     g_calib_active;
+extern volatile uint16_t g_calib_remaining;
+extern volatile bool     g_warmup_active;
+extern volatile uint16_t g_warmup_remaining;
+extern volatile bool     g_svin_active;
+extern volatile uint16_t g_svin_dur;
+extern volatile uint16_t g_svin_acc_m;
 
 /* -----------------------------------------------------------------------
  * day_of_week_str — Zeller's congruence → 3-letter English abbreviation.
@@ -686,19 +1225,31 @@ void vDisplayTask(void *pvParameters)
      */
     vTaskDelay(pdMS_TO_TICKS(200));
     if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-        s_oled.begin();
-        s_oled.setFont(u8x8_font_chroma48medium8_r);
-        s_oled.clear();
-        memset(oled_prev, 0, sizeof(oled_prev));
-        /* Row 0: version splash — shown for 2 s, then replaced by LMT clock */
-        s_oled.setCursor(0, 0);
-        s_oled.print(PROGRAM_NAME " " PROGRAM_VERSION);
-        /* Do NOT copy to oled_prev[0] — forces redraw after splash expires */
-        s_oled_ok = true;
+        s_oled.begin();               /* also calls Wire.begin()           */
+        /* u8x8.begin() does not verify the display is present — probe the
+         * bus ourselves so the HW report reflects reality.               */
+        s_oled_ok = i2c_probe(0x3C);
+        if (s_oled_ok) {
+            s_oled.clear();
+            memset(oled_prev, 0, sizeof(oled_prev));
+            /* Character-mode boot splash (U8x8, no graphics buffer):
+             *   rows 0-1: big "GPSDO" via draw2x2String (uses a 2x2 font)
+             *   row3: version   row5: sine accent   row7: footer
+             * Replaced by the live clock once oled_splash_done. */
+            s_oled.setFont(u8x8_font_chroma48medium8_r);
+            s_oled.draw2x2String(3, 0, "GPSDO");        /* 10 cols, centred in 16 */
+            { char vl[17]; int vlen = (int)strlen(PROGRAM_VERSION);
+              int vcol = (16 - vlen) / 2; if (vcol < 0) vcol = 0;
+              s_oled.drawString(vcol, 3, PROGRAM_VERSION); (void)vl; }
+            s_oled.drawString(0, 5, "~~~~~~~~~~~~~~~~");
+            s_oled.drawString(1, 7, "jmnlabs+Claude");   /* 14 ch, fits 16 col */
+            /* Row 0 not cached → forced redraw to clock after splash */
+        }
         xSemaphoreGive(xWireMutex);
-        OUT_SERIAL.println("OLED OK");
+        OUT_SERIAL.println(s_oled_ok ? "HW: OLED 128x64           OK  (I2C 0x3C)"
+                                     : "HW: OLED 128x64           not found");
     } else {
-        OUT_SERIAL.println("OLED: mutex timeout at init");
+        OUT_SERIAL.println("HW: OLED 128x64           init failed (I2C mutex timeout)");
     }
 #endif /* GPSDO_OLED */
 
@@ -730,16 +1281,28 @@ void vDisplayTask(void *pvParameters)
         xSemaphoreGive(xWireMutex);
     }
     if (s_lcd_ok) {
-        /* Write title row under mutex (lcd_set_line uses I2C) */
+        /* 4-line boot splash (centred in 20 cols), held ~3 s:
+         *   line0:  ====================
+         *   line1:       GPSDO  vX.XX
+         *   line2:  GPS-Disciplined Osc.
+         *   line3:  jmnlabs  +  Claude
+         * lcd_set_line uses I2C → guard with the Wire mutex.            */
         if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            lcd_set_line(0, PROGRAM_NAME " " PROGRAM_VERSION);
+            char l[21];
+            lcd_set_line(0, "====================");
+            /* "  GPSDO vX.XX-rtos" — two leading spaces, suffix not cut */
+            snprintf(l, sizeof(l), "  GPSDO %s", PROGRAM_VERSION);
+            lcd_set_line(1, l);
+            lcd_set_line(2, "GPS-Disciplined Osc.");
+            lcd_set_line(3, " jmnlabs  +  Claude ");
             xSemaphoreGive(xWireMutex);
         }
-        /* Hold the splash screen for 2 seconds before the main loop starts */
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        OUT_SERIAL.println("LCD 20x4 OK");
+        vTaskDelay(pdMS_TO_TICKS(4500));
+        /* Clear cache so the operating screen redraws all four lines */
+        memset(lcd_prev, 0, sizeof(lcd_prev));
+        OUT_SERIAL.println("HW: LCD 20x4              OK  (I2C expander)");
     } else {
-        OUT_SERIAL.println("LCD 20x4 not found — check I2C address / wiring");
+        OUT_SERIAL.println("HW: LCD 20x4              not found (check I2C addr / wiring)");
     }
 #endif
 
@@ -772,18 +1335,71 @@ void vDisplayTask(void *pvParameters)
     digitalWrite(TM_DIO, LOW);
     delayMicroseconds(500);       /* let pins settle after possible AF→GPIO transition */
 
-    s_tm.setBrightness(5);        /* brightness 5/7 — clearly visible at startup */
+    s_tm.setBrightness(1);        /* brightness 5/7 — clearly visible at startup */
     s_tm.clear();
     /* Show mid_dashes immediately — communicates "device alive, no GPS yet" */
     s_tm.setSegments(mid_dashes);
-    OUT_SERIAL.println("TM1637 init OK");
+    OUT_SERIAL.println("HW: TM1637 clock display  enabled (GPIO PA8/PB4, write-only - not verifiable)");
+#endif
+
+#ifdef GPSDO_TFT
+    /* TFT on exclusive SPI1 — no mutex needed, init directly */
+    tft_init();
+#endif
+
+#ifdef GPSDO_HT16K33
+    /* HT16K33 shares I2C — init under Wire mutex.
+     * Wire.begin() here is a safety net for builds where no other I2C
+     * device initialised the bus first; calling it twice is harmless.
+     * i2c_probe gives a reliable presence check before configuring.    */
+    if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Wire.begin();
+        s_ht_ok = i2c_probe(HT16K33_I2C_ADDR) && ht_init();
+        xSemaphoreGive(xWireMutex);
+    }
+    OUT_SERIAL.println(s_ht_ok ? "HW: HT16K33 clock display OK  (I2C 0x70)"
+                               : "HW: HT16K33 clock display not found");
+#endif
+
+#ifdef GPSDO_TFT
+    /* All detection done — play the boot splash with the real hardware
+     * checklist, then draw the operating-screen layout. */
+    if (s_tft_ok) {
+        /* Wait up to 1 s for vSensorTask to finish probing, so the
+         * checklist reflects the sensors too (cosmetic only). */
+        for (int w = 0; w < 100 && !s_sensors_probed; w++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+
+        bool oled_ok = false, lcd_ok = false, ht_ok = false;
+        bool aht_ok = false, bmp_ok = false, ina_ok = false;
+#ifdef GPSDO_OLED
+        oled_ok = s_oled_ok;
+#endif
+#ifdef GPSDO_LCD_20x4
+        lcd_ok = s_lcd_ok;
+#endif
+#ifdef GPSDO_HT16K33
+        ht_ok = s_ht_ok;
+#endif
+#ifdef GPSDO_AHT10
+        aht_ok = s_aht_ok;
+#endif
+#ifdef GPSDO_BMP280_I2C
+        bmp_ok = s_bmp_ok;
+#endif
+#ifdef GPSDO_INA219
+        ina_ok = s_ina_ok;
+#endif
+        tft_splash(oled_ok, lcd_ok, ht_ok, aht_ok, bmp_ok, ina_ok);
+        tft_draw_layout();
+    }
 #endif
 
     /* ---- State for alternating displays ---- */
 #ifdef GPSDO_OLED
     uint8_t  oled_page         = 0;              /* 0 = GPS focus, 1 = sensors */
     uint32_t oled_page_counter = 0;              /* PPS ticks on current page  */
-    bool     oled_splash_done  = false;          /* true after 2-s version splash */
+    bool     oled_splash_done  = false;          /* true after 4.5-s version splash */
     uint32_t oled_splash_ms    = millis();       /* timestamp of OLED init       */
 #endif
 
@@ -893,14 +1509,30 @@ void vDisplayTask(void *pvParameters)
             }
 
             /* ---- Row 0: version splash (2 s) then LMT clock + day ----
-             * Splash: firmware version shown for 2000 ms after init.
+             * Splash: firmware version shown for 4500 ms after init.
              * Normal: "LMT:hh:mm:ss DAY" — local time + 3-letter day name (16 chars).
              * Format: "LMT:" (4) + "hh:mm:ss" (8) + " " (1) + "DAY" (3) = 16. */
             if (!oled_splash_done) {
-                if ((millis() - oled_splash_ms) >= 2000UL) {
+                if ((millis() - oled_splash_ms) >= 4500UL) {
                     oled_splash_done = true;
-                    /* Force row 0 redraw on next iteration */
-                    memset(oled_prev[0], 0, sizeof(oled_prev[0]));
+                    /* The splash used draw2x2String (a 2x tile-doubled font)
+                     * for the big GPSDO across rows 0-1, plus rows 3/5/7.
+                     * clear() alone sometimes leaves tile remnants, so:
+                     *   1. restore the normal 8x8 font (undo 2x2 state),
+                     *   2. clear the whole panel,
+                     *   3. blank every one of the 8 text rows explicitly,
+                     *   4. invalidate the full row cache so the operating
+                     *      screen redraws each row from scratch. */
+                    if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        s_oled.setFont(u8x8_font_chroma48medium8_r);
+                        s_oled.clear();
+                        for (uint8_t r = 0; r < 8; r++) {
+                            s_oled.setCursor(0, r);
+                            s_oled.print("                ");  /* 16 spaces */
+                        }
+                        xSemaphoreGive(xWireMutex);
+                    }
+                    memset(oled_prev, 0, sizeof(oled_prev));
                 }
                 /* Still showing splash — don't touch row 0 */
             } else {
@@ -927,7 +1559,13 @@ void vDisplayTask(void *pvParameters)
              *   e.g. "F 9999999.9999Hz"  (dtostrf width=13, 4 decimals)
              *        "F  9999999.999Hz"  (3 decimals)
              *        "F     10000000Hz"  (integer fallback) */
-            if (snap_f.full10000)
+            if (g_svin_active)
+                snprintf(line,sizeof(line),"F SVIN%3us %2um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
+            else if (g_warmup_active)
+                snprintf(line,sizeof(line),"F WARMUP %3us  ", (unsigned)g_warmup_remaining);
+            else if (g_calib_active)
+                snprintf(line,sizeof(line),"F  CAL %3us    ", (unsigned)g_calib_remaining);
+            else if (snap_f.full10000)
                 { static char ff[15]; dtostrf(snap_f.avg10000,13,4,ff); snprintf(line,sizeof(line),"F%sHz",ff); }
             else if (snap_f.full1000)
                 { static char ff[15]; dtostrf(snap_f.avg1000, 13,3,ff); snprintf(line,sizeof(line),"F%sHz",ff); }
@@ -990,7 +1628,13 @@ void vDisplayTask(void *pvParameters)
                 { static char fv[7],fi[7]; dtostrf(g_ina_volt,5,2,fv); dtostrf(g_ina_curr,5,0,fi); snprintf(line,sizeof(line),"IN:%sV%smA",fv,fi); }
                 oled_set_line(4, line);
                 /* Row 5: satellites + HDOP */
-                { static char fh[6]; dtostrf((double)snap_g.hdop/100.0,4,2,fh); snprintf(line,sizeof(line),"Sat:%2d HDOP:%s",snap_g.sats,fh); }
+                { static char fh[6];
+                  if (snap_g.time_mode) {
+                      snprintf(line,sizeof(line),"Sat:%2d HDOP:TIME",snap_g.sats);
+                  } else {
+                      dtostrf((double)snap_g.hdop/100.0,4,2,fh);
+                      snprintf(line,sizeof(line),"Sat:%2d HDOP:%s",snap_g.sats,fh);
+                  } }
                 oled_set_line(5, line);
                 /* Row 6 (Page B): UTC time + day of week.
                  * Format: "UTC:hh:mm:ss DAY" — exactly 16 chars.
@@ -1062,7 +1706,13 @@ void vDisplayTask(void *pvParameters)
              *   full100:   "F:    10000000.00 Hz"
              *   full10:    "F:     10000000.0 Hz"
              *   integer:   "F:       10000000 Hz"  (right-justified in 15 chars + space + Hz) */
-            if (snap_f.full10000)
+            if (g_svin_active)
+                snprintf(line,sizeof(line),"F: SVIN %3us acc%2um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
+            else if (g_warmup_active)
+                snprintf(line,sizeof(line),"F: OCXO WARMUP %3us ", (unsigned)g_warmup_remaining);
+            else if (g_calib_active)
+                snprintf(line,sizeof(line),"F: CALIBRATING %3us ", (unsigned)g_calib_remaining);
+            else if (snap_f.full10000)
                 { static char ff[16]; dtostrf(snap_f.avg10000,15,4,ff); snprintf(line,sizeof(line),"F:%s Hz",ff); }
             else if (snap_f.full1000)
                 { static char ff[16]; dtostrf(snap_f.avg1000, 15,3,ff); snprintf(line,sizeof(line),"F:%s Hz",ff); }
@@ -1115,7 +1765,9 @@ void vDisplayTask(void *pvParameters)
                     }
                     break;
                 case 1: /* Satellites + HDOP */
-                    if (snap_g.pos_valid) {
+                    if (snap_g.pos_valid && snap_g.time_mode) {
+                        snprintf(line,sizeof(line),"Sats:%2d  HDOP:TIME  ",snap_g.sats);
+                    } else if (snap_g.pos_valid) {
                         static char fhd[6]; dtostrf((double)snap_g.hdop/100.0,4,2,fhd);
                         snprintf(line,sizeof(line),"Sats:%2d  HDOP:%s",snap_g.sats,fhd);
                     } else {
@@ -1211,6 +1863,15 @@ void vDisplayTask(void *pvParameters)
 #endif /* GPSDO_LCD_20x4 */
 
         /* ==============================================================
+         * TFT 240x320 update (SPI1 — exclusive bus, no mutex)
+         * ============================================================== */
+#ifdef GPSDO_TFT
+        if (s_tft_ok)
+            tft_update(&snap_g, &snap_f, &snap_c, &snap_u,
+                       s_aht_ok, s_bmp_ok, s_ina_ok);
+#endif
+
+        /* ==============================================================
          * TM1637 clock update
          *
          * Updates only when GPS time is valid (snap_g.valid).
@@ -1235,25 +1896,15 @@ void vDisplayTask(void *pvParameters)
                 s_tm.setSegments(mid_dashes);
             }
         }
-        if (!snap_g.pos_valid) {
-            /* No GPS position fix — show lowercase 'o' on all digits.
-             *
-             * Condition changed from snap_g.valid (time) to snap_g.pos_valid
-             * (position fix). Reason: snap_g.valid becomes true as soon as
-             * TinyGPS++ receives the first NMEA time sentence — typically
-             * within seconds of power-on, before any position lock. The
-             * module sends time data even with 0 satellites in view, so
-             * valid=true while showing 00:00:00 or a stale time value.
-             *
-             * snap_g.pos_valid is only set when gps.location.isValid() is
-             * true AND a GGA/RMC sentence with a proper fix has been decoded.
-             * This is the correct "GPS locked" indicator for status display.
-             *
-             * Behaviour:
-             *   No fix (searching)  → low_oooo_s  (o o o o o o)
-             *   Fix acquired        → time display (HH:MM:SS or HH:MM)
-             */
-            /* Pass TM1637_MAX_DIGITS (6); the library clips to m_digitCount */ 
+        /* No GPS position fix → 'oooo'; fix → time; calibration → CAL.
+         * pos_valid (not valid) is the true "GPS locked" indicator:
+         * valid turns true on the first NMEA time sentence, before any
+         * position lock, so it would show a stale 00:00:00. */
+        if (g_svin_active || g_warmup_active) {
+            s_tm.setSegments(mid_dashes, TM1637_MAX_DIGITS);  /* ------ svin/warmup */
+        } else if (g_calib_active) {
+            s_tm.setSegments(seg_cal, TM1637_MAX_DIGITS);
+        } else if (!snap_g.pos_valid) {
             s_tm.setSegments(low_oooo_s, TM1637_MAX_DIGITS);
         } else {
             int h = snap_g.hours;
@@ -1291,6 +1942,43 @@ void vDisplayTask(void *pvParameters)
 #endif
         } /* else snap_g.valid */
 #endif /* TM1637 */
+
+        /* ==============================================================
+         * HT16K33 clock update — HH:MM, colon blinks each second
+         *
+         * Same status logic as TM1637: "oooo" while searching for a fix,
+         * time once pos_valid.  Local time per g_show_local_time / TO.
+         * I2C bus shared → wrapped in xWireMutex.
+         * ============================================================== */
+#ifdef GPSDO_HT16K33
+        if (s_ht_ok &&
+            xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+        {
+            if (g_svin_active || g_warmup_active) {
+                /* survey-in / warmup → four dashes (segment G) */
+                ht_write(0x40, 0x40, 0x40, 0x40, false);
+            } else if (g_calib_active) {
+                /* "CAL" + tens-of-seconds digit, colon off.
+                 * 7-seg: C=A,D,E,F ; A=A,B,C,E,F,G ; L=D,E,F */
+                const uint8_t SEG_C7 = 0x39, SEG_A7 = 0x77, SEG_L7 = 0x38;
+                uint8_t d = ht_digit[(g_calib_remaining / 10) % 10];
+                ht_write(SEG_C7, SEG_A7, SEG_L7, d, false);
+            } else if (!snap_g.pos_valid) {
+                ht_write(HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);
+            } else {
+                int h = snap_g.hours;
+                if (g_show_local_time) {
+                    h += g_time_offset;
+                    if      (h >= 24) h -= 24;
+                    else if (h <  0)  h += 24;
+                }
+                ht_write(ht_digit[h / 10],          ht_digit[h % 10],
+                         ht_digit[snap_g.mins / 10], ht_digit[snap_g.mins % 10],
+                         (snap_g.secs & 1) == 0);   /* colon on even seconds */
+            }
+            xSemaphoreGive(xWireMutex);
+        }
+#endif /* GPSDO_HT16K33 */
 
     } /* for(;;) */
 }

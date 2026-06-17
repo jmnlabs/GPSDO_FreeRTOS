@@ -1,7 +1,7 @@
 /**
  * GPSDO_FreeRTOS.ino — Main entry point — hardware init and FreeRTOS scheduler start
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -25,6 +25,17 @@
  *   - hd44780 (if GPSDO_LCD_20x4 is enabled)
  *   - EEPROM (STM32 emulated)
  *   Arduino IDE: Tools > C Runtime Library > Newlib Nano + Float Printf/Scanf
+ *
+ * SERIAL RX BUFFER (build_opt.h)
+ *   This sketch folder contains build_opt.h with:
+ *       -DSERIAL_RX_BUFFER_SIZE=256 -DSERIAL_TX_BUFFER_SIZE=512
+ *   STM32duino picks up build_opt.h automatically and applies these flags
+ *   to the WHOLE build, including HardwareSerial.cpp in the core. This is
+ *   required because a plain #define in the sketch does NOT reach the core
+ *   (HardwareSerial.cpp is a separate translation unit). The larger RX
+ *   buffer prevents NMEA sentences from being dropped/merged at 38400 baud
+ *   when vGpsTask is briefly preempted. Default 64 B was too small even
+ *   with only GGA+RMC enabled.
  */
 
 #include "gpsdo_config.h"

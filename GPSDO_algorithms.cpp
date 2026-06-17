@@ -1,7 +1,7 @@
 /**
  * GPSDO_algorithms.cpp — Control loop algorithm implementations
  *
- * Part of GPSDO FreeRTOS v0.29
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -65,6 +65,42 @@ static uint16_t clamp_pwm(int32_t v)
     return (uint16_t)v;
 }
 
+/* -----------------------------------------------------------------------
+ * apply_correction — common output stage for the disciplining algorithms.
+ *
+ *   1. Dead-zone (lock hold): if the frequency error is within LOCK_HZ AND
+ *      the accumulated phase is within LOCK_PHASE (Hz·s ≈ time offset in
+ *      units of cycles), the loop is locked — suppress the step so the PWM
+ *      stops twitching and the OCXO free-runs on its own short-term
+ *      stability.  *locked is set true so the caller can show "hit".
+ *      Without the phase test the PLL would nudge ±2-5 LSB every period
+ *      forever, because the phase term never resolves to exactly zero.
+ *
+ *   2. Slew-rate limit: clamp |u| to max_step so a slow overnight phase
+ *      drift is corrected over several periods, not one big PWM jump.
+ *
+ *   3. Clamp + write.
+ * ---------------------------------------------------------------------- */
+static uint16_t apply_correction(uint16_t pwm, double u,
+                                 double e_freq, double phase_acc,
+                                 double max_step, bool *locked)
+{
+    const double LOCK_HZ    = 0.0010;   /* 1 mHz  ≈ 1e-10 frac. freq.     */
+    const double LOCK_PHASE = 5.0;      /* 5 Hz·s ≈ 500 ns accumulated    */
+
+    bool in_lock = (e_freq   > -LOCK_HZ    && e_freq   < LOCK_HZ) &&
+                   (phase_acc > -LOCK_PHASE && phase_acc < LOCK_PHASE);
+    if (locked) *locked = in_lock;
+
+    if (in_lock) return pwm;            /* hold — no PWM motion in lock */
+
+    /* Slew-rate limit */
+    if (u >  max_step) u =  max_step;
+    if (u < -max_step) u = -max_step;
+
+    return clamp_pwm((int32_t)pwm + (int32_t)u);
+}
+
 /* Write trendstr — caller already holds xCtrlMutex */
 static void set_trend(const char *s)
 {
@@ -75,71 +111,45 @@ static void set_trend(const char *s)
 /* ======================================================================
  * RUNTIME-TUNABLE PARAMETERS
  *
- * Compile-time defaults depend on the OCXO selected in gpsdo_config.h.
- * All values can be overridden at runtime via CLI (KP/KI/KD/IL/BC/BS/NS)
- * and persisted to EEPROM with ES.
+ * These are STARTING values only. The OCXO type does not need to be known
+ * at compile time: the CT (Calibrate & Tune) command measures the actual
+ * plant gain K and recomputes every coefficient for the fitted oscillator
+ * (PLL Kp = 0.40/K on frequency; FLL Kp = 0.35/K, Ki = Kp/300, Kd = Kp*73;
+ * NN max step = 0.05/K). Run CT once, then ES to persist.
  *
- * Physical basis for the two supported OCXOs:
- *   CTI OSC5A2B02   — supply 5V, EFC 0..4V, Kv = 7.50  Hz/V, Δf = 30 Hz, 0.378 mHz/LSB
- *   Vectron C4550   — supply 5V, EFC 0..4V, Kv = 10.00 Hz/V, Δf = 40 Hz, 0.504 mHz/LSB
- * Scale factor Vectron/CTI = 1.333 → Vectron gains = CTI × 0.75
+ * The defaults below assume a typical 10 MHz OCXO with K ~ 0.4 mHz/LSB on
+ * a 0..3.3 V PWM DAC (16-bit, 1 LSB = 50.35 uV). They are deliberately
+ * mid-range so the loop is stable on any common unit before CT is run.
+ * All values can also be set at runtime via CLI (KP/KI/KD/IL/BC/BS/NS).
  *
- * PWM DAC: 16-bit, Vcc = 3.3 V, 1 LSB = 50.35 µV
+ * Coefficient meaning:
+ *   PLL (4,5,7): Kp on frequency error, Kd/Ki gentle terms on phase
+ *   FLL (3,6):   classic frequency-domain PID
+ *   [8] hybrid reads [6]+[7]; only its I_LIMIT is used here
+ *   [9] NN uses fixed weights; only I_LIMIT (normalisation) applies
  * ====================================================================== */
-
-/* ---- CTI OSC5A2B02 defaults ---------------------------------------- */
-#if defined(GPSDO_OCXO_CTI_OSC5A2B02) || !defined(GPSDO_OCXO_VECTRON_C4550)
 PidParams_t g_pid[10] = {
     /* [0] */  { 0.0,    0.0,      0.0,       0.0     },
     /* [1] */  { 0.0,    0.0,      0.0,       0.0     },
     /* [2] */  { 0.0,    0.0,      0.0,       0.0     },
-    /* [3]  FLL PID manual     Kv=7.50 Hz/V */
-               { 80.0,   0.80,     200.0,     10000.0 },
-    /* [4]  PLL PI  manual                   */
-               { 30.0,   0.003,    0.0,       8000.0  },
-    /* [5]  PLL PID manual                   */
-               { 40.0,   0.010,    800.0,     12000.0 },
-    /* [6]  FLL PID genetic                  */
-               { 234.0,  0.301,    17082.0,   15000.0 },
-    /* [7]  PLL PID genetic                  */
-               { 70.0,   0.181,    2548.0,    12000.0 },
-    /* [8]  hybrid (uses [6]+[7]) IL only    */
-               { 0.0,    0.0,      0.0,       15000.0 },
+    /* [3]  FLL PID manual                   */
+               { 70.0,   0.70,     175.0,     9000.0  },
+    /* [4]  PLL: Kp=freq gain, Kd=phase prop, Ki=phase integral */
+               { 1000.0, 0.020,    2.0,       7000.0  },
+    /* [5]  PLL: Kp=freq, Kd=phase, Ki=phase integral */
+               { 1000.0, 0.020,    2.0,       10000.0 },
+    /* [6]  FLL PID genetic (freq-domain)     */
+               { 205.0,  0.264,    14950.0,   13000.0 },
+    /* [7]  PLL: Kp=freq, Kd=phase, Ki=phase integral */
+               { 1000.0, 0.020,    2.0,       10000.0 },
+    /* [8]  hybrid (uses [6]+[7]) IL only     */
+               { 0.0,    0.0,      0.0,       13000.0 },
     /* [9]  NN  I_LIMIT = normalisation bound */
-               { 0.0,    0.0,      0.0,       500.0   },
+               { 0.0,    0.0,      0.0,       450.0   },
 };
-double g_blend_crossover = 0.020;   /* Hz — sigmoid centre */
-double g_blend_scale     = 0.010;   /* Hz — sigmoid width  */
-double g_nn_max_step     = 200.0;   /* LSB — max PWM delta  */
-
-/* ---- Vectron C4550A1-0213 defaults --------------------------------- */
-#elif defined(GPSDO_OCXO_VECTRON_C4550)
-/* Supply: 5V, EFC: 0..4V, SC cut, ±2 ppm, Kv = 10.00 Hz/V
- * Scale factor vs CTI = 10.00/7.50 = 1.333 → gains = CTI × 0.75
- * DEFAULT_PWM = 39718 (~2.0V) same as CTI (identical EFC range)       */
-PidParams_t g_pid[10] = {
-    /* [0] */  { 0.0,    0.0,      0.0,       0.0     },
-    /* [1] */  { 0.0,    0.0,      0.0,       0.0     },
-    /* [2] */  { 0.0,    0.0,      0.0,       0.0     },
-    /* [3]  FLL PID manual     Kv=10.00 Hz/V */
-               { 60.0,   0.60,     150.0,     7500.0  },
-    /* [4]  PLL PI  manual                   */
-               { 22.5,   0.00225,  0.0,       6000.0  },
-    /* [5]  PLL PID manual                   */
-               { 30.0,   0.0075,   600.0,     9000.0  },
-    /* [6]  FLL PID genetic                  */
-               { 175.5,  0.226,    12812.0,   11250.0 },
-    /* [7]  PLL PID genetic                  */
-               { 52.5,   0.136,    1911.0,    9000.0  },
-    /* [8]  hybrid (uses [6]+[7]) IL only    */
-               { 0.0,    0.0,      0.0,       11250.0 },
-    /* [9]  NN                               */
-               { 0.0,    0.0,      0.0,       375.0   },
-};
-double g_blend_crossover = 0.027;   /* Hz — wider range → higher crossover */
-double g_blend_scale     = 0.013;
-double g_nn_max_step     = 150.0;   /* LSB — smaller step for higher sensitivity */
-#endif
+double g_blend_crossover = 0.024;   /* Hz — sigmoid centre */
+double g_blend_scale     = 0.012;   /* Hz — sigmoid width  */
+double g_nn_max_step     = 175.0;   /* LSB — max PWM delta  */
 
 /* ======================================================================
  * ALGORITHM DISPATCHER
@@ -280,77 +290,85 @@ uint16_t fll_pid_manual(uint16_t pwm, uint32_t ppscount)
     double u = -(Kp * e + Ki * integral_e + Kd * derivative);
 
     char trend[5];
+    bool e_small = (e > -0.0010 && e < 0.0010);
+    if (e_small && u > -1.0 && u < 1.0) {
+        strcpy(trend, "hit ");
+        set_trend(trend);
+        return pwm;
+    }
     if      (u > 10.0)  strcpy(trend, "p+  ");
     else if (u > 0.0)   strcpy(trend, "f+  ");
     else if (u < -10.0) strcpy(trend, "p-  ");
-    else if (u < 0.0)   strcpy(trend, "f-  ");
-    else                strcpy(trend, "hit ");
+    else                strcpy(trend, "f-  ");
     set_trend(trend);
 
     return clamp_pwm((int32_t)pwm + (int32_t)u);
 }
 
 /* ======================================================================
- * ALGORITHM 4 — PLL PI (no derivative), manually tuned
+ * ALGORITHM 4 — PLL PI + frequency damping, manually tuned
  *               Inspired by Lars Walenius' GPSDO design
  *
- * Loop type:   Phase-Locked Loop (PI only — derivative omitted to reduce
- *              amplification of phase noise from GPS)
- * Error input: Phase error estimated from cumul10000 ring buffer sum.
- *              Phase offset (in Hz-seconds) = cumul10000 / 10000.0
- *              This equals: ∑(f - 10MHz) / 10MHz integrated, in seconds.
+ * Loop type:   true Phase-Locked Loop.
+ * Phase error: locally accumulated — every 10 s the loop adds
+ *              (avg10 − 10 MHz)·10 s, which equals the EXACT sum of the
+ *              last ten 1-second cycle-count offsets (integer cycles).
+ *              Unlike a rolling-window average this responds to PWM
+ *              corrections with only a 10-second lag.
+ * Damping:     Kd × frequency error (avg100 when available, else avg10).
+ *              A pure PI on phase with an integrating plant is marginally
+ *              unstable — the frequency term provides the damping that a
+ *              derivative-of-phase would, without differencing noise.
  * Update rate: every 10 s
  *
- * Tuning:
- *   Kp=30 LSB/Hz·s (gentle — phase error is already integrated)
- *   Ki=0.003 LSB/Hz·s² (very slow integral for DC offset removal)
- *   Low bandwidth intentional: phase noise suppression > lock speed
+ * Tuning:        Kp on phase, gentle damping from frequency error
+ *                 (well-damped discrete loop)
  * ====================================================================== */
 uint16_t pll_pi_manual(uint16_t pwm, uint32_t ppscount)
 {
-    static double  integral_phi = 0.0;
+    static double  phase_acc    = 0.0;   /* accumulated phase [Hz·s = cycles] */
     static uint32_t last_flush_pps = 0;
 
     const uint32_t PERIOD  = 10;
     const double   Kp      = g_pid[4].Kp;
     const double   Ki      = g_pid[4].Ki;
+    const double   Kd      = g_pid[4].Kd;
     const double   Ts      = (double)PERIOD;
     const double   I_LIMIT = g_pid[4].I_LIMIT;
 
-    if (ppscount < last_flush_pps) { integral_phi = 0.0; }
+    if (ppscount < last_flush_pps) { phase_acc = 0.0; }
     last_flush_pps = ppscount;
 
     if ((ppscount % PERIOD) != 0) return pwm;
 
     FreqSnapshot_t s;
     take_freq_snapshot(&s);
-    if (!s.have10000) return pwm;
+    if (!s.have10) return pwm;
 
-    /*
-     * Phase error in Hz·s (= seconds of time offset):
-     *   phi = sum_of_offsets_over_10000s / 10000
-     * Positive phi → OCXO has been running fast on average → decrease PWM.
-     * Units: [Hz] (since offset is in Hz, sum/N is mean offset in Hz,
-     *        but for PLL we treat the integral as phase in seconds × 10MHz
-     *        — effectively same sign convention as frequency error).
-     */
-    double phi = (double)s.cumul10000 / 10000.0;
+    /* True phase accumulation for the gentle integral term */
+    double e_freq = s.have100 ? (s.avg100 - (double)BASE_FREQ)
+                              : (s.avg10  - (double)BASE_FREQ);
+    phase_acc += (s.avg10 - (double)BASE_FREQ) * Ts;
+    if (phase_acc >  I_LIMIT) phase_acc =  I_LIMIT;
+    if (phase_acc < -I_LIMIT) phase_acc = -I_LIMIT;
 
-    integral_phi += phi * Ts;
-    if (integral_phi >  I_LIMIT) integral_phi =  I_LIMIT;
-    if (integral_phi < -I_LIMIT) integral_phi = -I_LIMIT;
+    /* PI on frequency (fast, no overshoot) + soft phase integral.
+     * Kd here is the gentle phase-proportional gain (named Kd so the
+     * CLI/EEPROM layout is shared with algos 5/7). */
+    double u = -(Kp * e_freq + Kd * phase_acc + Ki * phase_acc * Ts);
 
-    double u = -(Kp * phi + Ki * integral_phi);
+    bool locked = false;
+    uint16_t out = apply_correction(pwm, u, e_freq, phase_acc, 12.0, &locked);
 
     char trend[5];
-    if      (u >  5.0) strcpy(trend, "p+  ");
+    if      (locked)   strcpy(trend, "hit ");
+    else if (u >  5.0) strcpy(trend, "p+  ");
     else if (u >  0.0) strcpy(trend, "f+  ");
     else if (u < -5.0) strcpy(trend, "p-  ");
-    else if (u < 0.0)  strcpy(trend, "f-  ");
-    else               strcpy(trend, "hit ");
+    else               strcpy(trend, "f-  ");
     set_trend(trend);
 
-    return clamp_pwm((int32_t)pwm + (int32_t)u);
+    return out;
 }
 
 /* ======================================================================
@@ -373,52 +391,46 @@ uint16_t pll_pi_manual(uint16_t pwm, uint32_t ppscount)
  * ====================================================================== */
 uint16_t pll_pid_manual(uint16_t pwm, uint32_t ppscount)
 {
-    static double  integral_phi = 0.0;
-    static double  prev_phi     = 0.0;
-    static bool    prev_valid   = false;
+    static double  phase_acc    = 0.0;   /* accumulated phase [Hz·s] */
     static uint32_t last_flush_pps = 0;
 
     const uint32_t PERIOD  = 10;
-    const double   Kp      = g_pid[5].Kp;
-    const double   Ki      = g_pid[5].Ki;
-    const double   Kd      = g_pid[5].Kd;
+    const double   Kp      = g_pid[5].Kp;    /* on FREQUENCY error */
+    const double   Ki      = g_pid[5].Ki;    /* on PHASE (gentle)  */
+    const double   Kd      = g_pid[5].Kd;    /* phase proportional */
     const double   Ts      = (double)PERIOD;
     const double   I_LIMIT = g_pid[5].I_LIMIT;
 
-    if (ppscount < last_flush_pps) {
-        integral_phi = 0.0;
-        prev_phi     = 0.0;
-        prev_valid   = false;
-    }
+    if (ppscount < last_flush_pps) { phase_acc = 0.0; }
     last_flush_pps = ppscount;
 
     if ((ppscount % PERIOD) != 0) return pwm;
 
     FreqSnapshot_t s;
     take_freq_snapshot(&s);
-    if (!s.have1000) return pwm;
+    if (!s.have10) return pwm;
 
-    double phi = (double)s.cumul1000 / 1000.0;
+    /* Same two-timescale scheme as algo 7 (see its header). */
+    double e_freq = s.have100 ? (s.avg100 - (double)BASE_FREQ)
+                              : (s.avg10  - (double)BASE_FREQ);
+    phase_acc += (s.avg10 - (double)BASE_FREQ) * Ts;
+    if (phase_acc >  I_LIMIT) phase_acc =  I_LIMIT;
+    if (phase_acc < -I_LIMIT) phase_acc = -I_LIMIT;
 
-    integral_phi += phi * Ts;
-    if (integral_phi >  I_LIMIT) integral_phi =  I_LIMIT;
-    if (integral_phi < -I_LIMIT) integral_phi = -I_LIMIT;
+    double u = -(Kp * e_freq + Kd * phase_acc + Ki * phase_acc * Ts);
 
-    double d_phi = prev_valid ? (phi - prev_phi) / Ts : 0.0;
-    prev_phi   = phi;
-    prev_valid = true;
-
-    double u = -(Kp * phi + Ki * integral_phi + Kd * d_phi);
+    bool locked = false;
+    uint16_t out = apply_correction(pwm, u, e_freq, phase_acc, 12.0, &locked);
 
     char trend[5];
-    if      (u >  10.0) strcpy(trend, "p+  ");
+    if      (locked)    strcpy(trend, "hit ");
+    else if (u >  10.0) strcpy(trend, "p+  ");
     else if (u >   0.0) strcpy(trend, "f+  ");
     else if (u < -10.0) strcpy(trend, "p-  ");
-    else if (u <   0.0) strcpy(trend, "f-  ");
-    else                strcpy(trend, "hit ");
+    else                strcpy(trend, "f-  ");
     set_trend(trend);
 
-    return clamp_pwm((int32_t)pwm + (int32_t)u);
+    return out;
 }
 
 /* ======================================================================
@@ -482,7 +494,15 @@ uint16_t fll_pid_genetic(uint16_t pwm, uint32_t ppscount)
 
     double u = -(Kp * e + Ki * integral_e + Kd * d_filtered);
 
+    /* FLL lock: frequency within 1 mHz. No phase term, so freq-only test.
+     * Hold PWM when locked and the step is sub-LSB to stop noise dither. */
     char trend[5];
+    bool e_small = (e > -0.0010 && e < 0.0010);
+    if (e_small && u > -1.0 && u < 1.0) {
+        strcpy(trend, "hit ");
+        set_trend(trend);
+        return pwm;
+    }
     strcpy(trend, u >= 0.0 ? "f+  " : "f-  ");
     set_trend(trend);
 
@@ -506,50 +526,48 @@ uint16_t fll_pid_genetic(uint16_t pwm, uint32_t ppscount)
  * ====================================================================== */
 uint16_t pll_pid_genetic(uint16_t pwm, uint32_t ppscount)
 {
-    static double  integral_phi = 0.0;
-    static double  prev_phi     = 0.0;
-    static double  d_filtered   = 0.0;
-    static bool    prev_valid   = false;
+    static double  phase_acc    = 0.0;   /* accumulated phase [Hz·s] */
     static uint32_t last_flush_pps = 0;
 
     const uint32_t PERIOD  = 10;
-    const double   Kp      = g_pid[7].Kp;
-    const double   Ki      = g_pid[7].Ki;
-    const double   Kd      = g_pid[7].Kd;
+    const double   Kp      = g_pid[7].Kp;    /* acts on FREQUENCY error  */
+    const double   Ki      = g_pid[7].Ki;    /* acts on PHASE (gentle)   */
+    const double   Kd      = g_pid[7].Kd;    /* phase proportional, soft */
     const double   Ts      = (double)PERIOD;
-    const double   Td      = (Kp > 0.0) ? (Kd / Kp) : 36.4;
-    const double   ALPHA   = Ts / (Ts + Td);
     const double   I_LIMIT = g_pid[7].I_LIMIT;
 
-    if (ppscount < last_flush_pps) {
-        integral_phi = 0.0; prev_phi = 0.0; d_filtered = 0.0; prev_valid = false;
-    }
+    if (ppscount < last_flush_pps) { phase_acc = 0.0; }
     last_flush_pps = ppscount;
 
     if ((ppscount % PERIOD) != 0) return pwm;
 
     FreqSnapshot_t s;
     take_freq_snapshot(&s);
-    if (!s.have1000) return pwm;
+    if (!s.have10) return pwm;
 
-    double phi = (double)s.cumul1000 / 1000.0;
+    /* Two-timescale control:
+     *   - dominant term Kp·e_freq pulls the FREQUENCY to target fast and
+     *     without overshoot (Kp ≈ 0.5/K → half-step deadbeat).
+     *   - gentle Kd·phase_acc + Ki·∫phase remove the slow phase drift
+     *     with small steps, so steady-state PWM motion stays tiny.
+     * The frequency error uses the smoothest window available.         */
+    double e_freq = s.have100 ? (s.avg100 - (double)BASE_FREQ)
+                              : (s.avg10  - (double)BASE_FREQ);
+    phase_acc += (s.avg10 - (double)BASE_FREQ) * Ts;
+    if (phase_acc >  I_LIMIT) phase_acc =  I_LIMIT;
+    if (phase_acc < -I_LIMIT) phase_acc = -I_LIMIT;
 
-    integral_phi += phi * Ts;
-    if (integral_phi >  I_LIMIT) integral_phi =  I_LIMIT;
-    if (integral_phi < -I_LIMIT) integral_phi = -I_LIMIT;
+    double u = -(Kp * e_freq + Kd * phase_acc + Ki * phase_acc * Ts);
 
-    double raw_d   = prev_valid ? (phi - prev_phi) / Ts : 0.0;
-    d_filtered     = ALPHA * raw_d + (1.0 - ALPHA) * d_filtered;
-    prev_phi       = phi;
-    prev_valid     = true;
-
-    double u = -(Kp * phi + Ki * integral_phi + Kd * d_filtered);
+    bool locked = false;
+    uint16_t out = apply_correction(pwm, u, e_freq, phase_acc, 12.0, &locked);
 
     char trend[5];
-    strcpy(trend, u >= 0.0 ? "f+  " : "f-  ");
+    if      (locked)    strcpy(trend, "hit ");
+    else                strcpy(trend, u >= 0.0 ? "f+  " : "f-  ");
     set_trend(trend);
 
-    return clamp_pwm((int32_t)pwm + (int32_t)u);
+    return out;
 }
 
 /* ======================================================================
@@ -595,16 +613,14 @@ uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount)
     static bool   fll_prev_ok  = false;
 
     /* PLL state */
-    static double pll_integral = 0.0;
-    static double pll_prev_phi = 0.0;
-    static double pll_d_filt   = 0.0;
-    static bool   pll_prev_ok  = false;
+    static double pll_phase    = 0.0;   /* accumulated phase [Hz·s] */
+
 
     static uint32_t last_flush_pps = 0;
 
     if (ppscount < last_flush_pps) {
         fll_integral = 0.0; fll_prev_e  = 0.0; fll_d_filt = 0.0; fll_prev_ok = false;
-        pll_integral = 0.0; pll_prev_phi = 0.0; pll_d_filt = 0.0; pll_prev_ok = false;
+        pll_phase = 0.0;
     }
     last_flush_pps = ppscount;
 
@@ -636,24 +652,19 @@ uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount)
     fll_prev_ok   = true;
     double u_fll  = -(FKp * e_hz + FKi * fll_integral + FKd * fll_d_filt);
 
-    /* ---- PLL branch (reads tunable algo 7 coefficients) ---- */
+    /* ---- PLL branch (reads tunable algo 7 coefficients) ----
+     * Two-timescale: Kp on frequency error (fast, no overshoot),
+     * Kd+Ki gently on accumulated phase.  Same scheme as algo 7.       */
     double u_pll = 0.0;
-    if (s.have1000) {
-        const double PKp    = g_pid[7].Kp;
-        const double PKi    = g_pid[7].Ki;
-        const double PKd    = g_pid[7].Kd;
-        const double PTd    = (PKp > 0.0) ? (PKd / PKp) : 36.4;
-        const double P_ALPHA = Ts / (Ts + PTd);
+    {
+        const double PKp = g_pid[7].Kp;
+        const double PKi = g_pid[7].Ki;
+        const double PKd = g_pid[7].Kd;
 
-        double phi = (double)s.cumul1000 / 1000.0;
-        pll_integral += phi * Ts;
-        if (pll_integral >  I_LIMIT) pll_integral =  I_LIMIT;
-        if (pll_integral < -I_LIMIT) pll_integral = -I_LIMIT;
-        double praw_d = pll_prev_ok ? (phi - pll_prev_phi) / Ts : 0.0;
-        pll_d_filt    = P_ALPHA * praw_d + (1.0 - P_ALPHA) * pll_d_filt;
-        pll_prev_phi  = phi;
-        pll_prev_ok   = true;
-        u_pll = -(PKp * phi + PKi * pll_integral + PKd * pll_d_filt);
+        pll_phase += e_hz * Ts;
+        if (pll_phase >  I_LIMIT) pll_phase =  I_LIMIT;
+        if (pll_phase < -I_LIMIT) pll_phase = -I_LIMIT;
+        u_pll = -(PKp * e_hz + PKd * pll_phase + PKi * pll_phase * Ts);
     }
 
     /*
@@ -669,14 +680,20 @@ uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount)
     double w_pll    = 1.0 - w_fll;
     double u        = w_fll * u_fll + w_pll * u_pll;
 
-    /* Trend: show active mode and blend */
+    /* Slew-limited, lock-aware. Wider cap (40 LSB) than the pure PLLs so
+     * the FLL branch can still capture a large startup error quickly.
+     * Lock test uses the PLL phase accumulator (pll_phase). */
+    bool locked = false;
+    uint16_t out = apply_correction(pwm, u, e_hz, pll_phase, 40.0, &locked);
+
     char trend[5];
-    if      (w_fll > 0.8) strcpy(trend, "FLL ");
+    if      (locked)      strcpy(trend, "hit ");
+    else if (w_fll > 0.8) strcpy(trend, "FLL ");
     else if (w_pll > 0.8) strcpy(trend, "PLL ");
     else                  strcpy(trend, "HYB ");
     set_trend(trend);
 
-    return clamp_pwm((int32_t)pwm + (int32_t)u);
+    return out;
 }
 
 /* ======================================================================
@@ -694,15 +711,12 @@ uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount)
  *   delta_PWM = y_norm × MAX_STEP  (MAX_STEP=200 LSB)
  *
  * Weight derivation:
- *   Weights pre-trained offline in Python (SGD, 50000 episodes) on a
- *   simulated GPSDO plant: integrator 1/s, OCXO gain 5e-6 Hz/LSB,
- *   RC filter 200ms, GPS noise σ=0.1 Hz on 10s measurement.
- *   Training objective: minimise ITAE over 3600s episode.
- *   Regularisation: L2 weight decay λ=0.001.
- *
- *   The weights below are the result of this offline training and are
- *   embedded as constants. They implement a nonlinear PID-like policy
- *   that outperforms linear PID on large transients and temperature ramps.
+ *   The weights are ANALYTICALLY CONSTRUCTED (see the comment above the
+ *   weight tables): a diagonal, bias-free, odd-symmetric network that
+ *   implements a smooth saturating PID-like policy.  Zero input gives
+ *   exactly zero output — the equilibrium is at zero error by design.
+ *   The structure (3-8-1 MLP) is kept so the weights can later be
+ *   replaced by genuinely trained ones without code changes.
  *
  * Update rate: every 10 s.
  * ====================================================================== */
@@ -722,28 +736,50 @@ static inline double nn_tanh(double x) { return tanh(x); }
  *   b1[NN_H]         — hidden biases
  *   W2[NN_OUT][NN_H] — hidden→output
  *   b2[NN_OUT]       — output bias
+ *
+ * ANALYTICALLY CONSTRUCTED weights — not trained.
+ *
+ * The previous weight set was presented as "offline-trained" but produced
+ * a large output bias: at zero error the network emitted y ≈ −0.96, i.e.
+ * a constant +0.96·MAX_STEP PWM step every period — the PWM ramped away
+ * monotonically (frequency ran high).  Lesson: a controller's equilibrium
+ * must be at zero by construction.
+ *
+ * This network is built by hand to be exactly odd-symmetric:
+ *   - all biases are zero          → f(0) = 0 exactly
+ *   - tanh is an odd function      → f(−x) = −f(x)
+ *   - W1 is diagonal (3 active hidden units, 5 unused)
+ *
+ *   h0 = tanh(1.5·x_e)   — proportional channel (saturating)
+ *   h1 = tanh(1.0·x_i)   — integral channel
+ *   h2 = tanh(1.2·x_d)   — derivative channel
+ *   y  = tanh(0.9·h0 + 0.5·h1 + 0.6·h2)
+ *
+ * Small-signal gain: ∂Δpwm/∂e = MAX_STEP·0.9·1.5/E_SCALE ≈ 405 LSB/Hz
+ * (NN max step from CT) — comparable to the linear PID algorithms, but with
+ * smooth tanh saturation limiting any single step to ±MAX_STEP.
  */
 static const double W1[NN_H][NN_IN] = {
-    /*  e,         integral,   derivative */
-    { -1.8432,    -0.5217,    -2.1045 },   /* h0 */
-    {  2.3101,     0.7843,     0.9632 },   /* h1 */
-    { -0.9871,    -1.4562,     1.8234 },   /* h2 */
-    {  1.5634,     2.1098,    -0.6543 },   /* h3 */
-    {  0.4321,    -0.8765,    -1.9876 },   /* h4 */
-    { -2.1543,     0.3210,     0.7654 },   /* h5 */
-    {  0.8765,     1.5432,     2.0123 },   /* h6 */
-    { -1.2345,    -0.9876,    -0.4321 }    /* h7 */
+    /*  e,       integral,  derivative */
+    {  1.5,      0.0,       0.0 },   /* h0: P channel */
+    {  0.0,      1.0,       0.0 },   /* h1: I channel */
+    {  0.0,      0.0,       1.2 },   /* h2: D channel */
+    {  0.0,      0.0,       0.0 },   /* h3: unused    */
+    {  0.0,      0.0,       0.0 },   /* h4: unused    */
+    {  0.0,      0.0,       0.0 },   /* h5: unused    */
+    {  0.0,      0.0,       0.0 },   /* h6: unused    */
+    {  0.0,      0.0,       0.0 }    /* h7: unused    */
 };
 
 static const double b1[NN_H] = {
-    0.1234, -0.2345, 0.3456, -0.1234, 0.2109, -0.3087, 0.1543, -0.0987
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 };
 
 static const double W2[NN_OUT][NN_H] = {
-    { -1.4321, 1.8765, -0.9876, 1.2345, -1.1098, 1.6543, -0.8765, 0.7654 }
+    { 0.9, 0.5, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0 }
 };
 
-static const double b2[NN_OUT] = { 0.0412 };
+static const double b2[NN_OUT] = { 0.0 };
 
 uint16_t nn_mlp_ctl_loop(uint16_t pwm, uint32_t ppscount)
 {

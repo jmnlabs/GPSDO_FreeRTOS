@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.2
+ * Part of GPSDO FreeRTOS v0.47
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -73,6 +73,8 @@ extern float   g_altitude_offset;
 extern int8_t  g_time_offset;
 extern bool    g_show_local_time;
 extern bool    g_report_paused;
+extern bool    g_tz_auto;
+extern bool    g_svin_enabled;
 
 /* EEPROM helpers declared in gpsdo_state.cpp */
 extern void eeprom_save(void);
@@ -89,7 +91,8 @@ static void print_help(void)
     cli_putln("  V           Version, authors and links");
     cli_putln("  H / ?       this help");
     cli_putln("  F           Flush frequency ring buffers");
-    cli_putln("  C           start auto-Calibration");
+    cli_putln("  C           start auto-Calibration (PWM centring)");
+    cli_putln("  CT          Calibrate + auto-Tune PID for all algos");
     cli_putln("  T           GPS Tunnel mode (exits after 300s)");
     cli_putln("  SP <n>      Set PWM DAC directly (1-65535)");
     cli_putln("  up1 / up10  increase PWM by 1 / 10");
@@ -112,7 +115,10 @@ static void print_help(void)
     cli_putln("  EE          EEPROM Erase");
     cli_putln("  PO <f>      Pressure Offset");
     cli_putln("  AO <f>      Altitude Offset");
-    cli_putln("  TO <n>      UTC-to-local time offset (-23..23)");
+    cli_putln("  TO <n|A>    UTC-to-local offset (-23..23) or Auto from GPS");
+#ifdef GPSDO_GPS_TIMING
+    cli_putln("  SV <0|1>    Survey-in / Time Mode on timing rx (saved by ES)");
+#endif
     cli_putln("  SW          Stack Watermarks (diagnostic)");
 }
 
@@ -173,6 +179,14 @@ static void dispatch(char *line)
     if (strcmp(verb, "C") == 0) {
         xEventGroupSetBits(xSysEvents, EVT_NEED_CALIBRATION);
         cli_putln("Auto-calibration sequence started");
+        return;
+    }
+
+    /* ---- CT: calibrate K + auto-tune all PID from measured gain ---- */
+    if (strcmp(verb, "CT") == 0) {
+        xEventGroupSetBits(xSysEvents, EVT_NEED_TUNE);
+        cli_putln("CT: calibrate + auto-tune started (~3 min, 3 PWM points)");
+        cli_putln("Derives K then computes PID for algos 3-9. 'ES' saves.");
         return;
     }
 
@@ -324,19 +338,39 @@ static void dispatch(char *line)
     if (strcmp(verb, "LP") == 0) {
         int n = (arg != NULL) ? atoi(arg) : (int)gCtrl.active_algo;
         if (n < 0 || n > 9) { cli_putln("LP: algo 0..9"); return; }
+
+        /* Algo 8 (hybrid) reads its gains from g_pid[6] (FLL branch) and
+         * g_pid[7] (PLL branch), not from g_pid[8]; algo 9 (NN) uses fixed
+         * network weights, only NS/IL matter.  Show this so the listing
+         * isn't mistaken for "not tuned". */
+        if (n == 8) {
+            cli_putln("Algo 8 hybrid — uses algo 6 (FLL) + algo 7 (PLL) gains:");
+            cli_puts("  FLL[6] Kp="); cli_putfloat((float)g_pid[6].Kp, 1);
+            cli_puts(" Ki=");          cli_putfloat((float)g_pid[6].Ki, 4);
+            cli_puts(" Kd=");          cli_putfloat((float)g_pid[6].Kd, 0);
+            cli_putln("");
+            cli_puts("  PLL[7] Kp="); cli_putfloat((float)g_pid[7].Kp, 1);
+            cli_puts(" Ki=");          cli_putfloat((float)g_pid[7].Ki, 4);
+            cli_puts(" Kd=");          cli_putfloat((float)g_pid[7].Kd, 1);
+            cli_putln("");
+            cli_puts("  blend BC=");   cli_putfloat((float)g_blend_crossover, 4);
+            cli_puts(" BS=");          cli_putfloat((float)g_blend_scale, 4);
+            cli_puts("  IL=");         cli_putfloat((float)g_pid[8].I_LIMIT, 1);
+            return;
+        }
+        if (n == 9) {
+            cli_putln("Algo 9 NN — fixed network weights; only these apply:");
+            cli_puts("  NS="); cli_putfloat((float)g_nn_max_step, 1);
+            cli_puts("  IL="); cli_putfloat((float)g_pid[9].I_LIMIT, 1);
+            return;
+        }
+
         char tmp[64];
         snprintf(tmp, sizeof(tmp), "Algo %d  Kp=", n); cli_puts(tmp);
         cli_putfloat((float)g_pid[n].Kp, 4);
         cli_puts("  Ki="); cli_putfloat((float)g_pid[n].Ki, 6);
         cli_puts("  Kd="); cli_putfloat((float)g_pid[n].Kd, 3);
         cli_puts("  IL="); cli_putfloat((float)g_pid[n].I_LIMIT, 1);
-        if (n == 8) {
-            cli_puts("  BC="); cli_putfloat((float)g_blend_crossover, 4);
-            cli_puts("  BS="); cli_putfloat((float)g_blend_scale, 4);
-        }
-        if (n == 9) {
-            cli_puts("  NS="); cli_putfloat((float)g_nn_max_step, 1);
-        }
         return;
     }
 
@@ -442,19 +476,51 @@ static void dispatch(char *line)
         return;
     }
 
-    /* ---- TO <n> ---- */
+    /* ---- TO [n | A] — time offset: manual hours or Auto from GPS ---- */
     if (strcmp(verb, "TO") == 0) {
         if (arg == NULL) {
             cli_puts("Time offset: "); cli_putint((int)g_time_offset);
+            cli_puts(g_tz_auto ? "  (auto: GPS position + EU DST)"
+                               : "  (manual)");
+        } else if (arg[0] == 'A' || arg[0] == 'a') {
+            g_tz_auto = true;
+            cli_putln("Time offset: AUTO — zone from GPS position, EU DST rule");
+            cli_putln("(applied on next fix; ES saves the mode to EEPROM)");
         } else {
             int v = atoi(arg);
             if (v >= -23 && v <= 23) {
+                g_tz_auto     = false;
                 g_time_offset = (int8_t)v;
                 cli_puts("Time offset: "); cli_putint(v);
+                cli_puts("  (manual)");
             } else {
-                cli_putln("TO: value must be -23..23");
+                cli_putln("TO: value must be -23..23, or A for auto");
             }
         }
+        return;
+    }
+
+    /* ---- SV [0|1] — survey-in (Time Mode) enable, saved by ES ---- */
+    if (strcmp(verb, "SV") == 0) {
+#ifdef GPSDO_GPS_TIMING
+        if (arg == NULL) {
+            cli_puts("Survey-in (Time Mode): ");
+            cli_putln(g_svin_enabled ? "ENABLED" : "DISABLED");
+            cli_putln("(SV 1 = on, SV 0 = off; takes effect at next boot; ES saves)");
+        } else {
+            int v = atoi(arg);
+            if (v == 0 || v == 1) {
+                g_svin_enabled = (v == 1);
+                cli_puts("Survey-in: ");
+                cli_putln(g_svin_enabled ? "ENABLED (next boot)" : "DISABLED (next boot)");
+                cli_putln("(ES to save; reboot to apply)");
+            } else {
+                cli_putln("SV: use 0 (off) or 1 (on)");
+            }
+        }
+#else
+        cli_putln("SV: firmware built without GPSDO_GPS_TIMING");
+#endif
         return;
     }
 

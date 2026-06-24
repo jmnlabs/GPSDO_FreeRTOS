@@ -48,7 +48,7 @@ extern "C" {
 
 /* ── OLED display type — select exactly one, or comment all out ──────── */
 //#define GPSDO_OLED_SH1106        /* SH1106  128x64 I2C — original hardware */
-/* #define GPSDO_OLED_SSD1306 */ /* SSD1306 128x64 I2C                     */
+//#define GPSDO_OLED_SSD1306       /* SSD1306 128x64 I2C                     */
 //#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
 
 /* ── LCD 20x4 I2C — independent of OLED, enable or comment out ──────── */
@@ -56,7 +56,7 @@ extern "C" {
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
 //#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
-/* #define GPSDO_TM1637      */  /* 4-digit TM1637: HH:MM                  */
+#define GPSDO_TM1637               /* 4-digit TM1637: HH:MM                  */
 
 /* ── HT16K33 clock display — 4-digit 7-seg with colon, I2C ────────────
  * Common AliExpress/Adafruit-style 0.56" clock modules (addr 0x70).
@@ -64,7 +64,7 @@ extern "C" {
  * shares the bus with OLED/LCD/sensors, no extra pins, no conflicts.   */
 #define GPSDO_HT16K33            /* 4-digit HT16K33: HH:MM                 */
 #define HT16K33_I2C_ADDR  0x70   /* default; A0/A1/A2 jumpers raise it     */
-#define HT16K33_BRIGHTNESS  8    /* 0 (dim) .. 15 (max)                    */
+#define HT16K33_BRIGHTNESS  6    /* 0 (dim) .. 15 (max)                    */
 
 /* ── TFT SPI display — select exactly one, or comment all out ─────────
  *
@@ -111,8 +111,8 @@ extern "C" {
  * The defines below only gate the display code in gpsdo_tasks.cpp —
  * driver selection happens in the TFT_eSPI User_Setup.h.              */
 /* #define GPSDO_TFT_ILI9341 */  /* ILI9341 240x320 SPI TFT */
-//#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
-#define GPSDO_TFT_ILI9488        /* ILI9488 320x480 SPI TFT (480x320 landscape)
+#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
+/* #define GPSDO_TFT_ILI9488 */  /* ILI9488 320x480 SPI TFT (480x320 landscape)
                                   * — UNTESTED: no panel on hand yet. Layout is
                                   * the 320x240 design scaled up ~1.5x. Set the
                                   * matching driver + TFT_WIDTH 320 / TFT_HEIGHT

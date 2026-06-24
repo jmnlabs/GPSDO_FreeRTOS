@@ -798,7 +798,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
                      2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
 
-      /* --- hardware checklist (rows light up sequentially) --- */
+      /* --- hardware checklist (rows light up sequentially) ---
+       * `show` reflects whether the device is COMPILED IN (#ifdef), so a
+       * device absent from the build is omitted entirely rather than shown
+       * as "not detected". `ok` reflects runtime detection: a compiled-in
+       * device that wasn't found stays as an orange [ ]. OCXO/GPS are always
+       * present. Sensors collapse to one row, shown if ANY sensor is built
+       * in. Keeping this consistent across all rows is the whole point —
+       * OLED and the sensor row previously forced show=true and so appeared
+       * even when not compiled. */
       struct { const char *label; bool ok; bool show; } rows[] = {
           { "OCXO  discipline loop", true,   true   },
 #ifdef GPSDO_GPS_TIMING
@@ -806,7 +814,23 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #else
           { "GPS   NEO receiver",     true,  true   },
 #endif
-          { "OLED  128x64",          oled_ok, true  },
+          /* TFT is write-only like the TM1637 — but the splash is being drawn
+           * on it right now, so if you can read this it works: [x]. Label
+           * shows the driver and resolution of the selected build. */
+#if defined(GPSDO_TFT_ILI9488)
+          { "TFT   ILI9488 480x320",  true,   true   },
+#elif defined(GPSDO_TFT_ILI9341)
+          { "TFT   ILI9341 320x240",  true,   true   },
+#elif defined(GPSDO_TFT_ST7789)
+          { "TFT   ST7789  320x240",  true,   true   },
+#endif
+          { "OLED  128x64",          oled_ok,
+#ifdef GPSDO_OLED
+                                              true
+#else
+                                              false
+#endif
+          },
           { "LCD   20x4",            lcd_ok,
 #ifdef GPSDO_LCD_20x4
                                               true
@@ -821,7 +845,21 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                                               false
 #endif
           },
-          { "Sensors AHT/BMP/INA",   (aht_ok||bmp_ok||ina_ok), true },
+          /* TM1637 is write-only (no detection possible), like the TFT — so
+           * if it is compiled in we assume it works and show [x], same as
+           * OCXO/GPS. The label reflects the 4- vs 6-digit build. */
+#if defined(GPSDO_TM1637_6)
+          { "TM1637 clock HH:MM:SS",  true,   true   },
+#elif defined(GPSDO_TM1637)
+          { "TM1637 clock HH:MM",     true,   true   },
+#endif
+          { "Sensors AHT/BMP/INA",   (aht_ok||bmp_ok||ina_ok),
+#if defined(GPSDO_AHT10) || defined(GPSDO_BMP280_I2C) || defined(GPSDO_INA219)
+                                              true
+#else
+                                              false
+#endif
+          },
       };
 
       s_tft.setTextDatum(TL_DATUM);

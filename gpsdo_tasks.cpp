@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.47
+ * Part of GPSDO FreeRTOS v0.48
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -589,12 +589,14 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif /* GPSDO_OLED */
 
 /* ======================================================================
- * TFT 240x320 SPI  (TFT_eSPI library, ILI9341 / ST7789)
+ * TFT SPI  (TFT_eSPI library, ILI9341 / ST7789 320x240, ILI9488 480x320)
  *
- * Landscape 320x240, hardware SPI1 (PA5/PA7), exclusive bus — no mutex
- * needed (only vDisplayTask touches it).
+ * Landscape, hardware SPI1 (PA5/PA7), exclusive bus — no mutex needed (only
+ * vDisplayTask touches it). The layout below is authored for 320x240 and
+ * scaled up to 480x320 (ILI9488) at compile time via TFT_SX/TFT_SY/TFT_F
+ * (see gpsdo_config.h). The ILI9488 path is UNTESTED — no panel on hand yet.
  *
- * Layout (landscape 320 x 240):
+ * Layout (landscape 320 x 240, scaled x1.5 wide / x1.33 tall for 480x320):
  *
  *  y=  0..23  ── header bar (navy):  "GPSDO v0.xx"      "LMT 14:32:45 Thu"
  *  y= 30..62  ── FREQUENCY, font 4 doubled, centred, colour-coded:
@@ -642,19 +644,23 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   #define TFT_COL_SINEL   0x3D7Fu        /* blue  (left wave)   */
   #define TFT_COL_SINER   0xFD80u        /* amber (right wave)  */
 
-  /* Grid geometry */
-  #define TFT_ROW_H       16             /* font 2 row height   */
-  #define TFT_GRID_Y      70
-  #define TFT_COL_L       8
-  #define TFT_COL_R       168
-  #define TFT_SENS_Y      156
-  #define TFT_STATUS_Y    204
+  /* Grid geometry — authored for 320x240, scaled so the same layout fills a
+   * 480x320 ILI9488. X/width via TFT_S (3/2), Y/height via TFT_SY (4/3),
+   * since the panel aspect differs. Identity on the small panels. */
+  #define TFT_ROW_H       TFT_SY(16)     /* font 2 row height   */
+  #define TFT_GRID_Y      TFT_SY(70)
+  #define TFT_COL_L       TFT_S(8)
+  #define TFT_COL_R       TFT_S(168)
+  #define TFT_SENS_Y      TFT_SY(156)
+  #define TFT_STATUS_Y    TFT_SY(204)
 
   /* Previous-value cache for selective redraw */
   static char tft_prev[16][28];
 
   /* Draw a value string only when it changed.
-   * slot: cache index, x/y: position, pad: text padding px, col: colour */
+   * slot: cache index, x/y: position, pad: text padding px, col: colour.
+   * x/y/pad are passed already-scaled by callers (via TFT_S/grid constants);
+   * the font is mapped up for the large panel via TFT_F(). */
   static void tft_val(uint8_t slot, int32_t x, int32_t y,
                       uint16_t pad, uint16_t col, const char *s)
   {
@@ -664,7 +670,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       tft_prev[slot][sizeof(tft_prev[0]) - 1] = '\0';
       s_tft.setTextColor(col, TFT_COL_BG);
       s_tft.setTextPadding(pad);
-      s_tft.drawString(s, x, y, 2);
+      s_tft.drawString(s, x, y, TFT_F(2));
   }
 
   /* One-time hardware init only (no layout — splash draws first) */
@@ -676,10 +682,14 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       vTaskDelay(pdMS_TO_TICKS(50));   /* let serial flush + bus settle */
 
       s_tft.init();
-      s_tft.setRotation(1);              /* landscape 320x240, USB right */
+      s_tft.setRotation(1);              /* landscape (USB right) */
       s_tft.fillScreen(TFT_COL_BG);
       s_tft_ok = true;
-      OUT_SERIAL.println("HW: TFT 240x320           enabled (SPI1, write-only - not verifiable)");
+#if defined(GPSDO_TFT_ILI9488)
+      OUT_SERIAL.println("HW: TFT 480x320 ILI9488    enabled (SPI1, UNTESTED, write-only)");
+#else
+      OUT_SERIAL.println("HW: TFT 320x240            enabled (SPI1, write-only - not verifiable)");
+#endif
   }
 
   /* Draw the static operating-screen layout (header + separators).
@@ -689,15 +699,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.fillScreen(TFT_COL_BG);
       memset(tft_prev, 0, sizeof(tft_prev));
 
-      s_tft.fillRect(0, 0, 320, 24, TFT_COL_HEADER);
+      s_tft.fillRect(0, 0, TFT_W, TFT_SY(24), TFT_COL_HEADER);
       s_tft.setTextDatum(TL_DATUM);
       s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
       s_tft.setTextPadding(0);
-      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, 6, 4, 2);
+      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, TFT_S(6), TFT_SY(4), TFT_F(2));
 
-      s_tft.drawFastHLine(0,  66, 320, TFT_COL_LABEL);
-      s_tft.drawFastHLine(0, 152, 320, TFT_COL_LABEL);
-      s_tft.drawFastHLine(0, 200, 320, TFT_COL_LABEL);
+      s_tft.drawFastHLine(0, TFT_SY(66),  TFT_W, TFT_COL_LABEL);
+      s_tft.drawFastHLine(0, TFT_SY(152), TFT_W, TFT_COL_LABEL);
+      s_tft.drawFastHLine(0, TFT_SY(200), TFT_W, TFT_COL_LABEL);
   }
 
   /* Animated boot splash: credits first, then two phase-shifted sine waves
@@ -711,33 +721,34 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.fillScreen(TFT_COL_BG);
 
       /* Header bar */
-      s_tft.fillRect(0, 0, 320, 26, TFT_COL_HEADER);
+      s_tft.fillRect(0, 0, TFT_W, TFT_SY(26), TFT_COL_HEADER);
       s_tft.setTextDatum(TL_DATUM);
       s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
-      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, 6, 5, 2);
+      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, TFT_S(6), TFT_SY(5), TFT_F(2));
 
       /* --- credits drawn FIRST, and they persist through the animation --- */
       s_tft.setTextDatum(MC_DATUM);
       s_tft.setTextColor(TFT_COL_LOCK, TFT_COL_BG);
-      s_tft.drawString("GPSDO", 160, 48, 6);
+      s_tft.drawString("GPSDO", TFT_W/2, TFT_SY(48), TFT_F(6));
       s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
-      s_tft.drawString("GPS-Disciplined OCXO", 160, 80, 4);
+      s_tft.drawString("GPS-Disciplined OCXO", TFT_W/2, TFT_SY(80), TFT_F(4));
       s_tft.setTextColor(0x8410, TFT_COL_BG);
-      s_tft.drawString("jmnlabs + with Claude (Anthropic)", 160, 214, 1);
+      s_tft.drawString("jmnlabs + with Claude (Anthropic)", TFT_W/2, TFT_SY(214), TFT_F(1));
 
       /* --- two phase-shifted waves converging to synchronism ---
        * Animation requires redrawing each frame, so each wave is erased
        * (drawn in background colour) before the next frame is drawn. The
-       * waves live in a band around y=150, clear of the credits above. */
-      const int   yc    = 130;     /* wave centre line               */
-      const float SPL_AMP    = 15.0f;  /* amplitude px                   */
-      const float SPL_WCYC   = 5.0f;   /* cycles across the screen       */
-      const float SPL_PH0    = 2.5f;   /* initial phase offset [rad]     */
-      const int   SPL_GAP   = 12;     /* initial vertical separation px */
-      const int   STEP   = 4;      /* x sampling step                */
+       * waves live in a band around y=130, clear of the credits above.
+       * All geometry scales with TFT_S() so the band fits the larger panel. */
+      const int   yc      = TFT_SY(130); /* wave centre line               */
+      const float SPL_AMP  = TFT_S(15); /* amplitude px                   */
+      const float SPL_WCYC = 5.0f;      /* cycles across the screen       */
+      const float SPL_PH0  = 2.5f;      /* initial phase offset [rad]     */
+      const int   SPL_GAP  = TFT_S(12); /* initial vertical separation px */
+      const int   STEP     = TFT_S(4);  /* x sampling step                */
 
       #define WAVE_Y(xx,yoff,ph) \
-          (yc + (yoff) + (int)(SPL_AMP * sinf((float)(xx)/320.0f*6.2831853f*SPL_WCYC + (ph))))
+          (yc + (yoff) + (int)(SPL_AMP * sinf((float)(xx)/(float)TFT_W*6.2831853f*SPL_WCYC + (ph))))
 
       const int FRAMES = 64;       /* convergence frames             */
       for (int fr = 0; fr <= FRAMES; fr++) {
@@ -750,10 +761,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           int pbx = 0, pby = WAVE_Y(0, +g, 0.0f);
 
           /* erase previous frame band, then draw current two waves */
-          s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+          s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
                          2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
 
-          for (int x = STEP; x <= 320; x += STEP) {
+          for (int x = STEP; x <= TFT_W; x += STEP) {
               int ty = WAVE_Y(x, -g, ph);
               int by = WAVE_Y(x, +g, 0.0f);
               /* 2px thickness: draw the segment twice, offset by 1px */
@@ -767,11 +778,11 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       }
 
       /* --- merge: erase band, draw one thick (4px) green wave --- */
-      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
                      2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
       {
           int px0 = 0, py0 = WAVE_Y(0, 0, 0.0f);
-          for (int x = STEP; x <= 320; x += STEP) {
+          for (int x = STEP; x <= TFT_W; x += STEP) {
               int y = WAVE_Y(x, 0, 0.0f);
               for (int t = -1; t <= 2; t++)   /* 4px thickness */
                   s_tft.drawLine(px0, py0+t, x, y+t, TFT_COL_LOCK);
@@ -784,7 +795,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       vTaskDelay(pdMS_TO_TICKS(1800));
 
       /* clear the wave band to make room for the checklist */
-      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, 320,
+      s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
                      2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
 
       /* --- hardware checklist (rows light up sequentially) --- */
@@ -817,15 +828,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       /* brief pause so the eye moves from the wave to the checklist before
        * the first item appears (otherwise the first rows are missed) */
       vTaskDelay(pdMS_TO_TICKS(600));
-      int y = 120;
+      int y = TFT_SY(120);
       for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
           if (!rows[i].show) continue;
           uint16_t col = rows[i].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
           s_tft.setTextColor(col, TFT_COL_BG);
-          s_tft.drawString(rows[i].ok ? "[x]" : "[ ]", 36, y, 2);
+          s_tft.drawString(rows[i].ok ? "[x]" : "[ ]", TFT_S(36), y, TFT_F(2));
           s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
-          s_tft.drawString(rows[i].label, 72, y, 2);
-          y += 15;
+          s_tft.drawString(rows[i].label, TFT_S(72), y, TFT_F(2));
+          y += TFT_SY(15);
           vTaskDelay(pdMS_TO_TICKS(650));   /* slower sequential reveal */
       }
 
@@ -852,8 +863,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       }
       s_tft.setTextDatum(TR_DATUM);
       s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
-      s_tft.setTextPadding(150);
-      s_tft.drawString(s, 314, 4, 2);
+      s_tft.setTextPadding(TFT_S(150));
+      s_tft.drawString(s, TFT_W - TFT_S(6), TFT_SY(4), TFT_F(2));
       s_tft.setTextDatum(TL_DATUM);
 
       /* ---- frequency, font 4 size 2, centred, colour-coded ----
@@ -881,8 +892,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
               if (strncmp(tft_prev[0], s, sizeof(tft_prev[0])-1) != 0) {
                   strncpy(tft_prev[0], s, sizeof(tft_prev[0])-1);
                   s_tft.setTextColor(fcol, TFT_COL_BG);
-                  s_tft.setTextPadding(316);
-                  s_tft.drawString(s, 160, 34, 4);
+                  s_tft.setTextPadding(TFT_S(316));
+                  s_tft.drawString(s, TFT_W/2, TFT_SY(34), TFT_F(4));
               }
               s_tft.setTextDatum(TL_DATUM);
               /* Do NOT return — fall through so the PWM/Vctl cell (slot 5)
@@ -917,10 +928,14 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                * keep a constant column position instead of shifting as the
                * value changes — much easier to read at a glance. */
               s_tft.setTextColor(fcol, TFT_COL_BG);
-              s_tft.setTextPadding(316);
+              s_tft.setTextPadding(TFT_S(316));
               s_tft.setTextFont(1);
-              s_tft.setTextSize(3);
-              s_tft.drawString(s, 160, 30);
+#if defined(GPSDO_TFT_ILI9488)
+              s_tft.setTextSize(5);   /* font1 x5 (~30x40) on the big panel */
+#else
+              s_tft.setTextSize(3);   /* font1 x3 (18x24)                   */
+#endif
+              s_tft.drawString(s, TFT_W/2, TFT_SY(30));
               s_tft.setTextSize(1);
           }
           s_tft.setTextDatum(TL_DATUM);
@@ -932,23 +947,23 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           snprintf(s,sizeof(s),"UTC:%02d:%02d:%02d %s", g->hours,g->mins,g->secs,
                    day_of_week_str(g->day,g->month,g->year));
       else snprintf(s,sizeof(s),"UTC:--:--:--");
-      tft_val(1, TFT_COL_L, TFT_GRID_Y+0*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+      tft_val(1, TFT_COL_L, TFT_GRID_Y+0*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       if (g->valid) snprintf(s,sizeof(s),"%02d/%02d/%04d", g->day,g->month,g->year);
       else          snprintf(s,sizeof(s),"--/--/----");
-      tft_val(2, TFT_COL_L, TFT_GRID_Y+1*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+      tft_val(2, TFT_COL_L, TFT_GRID_Y+1*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       snprintf(s,sizeof(s),"Up %s %s", u->days_str, u->time_str);
-      tft_val(3, TFT_COL_L, TFT_GRID_Y+2*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+      tft_val(3, TFT_COL_L, TFT_GRID_Y+2*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       snprintf(s,sizeof(s),"Algo:%u  %s", c->active_algo, c->trendstr);
-      tft_val(4, TFT_COL_L, TFT_GRID_Y+3*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+      tft_val(4, TFT_COL_L, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       { static char fv[8];
         double vctl = ((double)c->avg_vctl_adc / 4096.0) * 3.3;
         dtostrf(vctl, 5, 3, fv);
         snprintf(s,sizeof(s),"PWM:%5u V:%s", c->pwm_output, fv); }
-      tft_val(5, TFT_COL_L, TFT_GRID_Y+4*TFT_ROW_H, 156, TFT_COL_VALUE, s);
+      tft_val(5, TFT_COL_L, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       /* ---- info grid, right column ---- */
       if (g->pos_valid) {
@@ -959,40 +974,40 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
               snprintf(s,sizeof(s),"Sat:%2d HDOP:%s", g->sats, fhd);
           }
       } else snprintf(s,sizeof(s),"Sat:%2d  no fix", g->sats);
-      tft_val(6, TFT_COL_R, TFT_GRID_Y+0*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+      tft_val(6, TFT_COL_R, TFT_GRID_Y+0*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (g->pos_valid) { static char fl[12]; dtostrf(g->lat,10,6,fl);
           snprintf(s,sizeof(s),"Lat:%s",fl); }
       else snprintf(s,sizeof(s),"Lat: ---");
-      tft_val(7, TFT_COL_R, TFT_GRID_Y+1*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+      tft_val(7, TFT_COL_R, TFT_GRID_Y+1*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (g->pos_valid) { static char fn[12]; dtostrf(g->lon,10,6,fn);
           snprintf(s,sizeof(s),"Lon:%s",fn); }
       else snprintf(s,sizeof(s),"Lon: ---");
-      tft_val(8, TFT_COL_R, TFT_GRID_Y+2*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+      tft_val(8, TFT_COL_R, TFT_GRID_Y+2*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (g->pos_valid) snprintf(s,sizeof(s),"Alt:%5dm",(int)g->alt);
       else              snprintf(s,sizeof(s),"Alt: ---");
-      tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+      tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (ina_ok) { static char fv[10],fi[10];
           dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
           snprintf(s,sizeof(s),"INA:%sV %smA",fv,fi); }
       else snprintf(s,sizeof(s),"INA: ---");
-      tft_val(10, TFT_COL_R, TFT_GRID_Y+4*TFT_ROW_H, 148, TFT_COL_VALUE, s);
+      tft_val(10, TFT_COL_R, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       /* ---- sensor row ---- */
       if (bmp_ok) { static char ft[8],fp[10];
           dtostrf(g_bmp_temp,4,2,ft); dtostrf(g_bmp_pres,7,2,fp);
           snprintf(s,sizeof(s),"BMP:%sC %shPa",ft,fp); }
       else snprintf(s,sizeof(s),"BMP: ---");
-      tft_val(11, TFT_COL_L, TFT_SENS_Y, 156, TFT_COL_VALUE, s);
+      tft_val(11, TFT_COL_L, TFT_SENS_Y, TFT_S(156), TFT_COL_VALUE, s);
 
       if (aht_ok) { static char ft[8],fh[8];
           dtostrf(g_aht_temp,4,2,ft); dtostrf(g_aht_humi,4,2,fh);
           snprintf(s,sizeof(s),"AHT:%sC %s%%rH",ft,fh); }
       else snprintf(s,sizeof(s),"AHT: ---");
-      tft_val(12, TFT_COL_R, TFT_SENS_Y, 148, TFT_COL_VALUE, s);
+      tft_val(12, TFT_COL_R, TFT_SENS_Y, TFT_S(148), TFT_COL_VALUE, s);
 
       /* ---- status bar (full redraw only on state change) ---- */
       {
@@ -1013,16 +1028,271 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                   case 3:  bg = TFT_COL_ALERT; txt = "HOLDOVER (fix lost)";   break;
                   default: bg = TFT_COL_ALERT; txt = "WAITING FOR GPS FIX";   break;
               }
-              s_tft.fillRect(0, TFT_STATUS_Y, 320, 36, bg);
+              s_tft.fillRect(0, TFT_STATUS_Y, TFT_W, TFT_SY(36), bg);
               s_tft.setTextDatum(MC_DATUM);
               s_tft.setTextColor(TFT_BLACK, bg);
               s_tft.setTextPadding(0);
-              s_tft.drawString(txt, 160, TFT_STATUS_Y + 18, 4);
+              s_tft.drawString(txt, TFT_W/2, TFT_STATUS_Y + TFT_SY(18), TFT_F(4));
               s_tft.setTextDatum(TL_DATUM);
           }
       }
   }
 #endif /* GPSDO_TFT */
+
+/* ======================================================================
+ * SPI→T6963C bridge (PowerTip PG240128, 240x128 mono)
+ *
+ * *** EXPERIMENTAL / UNTESTED — see the banner in gpsdo_config.h ***
+ * This backend compiles and the protocol matches the bridge firmware, but
+ * the link has not yet worked cleanly on real hardware: long-wire/breadboard
+ * bring-up showed oscilloscope ringing and CS-edge glitches (the same on the
+ * proven reference master), i.e. a signal-integrity problem to be solved in
+ * hardware before this is trusted. Leave GPSDO_T6963C disabled until then.
+ *
+ * Alternative graphical display to the TFT. Talks to the external
+ * "T6963C_SPI_bridge" over SPI1 with high-level drawing commands
+ * (T6963C_Bridge.h). Layout is a condensed version of the TFT screen:
+ *
+ *   y  0..17   header  : "GPSDO v0.48"            "14:32:45"   (NCEN10)
+ *   y 18..54   freq    : "10000000.000 Hz"                     (LOGISOSO28)
+ *   y 59..80   status  : [LOCK]  A7 hit   12 sat              (8x13B/6x13)
+ *   y 82..117  values  : PWM/Vctl, INA, sensors               (6x13)
+ *   y 120..127 svin bar: progress() during survey-in
+ *
+ * Mono panel → colour cues become inversion: the lock/holdover state is a
+ * filled (inverted) box around the status word. One batched transaction per
+ * refresh (single READY wait), with the library's auto-split as a safety net.
+ * ====================================================================== */
+#ifdef GPSDO_T6963C
+  #include "T6963C_Bridge.h"
+
+  static T6963C_Bridge s_lcd(PIN_T6963C_CS, PIN_T6963C_READY, T6963C_SPI_HZ);
+  static bool s_t6963c_ok = false;
+
+  /* Cache of last-drawn strings so we can skip a full repaint when nothing
+   * changed (saves SPI traffic). Indexed: 0 freq,1 hdr-time,2 status,
+   * 3 pwm,4 ina,5 sensor. */
+  static char t69_prev[6][40];
+  static uint8_t t69_prev_state = 0xFF;
+
+  /* Panel geometry */
+  #define T69_W      240
+  #define T69_H      128
+  #define T69_FREQ_Y  20
+  #define T69_STAT_Y  60
+  #define T69_VAL_Y   84
+  #define T69_VROW    13
+  #define T69_BAR_Y  120
+
+  static void t6963c_init(void)
+  {
+      SPI.begin();
+      s_lcd.begin();
+      s_lcd.setReadyTimeout(1000);
+      /* Wait for the bridge to finish its OWN power-on sequence before the
+       * first frame. Both boards power up together, but the bridge only
+       * enables its SPI2 slave AFTER u8g2.begin() (T6963C init over the slow
+       * 8080 bus) and autotest() (renders a test pattern). Until then it
+       * cannot receive a single byte, so an early splash is lost and the
+       * autotest pattern stays on screen. 200 ms was too short; give a
+       * generous margin. vTaskDelay yields (runs in vDisplayTask). */
+      vTaskDelay(pdMS_TO_TICKS(800));
+      s_t6963c_ok = true;
+      for (uint8_t i = 0; i < 6; i++) t69_prev[i][0] = '\0';
+      OUT_SERIAL.println("T6963C: bridge init (SPI1 PA5/PA7, CS=PB13, READY=PB12)");
+  }
+
+  /* Static boot splash: logo + subtitle + hardware checklist. No animation —
+   * the bridge renders via batched SPI, so a smooth wave would be costly and
+   * add little on a small mono panel. */
+  static void t6963c_splash(bool oled_ok, bool lcd_ok, bool ht_ok,
+                            bool aht_ok, bool bmp_ok, bool ina_ok)
+  {
+      (void)oled_ok; (void)lcd_ok; (void)ht_ok;
+      /* One batch = one transaction = one READY wait, exactly like the
+       * proven reference master. Sending each command as its own
+       * transaction worked less reliably during bring-up. */
+      s_lcd.batchBegin();
+      s_lcd.clear();
+      s_lcd.frameRect(0, 0, T69_W, T69_H);
+      s_lcd.setFontPos(FPOS_TOP);
+      s_lcd.setFont(FONT_LOGISOSO28);
+      s_lcd.str(20, 4, "GPSDO");
+      s_lcd.setFont(FONT_NCEN10);
+      s_lcd.str(150, 18, PROGRAM_VERSION);
+      s_lcd.setFont(FONT_6x13);
+      s_lcd.str(8, 40, "GPS-Disciplined OCXO");
+      s_lcd.hline(0, 56, T69_W);
+
+      /* hardware checklist */
+      char line[28];
+      uint8_t y = 62;
+      s_lcd.setFont(FONT_6x10);
+      snprintf(line, sizeof(line), "AHT %s  BMP %s",
+               aht_ok ? "ok" : "--", bmp_ok ? "ok" : "--");
+      s_lcd.str(8, y, line); y += 12;
+      snprintf(line, sizeof(line), "INA %s", ina_ok ? "ok" : "--");
+      s_lcd.str(8, y, line); y += 12;
+      s_lcd.str(8, y, "jmnlabs + Claude");
+      s_lcd.setFontPos(FPOS_BASELINE);
+      s_lcd.batchEnd(true);   /* pack + auto-SEND, one transaction */
+  }
+
+  /* One field, with change-cache. Returns true if it (re)drew. */
+  static bool t69_field(uint8_t idx, int16_t x, int16_t y, uint8_t fontId,
+                        const char *s)
+  {
+      if (strncmp(t69_prev[idx], s, sizeof(t69_prev[0]) - 1) == 0)
+          return false;
+      strncpy(t69_prev[idx], s, sizeof(t69_prev[0]) - 1);
+      t69_prev[idx][sizeof(t69_prev[0]) - 1] = '\0';
+      s_lcd.setFont(fontId);
+      s_lcd.str(x, y, s);
+      return true;
+  }
+
+  static void t6963c_update(const GpsData_t *g, const FreqSnap_t *f,
+                            const CtrlData_t *c, const Uptime_t *u,
+                            bool aht_ok, bool bmp_ok, bool ina_ok)
+  {
+      (void)u;
+      char s[40];
+
+      /* Decide the operating state (mirrors the TFT status bar). */
+      uint8_t st;
+      if      (c->holdover_mode && c->holdover_auto) st = 3;
+      else if (c->holdover_mode)                     st = 2;
+      else if (g->pos_valid)                         st = 1;
+      else                                           st = 0;
+
+      bool busy = (g_svin_active || g_warmup_active || g_calib_active);
+
+      /* Build everything into one batched transaction. */
+      s_lcd.batchBegin();
+      s_lcd.setFontPos(FPOS_TOP);
+
+      /* First update after the splash wipes the panel so the splash content
+       * doesn't linger. In addition, force a periodic full repaint: if the
+       * bridge is ever reset while the master keeps running (its autotest
+       * pattern reappears and our per-field cache would otherwise suppress
+       * redraws), this clears it and repaints everything within ~20 s, so
+       * the screen self-heals without needing a master restart. */
+      static bool     first_paint = true;
+      static uint16_t repaint_ctr = 0;
+      bool full_repaint = first_paint || (++repaint_ctr >= 20);
+      if (full_repaint) {
+          first_paint = false;
+          repaint_ctr = 0;
+          s_lcd.clear();
+          for (uint8_t i = 0; i < 6; i++) t69_prev[i][0] = '\0';
+          t69_prev_state = 0xFF;
+      }
+
+      /* ---- header: static title + live time (right) ---- */
+      static bool hdr_drawn = false;
+      if (full_repaint) hdr_drawn = false;   /* clear() wiped it — redraw */
+      if (!hdr_drawn) {
+          hdr_drawn = true;
+          s_lcd.setFont(FONT_NCEN10);
+          s_lcd.str(2, 1, PROGRAM_NAME);
+          s_lcd.hline(0, 17, T69_W);
+      }
+      if (g->valid) snprintf(s, sizeof(s), "%02d:%02d:%02d", g->hours, g->mins, g->secs);
+      else          snprintf(s, sizeof(s), "--:--:--");
+      t69_field(1, 150, 1, FONT_NCEN10, s);
+
+      /* ---- frequency (big) ---- */
+      if (busy) {
+          if (g_svin_active)
+              snprintf(s, sizeof(s), "SVIN %us %um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
+          else if (g_warmup_active)
+              snprintf(s, sizeof(s), "WARMUP %us", (unsigned)g_warmup_remaining);
+          else
+              snprintf(s, sizeof(s), "CAL %us", (unsigned)g_calib_remaining);
+          if (strncmp(t69_prev[0], s, sizeof(t69_prev[0]) - 1) != 0) {
+              strncpy(t69_prev[0], s, sizeof(t69_prev[0]) - 1);
+              s_lcd.setColor(0); s_lcd.box(0, T69_FREQ_Y, T69_W, 30); s_lcd.setColor(1);
+              s_lcd.setFont(FONT_10x20);
+              s_lcd.str(4, T69_FREQ_Y + 4, s);
+          }
+      } else {
+          if      (f->full10000) { static char ff[20]; dtostrf(f->avg10000,12,3,ff); snprintf(s,sizeof(s),"%sHz",ff); }
+          else if (f->full1000)  { static char ff[20]; dtostrf(f->avg1000, 12,3,ff); snprintf(s,sizeof(s),"%sHz",ff); }
+          else if (f->full100)   { static char ff[20]; dtostrf(f->avg100,  12,2,ff); snprintf(s,sizeof(s),"%sHz",ff); }
+          else if (f->full10)    { static char ff[20]; dtostrf(f->avg10,   12,1,ff); snprintf(s,sizeof(s),"%sHz",ff); }
+          else if (f->calcfreqint > 0) { snprintf(s,sizeof(s),"%lu Hz",(unsigned long)f->calcfreqint); }
+          else snprintf(s,sizeof(s),"no signal");
+          if (strncmp(t69_prev[0], s, sizeof(t69_prev[0]) - 1) != 0) {
+              strncpy(t69_prev[0], s, sizeof(t69_prev[0]) - 1);
+              s_lcd.setColor(0); s_lcd.box(0, T69_FREQ_Y, T69_W, 30); s_lcd.setColor(1);
+              s_lcd.setFont(FONT_LOGISOSO16);
+              s_lcd.str(2, T69_FREQ_Y + 4, s);
+          }
+      }
+
+      /* ---- status row: [STATE]  algo+trend   sats ---- */
+      if (st != t69_prev_state) {
+          t69_prev_state = st;
+          const char *txt;
+          switch (st) {
+              case 1:  txt = "LOCK"; break;
+              case 2:  txt = "HOLD"; break;
+              case 3:  txt = "H-LOST"; break;
+              default: txt = "NOFIX"; break;
+          }
+          /* inverted (filled) box behind the state word = colour substitute */
+          s_lcd.setColor(0); s_lcd.box(0, T69_STAT_Y - 1, 64, 16); s_lcd.setColor(1);
+          s_lcd.box(0, T69_STAT_Y - 1, 64, 16);          /* white block */
+          s_lcd.setColor(0);                             /* black text on white */
+          s_lcd.setFont(FONT_8x13B);
+          s_lcd.str(4, T69_STAT_Y, txt);
+          s_lcd.setColor(1);
+      }
+      snprintf(s, sizeof(s), "A%u %s", c->active_algo, c->trendstr);
+      t69_field(2, 70, T69_STAT_Y, FONT_6x13, s);
+      { char sat[16]; snprintf(sat, sizeof(sat), "%2d sat", g->sats);
+        /* sats reuse cache slot 2's neighbour — draw unconditionally, cheap */
+        s_lcd.setFont(FONT_6x13); s_lcd.str(168, T69_STAT_Y, sat); }
+
+      /* ---- value rows ---- */
+      { static char fv[10]; double vctl = ((double)c->avg_vctl_adc/4096.0)*3.3;
+        dtostrf(vctl,5,3,fv);
+        snprintf(s,sizeof(s),"PWM%5u %sV", c->pwm_output, fv); }
+      t69_field(3, 4, T69_VAL_Y + 0*T69_VROW, FONT_6x13, s);
+
+      if (ina_ok) { static char fv[10],fi[10];
+          dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
+          snprintf(s,sizeof(s),"%sV %smA",fv,fi); }
+      else snprintf(s,sizeof(s),"INA ---");
+      t69_field(4, 4, T69_VAL_Y + 1*T69_VROW, FONT_6x13, s);
+
+      if (bmp_ok || aht_ok) {
+          double t = bmp_ok ? g_bmp_temp : g_aht_temp;
+          static char ft[8]; dtostrf(t,4,1,ft);
+          if (bmp_ok) { static char fp[8]; dtostrf(g_bmp_pres,6,1,fp);
+                        snprintf(s,sizeof(s),"%sC %shPa",ft,fp); }
+          else        { static char fh[8]; dtostrf(g_aht_humi,4,1,fh);
+                        snprintf(s,sizeof(s),"%sC %s%%rH",ft,fh); }
+      } else snprintf(s,sizeof(s),"sensors ---");
+      t69_field(5, 4, T69_VAL_Y + 2*T69_VROW, FONT_6x13, s);
+
+      /* ---- survey-in progress bar (only while surveying) ---- */
+      if (g_svin_active) {
+          /* acc shrinks toward the limit; show inverse as % toward done.
+           * Rough: 0..(2*limit) maps to 100..0%. */
+          uint32_t lim = GPSDO_SVIN_ACC_LIMIT / 1000u; if (!lim) lim = 1;
+          uint32_t am = g_svin_acc_m;
+          uint8_t pct;
+          if (am >= 2*lim) pct = 0;
+          else if (am <= lim) pct = 100;
+          else pct = (uint8_t)(100u - (100u * (am - lim)) / lim);
+          s_lcd.progress(4, T69_BAR_Y, T69_W - 8, 6, pct);
+      }
+
+      s_lcd.setFontPos(FPOS_BASELINE);
+      s_lcd.batchEnd(true);   /* pack + send everything, then SEND to panel */
+  }
+#endif /* GPSDO_T6963C */
 
 /* ======================================================================
  * TM1637
@@ -1347,6 +1617,11 @@ void vDisplayTask(void *pvParameters)
     tft_init();
 #endif
 
+#ifdef GPSDO_T6963C
+    /* SPI→T6963C bridge on exclusive SPI1 — init directly */
+    t6963c_init();
+#endif
+
 #ifdef GPSDO_HT16K33
     /* HT16K33 shares I2C — init under Wire mutex.
      * Wire.begin() here is a safety net for builds where no other I2C
@@ -1392,6 +1667,39 @@ void vDisplayTask(void *pvParameters)
 #endif
         tft_splash(oled_ok, lcd_ok, ht_ok, aht_ok, bmp_ok, ina_ok);
         tft_draw_layout();
+    }
+#endif
+
+#ifdef GPSDO_T6963C
+    /* Same checklist splash on the T6963C bridge. */
+    if (s_t6963c_ok) {
+        for (int w = 0; w < 100 && !s_sensors_probed; w++)
+            vTaskDelay(pdMS_TO_TICKS(10));
+
+        bool oled_ok = false, lcd_ok = false, ht_ok = false;
+        bool aht_ok = false, bmp_ok = false, ina_ok = false;
+#ifdef GPSDO_OLED
+        oled_ok = s_oled_ok;
+#endif
+#ifdef GPSDO_LCD_20x4
+        lcd_ok = s_lcd_ok;
+#endif
+#ifdef GPSDO_HT16K33
+        ht_ok = s_ht_ok;
+#endif
+#ifdef GPSDO_AHT10
+        aht_ok = s_aht_ok;
+#endif
+#ifdef GPSDO_BMP280_I2C
+        bmp_ok = s_bmp_ok;
+#endif
+#ifdef GPSDO_INA219
+        ina_ok = s_ina_ok;
+#endif
+        /* Send the splash once the bridge has had time to finish its own
+         * power-on init. Kept simple — one batch, like the proven reference. */
+        t6963c_splash(oled_ok, lcd_ok, ht_ok, aht_ok, bmp_ok, ina_ok);
+        vTaskDelay(pdMS_TO_TICKS(1500));   /* let the splash be readable */
     }
 #endif
 
@@ -1869,6 +2177,12 @@ void vDisplayTask(void *pvParameters)
         if (s_tft_ok)
             tft_update(&snap_g, &snap_f, &snap_c, &snap_u,
                        s_aht_ok, s_bmp_ok, s_ina_ok);
+#endif
+
+#ifdef GPSDO_T6963C
+        if (s_t6963c_ok)
+            t6963c_update(&snap_g, &snap_f, &snap_c, &snap_u,
+                          s_aht_ok, s_bmp_ok, s_ina_ok);
 #endif
 
         /* ==============================================================

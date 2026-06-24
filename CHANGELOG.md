@@ -12,6 +12,44 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.48-rtos]
+
+### Added
+- **ILI9488 480×320 SPI TFT support (`GPSDO_TFT_ILI9488`).** ⚠️ Untested — no
+  panel on hand yet. The existing 320×240 ILI9341/ST7789 operating screen and
+  animated splash are shared and auto-scaled to 480×320 at compile time:
+  width ×1.5 and height ×1.33 via independent `TFT_SX`/`TFT_SY` macros (the
+  panel aspect differs from a pure 1.5×), and TFT_eSPI fonts mapped up one
+  size via `TFT_F`. Geometry verified to fit the panel; not yet run on real
+  hardware. Set `ILI9488_DRIVER` + `TFT_WIDTH 320`/`TFT_HEIGHT 480` (+
+  `LOAD_FONT6`) in TFT_eSPI `User_Setup.h`.
+- **SPI→T6963C bridge as a new display backend (`GPSDO_T6963C`).**
+  ⚠️ Experimental / untested — backend is complete and compiles, but the link
+  is not yet validated on clean hardware (long-wire bring-up showed ringing
+  and spurious CS edges; same on the reference master → a signal-integrity
+  issue, not firmware). Disabled by default; leave off until tested on
+  short, point-to-point wiring.
+  Drives a PowerTip PG240128 (240×128 mono) panel through the external
+  `T6963C_SPI_bridge` over SPI1 using high-level drawing commands
+  (`T6963C_Bridge.h`). Selectable in the config like the other displays;
+  mutually exclusive with the TFT (shared SPI1 pins / display slot).
+  - Reuses the TFT's SPI1 pins: `SCK PA5`, `MOSI PA7`, `CS PB13`,
+    `READY PB12`; frees `PB15` (was TFT_RST).
+  - Condensed 240×128 layout mirroring the TFT screen: header (title + LMT
+    time), large frequency (LOGISOSO fonts), status row, value rows
+    (PWM/Vctl, INA219, sensors) and a survey-in progress bar.
+  - Monochrome panel → the lock/holdover colour cue becomes an inverted
+    (filled) box around the status word (`LOCK` / `HOLD` / `H-LOST` /
+    `NOFIX`).
+  - One batched SPI transaction per refresh (single READY wait), with the
+    bridge library's auto-split as a safety net; per-field change-cache to
+    skip redundant redraws.
+  - Static boot splash (logo + subtitle + hardware checklist); no wave
+    animation, since batched SPI rendering would make it costly on a small
+    mono panel.
+
+---
+
 ## [v0.47-rtos]
 
 ### Added

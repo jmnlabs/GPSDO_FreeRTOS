@@ -12,6 +12,46 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
 
 ---
 
+## [v0.48-rtos]
+
+### Dodane
+- **Obsługa TFT ILI9488 480×320 SPI (`GPSDO_TFT_ILI9488`).** ⚠️ Nietestowany —
+  brak panelu do testów. Istniejący ekran roboczy 320×240 ILI9341/ST7789 oraz
+  animowany splash są współdzielone i automatycznie skalowane do 480×320
+  podczas kompilacji: szerokość ×1.5 i wysokość ×1.33 przez niezależne makra
+  `TFT_SX`/`TFT_SY` (proporcje panelu różnią się od czystego 1.5×), a fonty
+  TFT_eSPI mapowane o rozmiar w górę przez `TFT_F`. Geometria zweryfikowana,
+  że mieści się w panelu; jeszcze nieuruchomiony na realnym sprzęcie. Ustaw
+  `ILI9488_DRIVER` + `TFT_WIDTH 320`/`TFT_HEIGHT 480` (+ `LOAD_FONT6`) w
+  `User_Setup.h` biblioteki TFT_eSPI.
+- **Mostek SPI→T6963C jako nowy backend wyświetlacza (`GPSDO_T6963C`).**
+  ⚠️ Eksperymentalny / niesprawdzony — backend jest kompletny i kompiluje
+  się, ale połączenie nie zostało jeszcze zweryfikowane na czystym sprzęcie
+  (uruchamianie na długich przewodach pokazało dzwonienie i fałszywe zbocza
+  CS; to samo na masterze referencyjnym → problem integralności sygnału, nie
+  firmware). Domyślnie wyłączony; zostaw wyłączony do testu na krótkim
+  okablowaniu point-to-point.
+  Obsługuje panel PowerTip PG240128 (240×128 mono) przez zewnętrzny
+  `T6963C_SPI_bridge` po SPI1, używając wysokopoziomowych komend rysowania
+  (`T6963C_Bridge.h`). Wybierany w konfiguracji jak pozostałe wyświetlacze;
+  wzajemnie wykluczający się z TFT (wspólne piny SPI1 / slot wyświetlacza).
+  - Reużywa pinów SPI1 TFT: `SCK PA5`, `MOSI PA7`, `CS PB13`, `READY PB12`;
+    zwalnia `PB15` (był TFT_RST).
+  - Skondensowany układ 240×128 odzwierciedlający ekran TFT: nagłówek
+    (tytuł + czas LMT), duża częstotliwość (fonty LOGISOSO), wiersz statusu,
+    wiersze wartości (PWM/Vctl, INA219, czujniki) i pasek postępu survey-in.
+  - Panel monochromatyczny → wskazanie koloru lock/holdover staje się
+    odwróconym (wypełnionym) prostokątem wokół słowa statusu (`LOCK` /
+    `HOLD` / `H-LOST` / `NOFIX`).
+  - Jedna wsadowa transakcja SPI na odświeżenie (jedno oczekiwanie na READY),
+    z auto-podziałem biblioteki mostka jako zabezpieczeniem; cache zmian
+    per-pole pomija zbędne przerysowania.
+  - Statyczny splash startowy (logo + podtytuł + checklista sprzętu); bez
+    animacji fali, bo renderowanie wsadowe przez SPI byłoby kosztowne na
+    małym panelu mono.
+
+---
+
 ## [v0.47-rtos]
 
 ### Dodane

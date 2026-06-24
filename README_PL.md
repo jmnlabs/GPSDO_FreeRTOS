@@ -1,4 +1,6 @@
-# GPSDO FreeRTOS v0.47
+# GPSDO FreeRTOS v0.48
+
+[English](README.md) | **Polski** | [Español](README_ES.md)
 
 Firmware czasu rzeczywistego (FreeRTOS) dla oscylatora sterowanego GPS (GPSDO)
 na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
@@ -49,12 +51,14 @@ w długim okresie, przy zachowaniu krótkookresowej stabilności OCXO.
         ┌──────┬───┼───┬─────┤         │    TM1637
         │      │   │   │     │         │    (zegar,
       OLED   LCD  HT16K33  TFT        BT     PA8/PB4)
-     128x64  20x4 (zegar) 240x320   HC-06
-        │                ILI9341/
-     Czujniki:           ST7789
-   ┌────┼────┐
-  AHT  BMP  INA
-  20   280  219
+     128x64  20x4 (zegar)  │         HC-06
+        │              ┌───┴────────┐
+     Czujniki:         │ ILI9341 /  │  320x240
+   ┌────┼────┐         │ ST7789     │
+  AHT  BMP  INA        │ ILI9488    │  480x320 (nietestowany)
+  20   280  219        │ T6963C *   │  240x128 mono (przez mostek SPI,
+                       └────────────┘            eksperymentalny)
+                       * wzajemnie wykluczający się z kolorowymi TFT
 ```
 
 **Pętla regulacji** działa w następujący sposób:
@@ -81,7 +85,16 @@ w długim okresie, przy zachowaniu krótkookresowej stabilności OCXO.
 - **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309)
 - **LCD 20×4** I2C (HD44780 + PCF8574T)
 - **TM1637** (4- lub 6-cyfrowy wyświetlacz zegarowy)
-- **TFT 240×320** SPI (ILI9341 / ST7789, biblioteka TFT_eSPI)
+- **TFT 320×240** SPI (ILI9341 / ST7789, biblioteka TFT_eSPI)
+- **TFT 480×320** SPI (ILI9488, biblioteka TFT_eSPI) — *nietestowany, brak
+  panelu do testów; układ 320×240 jest automatycznie skalowany*
+- **T6963C 240×128** mono LCD przez zewnętrzny mostek SPI→T6963C (PG240128);
+  współdzieli piny SPI1 z TFT, wzajemnie wykluczający się z TFT.
+  ⚠️ **Eksperymentalny / niesprawdzony** — backend jest kompletny, ale
+  połączenie testowano dotąd tylko na długich przewodach z problemami
+  integralności sygnału (dzwonienie, fałszywe zbocza CS). Wymaga weryfikacji
+  na porządnie wykonanym, krótko okablowanym sprzęcie; na razie zostaw
+  wyłączony.
 - **HT16K33** 4-cyfrowy zegar 7-seg z dwukropkiem, I2C 0x70 (HH:MM)
 
 OLED i LCD mogą działać jednocześnie (różne adresy I2C).
@@ -101,7 +114,7 @@ określonych priorytetach:
 | Średni-wysoki | `vGpsTask` | 1,5 KB | Parsowanie NMEA (TinyGPS++), konfiguracja UBX |
 | Średni | `vCliTask` | 1 KB | Parser komend szeregowych / Bluetooth |
 | Średni-niski | `vSensorTask` | 1,5 KB | Odczyt AHT/BMP/INA co 2 s |
-| Niski | `vDisplayTask` | 2 KB | OLED, LCD, TM1637, raport serial, LED |
+| Niski | `vDisplayTask` | 4 KB | OLED, LCD, TM1637, raport serial, LED |
 | Najniższy | `vUptimeTask` | 768 B | Licznik czasu pracy (dd hh:mm:ss) |
 
 **Współdzielony stan** chroniony jest muteksami FreeRTOS:
@@ -208,11 +221,23 @@ Holdover na linii 3: `[H]` (ręczny) lub `[A]` (automatyczny) — blink 500 ms.
 
 ---
 
-## Układ wyświetlacza TFT 240×320 (ILI9341 / ST7789, TFT_eSPI)
+## Układ wyświetlacza TFT (ILI9341 / ST7789 320×240, ILI9488 480×320, TFT_eSPI)
 
-Obsługiwane są tanie moduły TFT SPI w orientacji poziomej (320×240),
-sterowane przez sprzętowe SPI1. Oba sterowniki są przetestowane i działają z tym samym `User_Setup.h` — przełączenie między nimi wymaga tylko zmiany definicji drivera (`ST7789_DRIVER` ↔ `ILI9341_DRIVER`). Linie `TFT_RGB_ORDER` / `TFT_INVERSION_OFF` są potrzebne dla prawidłowych kolorów na modułach ST7789, a na ILI9341 są nieszkodliwe. Niezależne od wyświetlaczy I2C — OLED,
-LCD i TFT mogą działać jednocześnie.
+Obsługiwane są tanie moduły TFT SPI w orientacji poziomej, sterowane przez
+sprzętowe SPI1: **ILI9341** i **ST7789** w 320×240 oraz **ILI9488** w 480×320.
+Wszystkie trzy używają tego samego okablowania w `User_Setup.h` — zmiana
+panelu wymaga tylko zmiany definicji drivera oraz szerokości/wysokości. Linie
+`TFT_RGB_ORDER` / `TFT_INVERSION_OFF` są potrzebne dla prawidłowych kolorów na
+modułach ST7789, a na pozostałych są nieszkodliwe. Niezależne od wyświetlaczy
+I2C — OLED, LCD i TFT mogą działać jednocześnie.
+
+> **ILI9488 jest nietestowany** — brak panelu do testów. Ekran roboczy 320×240
+> i splash są automatycznie skalowane do 480×320 podczas kompilacji (szerokość
+> ×1.5, wysokość ×1.33, fonty mapowane o rozmiar w górę). Kod się kompiluje, a
+> geometria została zweryfikowana, że mieści się w panelu, ale nie był
+> uruchomiony na realnym sprzęcie. Traktować jako eksperymentalny do
+> potwierdzenia. ILI9488 po SPI jest zauważalnie wolniejszy (480×320, kolor
+> 18-bit), więc przerysowania są bardziej widoczne niż na małych panelach.
 
 **Okablowanie (sprzętowe SPI1):**
 
@@ -228,7 +253,7 @@ LCD i TFT mogą działać jednocześnie.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.47-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
+│ GPSDO v0.48-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← częstotliwość (duża, kolorowa)
@@ -285,6 +310,21 @@ TFT_eSPI konfiguruje się w *bibliotece*, nie w szkicu. Edytuj
 #define SPI_FREQUENCY 27000000
 ```
 
+Dla panelu **ILI9488 (480×320)** zmień driver i wymiary oraz dodaj
+`LOAD_FONT6` (większy font częstotliwości używany przez skalowany układ):
+
+```c
+#define ILI9488_DRIVER
+#define TFT_WIDTH  320
+#define TFT_HEIGHT 480
+// ...te same linie TFT_MISO/MOSI/SCLK/CS/DC/RST/RGB_ORDER co wyżej...
+#define LOAD_GLCD
+#define LOAD_FONT2
+#define LOAD_FONT4
+#define LOAD_FONT6              // duży font częstotliwości w skalowanym układzie
+#define SPI_FREQUENCY 27000000
+```
+
 **Rozwiązywanie problemów:** jeśli po włączeniu TFT firmware zawiesza się na
 splashu wersji na OLED, sprawdź wyjście serial. Komunikat `TFT: init start ...`
 jest drukowany bezpośrednio przed `TFT_eSPI::init()` — jeśli to ostatnia
@@ -293,7 +333,7 @@ dokładnie powyższe piny (łącznie z `TFT_MISO PA6`) i właściwy driver. Stos
 DisplayTask jest automatycznie zwiększany do 768 słów gdy `GPSDO_TFT` jest
 włączone — jeśli modyfikowałeś rozmiary stosów ręcznie, przywróć tę wartość.
 
-Następnie włącz `GPSDO_TFT_ST7789` lub `GPSDO_TFT_ILI9341` w `gpsdo_config.h`.
+Następnie włącz `GPSDO_TFT_ST7789`, `GPSDO_TFT_ILI9341` lub `GPSDO_TFT_ILI9488` w `gpsdo_config.h`.
 
 ---
 
@@ -461,8 +501,8 @@ czasowego u-blox włącz opcję w `gpsdo_config.h`:
 
 ```c
 #define GPSDO_GPS_TIMING            // u-blox LEA-6T / LEA-M8T
-#define GPSDO_SVIN_MIN_SECS   120   // min. czas survey-in [s]
-#define GPSDO_SVIN_ACC_LIMIT  2000  // próg dokładności [mm]
+#define GPSDO_SVIN_MIN_SECS   300   // min. czas survey-in [s]
+#define GPSDO_SVIN_ACC_LIMIT  5000  // próg dokładności [mm] (5 m)
 ```
 
 LEA-6T i LEA-M8T akceptują **różne** komendy Time Mode, więc firmware
@@ -563,7 +603,7 @@ HW: INA219 sensor         not found
 HW: OLED 128x64           OK  (I2C 0x3C)
 HW: LCD 20x4              OK  (I2C expander)
 HW: HT16K33 clock display OK  (I2C 0x70)
-HW: TFT 240x320           enabled (SPI1, write-only - not verifiable)
+HW: TFT 320x240            enabled (SPI1, write-only - not verifiable)
 HW: TM1637 clock display  enabled (GPIO PA8/PB4, write-only - not verifiable)
 ```
 
@@ -600,7 +640,7 @@ Plik `gpsdo_config.h` steruje konfiguracją. Najważniejsze przełączniki:
 #define GPSDO_OLED_SSD1309       // lub SH1106, SSD1306
 #define GPSDO_LCD_20x4           // HD44780 20x4 I2C
 #define GPSDO_TM1637_6           // 6-cyfrowy TM1637 (HH:MM:SS)
-#define GPSDO_TFT_ST7789         // lub GPSDO_TFT_ILI9341 — TFT SPI 240x320
+#define GPSDO_TFT_ST7789         // ILI9341/ST7789 320x240, lub GPSDO_TFT_ILI9488 480x320
 #define GPSDO_HT16K33            // 4-cyfrowy zegar HT16K33, I2C 0x70
 
 // Czujniki:

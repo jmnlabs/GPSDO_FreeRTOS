@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.47
+ * Part of GPSDO FreeRTOS v0.48
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.47-rtos"
+#define PROGRAM_VERSION  "v0.48-rtos"
 
 /* ---- Serial output macro ----
  * When GPSDO_BLUETOOTH is defined, all user-facing output goes to Serial2.
@@ -49,13 +49,13 @@ extern "C" {
 /* ── OLED display type — select exactly one, or comment all out ──────── */
 //#define GPSDO_OLED_SH1106        /* SH1106  128x64 I2C — original hardware */
 /* #define GPSDO_OLED_SSD1306 */ /* SSD1306 128x64 I2C                     */
-#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
+//#define GPSDO_OLED_SSD1309       /* SSD1309 128x64 I2C (same init as 1306) */
 
 /* ── LCD 20x4 I2C — independent of OLED, enable or comment out ──────── */
 //#define GPSDO_LCD_20x4     /* HD44780 20x4 via PCF8574T I2C expander */
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
-#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
+//#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
 /* #define GPSDO_TM1637      */  /* 4-digit TM1637: HH:MM                  */
 
 /* ── HT16K33 clock display — 4-digit 7-seg with colon, I2C ────────────
@@ -66,11 +66,14 @@ extern "C" {
 #define HT16K33_I2C_ADDR  0x70   /* default; A0/A1/A2 jumpers raise it     */
 #define HT16K33_BRIGHTNESS  8    /* 0 (dim) .. 15 (max)                    */
 
-/* ── TFT 240x320 SPI display — select exactly one, or comment both out ─
+/* ── TFT SPI display — select exactly one, or comment all out ─────────
  *
- * Cheap ILI9341 / ST7789 modules driven by the TFT_eSPI library over
- * hardware SPI1.  Landscape orientation (320x240).  Independent of the
- * I2C displays (OLED/LCD) — all can run simultaneously.
+ * Cheap ILI9341 / ST7789 (320x240) or ILI9488 (480x320) modules driven by
+ * the TFT_eSPI library over hardware SPI1.  Landscape orientation.
+ * Independent of the I2C displays (OLED/LCD) — all can run simultaneously.
+ * The operating screen + splash are authored for 320x240 and scaled up to
+ * 480x320 automatically (see TFT_SX/TFT_SY/TFT_F below); the layout code is
+ * shared across all three panels.
  *
  * Wiring (fixed, hardware SPI1):
  *   SCK  → PA5   (SPI1 SCLK)
@@ -80,28 +83,43 @@ extern "C" {
  *   CS   → PB13
  *
  * TFT_eSPI REQUIRES library-side configuration.  Edit User_Setup.h in
- * the TFT_eSPI library folder (Arduino/libraries/TFT_eSPI/) to contain:
+ * the TFT_eSPI library folder (Arduino/libraries/TFT_eSPI/).
  *
- *   #define ST7789_DRIVER          // or ILI9341_DRIVER
- *   #define TFT_WIDTH  240
- *   #define TFT_HEIGHT 320
- *   #define TFT_MISO PA6      // required by TFT_eSPI on STM32 even for write-only
- *   #define TFT_MOSI PA7
- *   #define TFT_SCLK PA5
- *   #define TFT_CS   PB13
- *   #define TFT_DC   PB12
- *   #define TFT_RST  PB15
- *   #define TFT_RGB_ORDER TFT_BGR   // colour order Blue-Green-Red
- *   #define TFT_INVERSION_OFF       // fixes inverted colours on some ST7789 modules
- *   #define LOAD_GLCD
- *   #define LOAD_FONT2
- *   #define LOAD_FONT4
- *   #define SPI_FREQUENCY 27000000
+ *   For ILI9341 / ST7789 (320x240):
+ *     #define ST7789_DRIVER          // or ILI9341_DRIVER
+ *     #define TFT_WIDTH  240
+ *     #define TFT_HEIGHT 320
+ *   For ILI9488 (480x320):
+ *     #define ILI9488_DRIVER
+ *     #define TFT_WIDTH  320
+ *     #define TFT_HEIGHT 480
+ *   Common to all:
+ *     #define TFT_MISO PA6      // required by TFT_eSPI on STM32 even write-only
+ *     #define TFT_MOSI PA7
+ *     #define TFT_SCLK PA5
+ *     #define TFT_CS   PB13
+ *     #define TFT_DC   PB12
+ *     #define TFT_RST  PB15
+ *     #define TFT_RGB_ORDER TFT_BGR   // colour order Blue-Green-Red
+ *     #define TFT_INVERSION_OFF       // some ST7789 modules need this
+ *     #define LOAD_GLCD
+ *     #define LOAD_FONT2
+ *     #define LOAD_FONT4
+ *     #define LOAD_FONT6              // ILI9488: large frequency font
+ *     #define SPI_FREQUENCY 27000000  // ILI9488 over SPI is slow; 27 MHz ok
  *
  * The defines below only gate the display code in gpsdo_tasks.cpp —
  * driver selection happens in the TFT_eSPI User_Setup.h.              */
 /* #define GPSDO_TFT_ILI9341 */  /* ILI9341 240x320 SPI TFT */
-#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
+//#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
+#define GPSDO_TFT_ILI9488        /* ILI9488 320x480 SPI TFT (480x320 landscape)
+                                  * — UNTESTED: no panel on hand yet. Layout is
+                                  * the 320x240 design scaled up ~1.5x. Set the
+                                  * matching driver + TFT_WIDTH 320 / TFT_HEIGHT
+                                  * 480 in TFT_eSPI User_Setup.h. ILI9488 over
+                                  * SPI is slow (18-bit colour, 480x320); expect
+                                  * a more visible repaint than on the small
+                                  * panels. */
 
 /* TFT control pins (documentation — actual config is in User_Setup.h) */
 #define PIN_TFT_SCK   PA5
@@ -109,6 +127,49 @@ extern "C" {
 #define PIN_TFT_RST   PB15
 #define PIN_TFT_DC    PB12
 #define PIN_TFT_CS    PB13
+
+/* ── SPI→T6963C bridge (PowerTip PG240128 240x128 mono LCD) ──────────────
+ * *** EXPERIMENTAL / UNTESTED — DO NOT RELY ON THIS YET ***
+ * The firmware-side backend compiles and the protocol is correct, but the
+ * link has NOT been validated on good hardware. Bring-up on long jumper
+ * wires / a breadboard showed heavy ringing on the oscilloscope (SCK/MOSI/CS
+ * reflections), producing spurious CS edges that desync the bridge parser
+ * (bridge stats: nssResets > framesOk, rising unknownCmd). The SAME glitches
+ * appear with the proven bare-Arduino reference master, so this is a SIGNAL-
+ * INTEGRITY (wiring) problem, not a firmware bug. To be retested on properly
+ * built hardware: short point-to-point links (ideally soldered), a solid
+ * common ground, optional series resistors (~100–330 Ω) on SCK/MOSI/CS, and
+ * the SPI clock raised from 250 kHz toward 1 MHz only once the bus is clean.
+ * Until then, leave GPSDO_T6963C disabled.
+ *
+ * Alternative graphical display to the TFT, driven through the external
+ * "T6963C_SPI_bridge" (BluePill) over SPI1 using high-level drawing commands
+ * (see T6963C_Bridge.h). Reuses the TFT's SPI1 pins; needs only CS + READY.
+ *
+ * IMPORTANT — the bridge (BluePill) listens on its own SPI2 pins, which have
+ * DIFFERENT names than the master's SPI1. Wire by SIGNAL, not pin name:
+ *
+ *   GPSDO master (this MCU)        →  Bridge (BluePill, SPI2 slave)
+ *   --------------------------------------------------------------
+ *   PA5  (SPI1 SCK)                →  PB13 (bridge SPI2 SCK)
+ *   PA7  (SPI1 MOSI)               →  PB15 (bridge SPI2 MOSI)
+ *   PB13 (CS output, below)        →  PB12 (bridge NSS / EXTI)
+ *   PB12 (READY input, below)      ←  PB1  (bridge READY/BUSY output)
+ *   GND                            ⟷  GND  (common ground — required!)
+ *
+ * Note: bridge MISO (PB14) is unused (master only writes). PB15 on the
+ * master (was TFT_RST) is freed. Mutually exclusive with GPSDO_TFT. */
+/* #define GPSDO_T6963C */         /* SPI→T6963C bridge, 240x128 mono — EXPERIMENTAL/UNTESTED (see banner above) */
+#define PIN_T6963C_CS    PB13      /* master output → bridge PB12 (NSS)  */
+#define PIN_T6963C_READY PB12      /* master input  ← bridge PB1 (READY) */
+#define T6963C_SPI_HZ    250000UL   /* 250 kHz — robust on long/breadboard
+                                     * wiring. The bridge handles 1 MHz on
+                                     * short links, but >20 cm jumpers or a
+                                     * breadboard cause reflections/crosstalk
+                                     * on SCK/MOSI/CS (spurious CS edges →
+                                     * parser desync → unknownCmd). Slower
+                                     * edges fix that. Raise toward 1 MHz only
+                                     * with short, point-to-point wiring. */
 
 /* ── OLED page alternation: seconds per page ─────────────────────────── */
 #define OLED_PAGE_SWITCH_SECS   10u   /* flip between page A and B every N seconds */
@@ -132,13 +193,57 @@ extern "C" {
 #if defined(GPSDO_LCD_20x4) && (defined(GPSDO_TM1637) || defined(GPSDO_TM1637_6))
   #error "GPSDO_LCD_20x4 and TM1637 cannot be used together (I2C/GPIO conflict). Disable one."
 #endif
-#if defined(GPSDO_TFT_ILI9341) && defined(GPSDO_TFT_ST7789)
-  #error "Select only one TFT type: GPSDO_TFT_ILI9341 or GPSDO_TFT_ST7789"
+/* exactly one TFT driver */
+#if (defined(GPSDO_TFT_ILI9341) + defined(GPSDO_TFT_ST7789) + defined(GPSDO_TFT_ILI9488)) > 1
+  #error "Select only one TFT type: GPSDO_TFT_ILI9341, GPSDO_TFT_ST7789 or GPSDO_TFT_ILI9488"
+#endif
+#if (defined(GPSDO_TFT_ILI9341) || defined(GPSDO_TFT_ST7789) || defined(GPSDO_TFT_ILI9488)) && defined(GPSDO_T6963C)
+  #error "GPSDO_T6963C and TFT cannot be used together (shared SPI1 pins / display slot). Disable one."
 #endif
 
 /* ── Convenience alias: any TFT defined ─────────────────────────────── */
-#if defined(GPSDO_TFT_ILI9341) || defined(GPSDO_TFT_ST7789)
+#if defined(GPSDO_TFT_ILI9341) || defined(GPSDO_TFT_ST7789) || defined(GPSDO_TFT_ILI9488)
   #define GPSDO_TFT
+#endif
+
+/* ── TFT panel geometry & layout scaling ────────────────────────────────
+ * The layout is authored for the 320x240 landscape panels. The ILI9488 is
+ * 480x320 landscape. Note the axes scale by DIFFERENT factors:
+ *   width  320 → 480  = 3/2  (1.50x)
+ *   height 240 → 320  = 4/3  (1.33x)
+ * so X and Y must scale independently, or the bottom status bar would run
+ * off the screen. TFT_SX scales an X/width value, TFT_SY a Y/height value.
+ * TFT_S (used where the original code mixed the two for padding/among small
+ * deltas) uses the X factor. On the small panels everything is identity. */
+#if defined(GPSDO_TFT_ILI9488)
+  #define TFT_W         480
+  #define TFT_H         320
+  #define TFT_SX_N      3       /* width  3/2 */
+  #define TFT_SX_D      2
+  #define TFT_SY_N      4       /* height 4/3 */
+  #define TFT_SY_D      3
+#else
+  #define TFT_W         320
+  #define TFT_H         240
+  #define TFT_SX_N      1
+  #define TFT_SX_D      1
+  #define TFT_SY_N      1
+  #define TFT_SY_D      1
+#endif
+/* scale X (width/horizontal) and Y (height/vertical), integer rounded */
+#define TFT_SX(v)  (((int)(v) * TFT_SX_N + (TFT_SX_D/2)) / TFT_SX_D)
+#define TFT_SY(v)  (((int)(v) * TFT_SY_N + (TFT_SY_D/2)) / TFT_SY_D)
+/* generic scale for sizes/padding not tied to an axis — uses the X factor */
+#define TFT_S(v)   TFT_SX(v)
+
+/* TFT_eSPI GLCD fonts are discrete sizes (1,2,4,6,7,8), so they can't scale by
+ * an arbitrary factor. TFT_F() maps a base font to the next size up on the
+ * larger panel, keeping text proportional to the layout. Identity on the
+ * small panels. Mapping: 1→2, 2→4, 4→6, 6→8 (others pass through). */
+#if defined(GPSDO_TFT_ILI9488)
+  #define TFT_F(f)   ((f)==1?2 : (f)==2?4 : (f)==4?6 : (f)==6?8 : (f))
+#else
+  #define TFT_F(f)   (f)
 #endif
 
 /* ── Convenience alias: any OLED defined ────────────────────────────── */

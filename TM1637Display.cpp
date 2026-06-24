@@ -1,7 +1,7 @@
 /**
  * TM1637Display.cpp — TM1637 LED display driver — implementation
  *
- * Part of GPSDO FreeRTOS v0.47
+ * Part of GPSDO FreeRTOS v0.48
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa

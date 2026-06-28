@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.49
+ * Part of GPSDO FreeRTOS v0.50
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -204,10 +204,16 @@ static uint8_t ubx_reduce_nmea(void)
 #ifdef GPSDO_GPS_TIMING
 
 /* Start survey-in. The LEA-6T and LEA-M8T accept different Time Mode
- * commands, so try each (both verified in u-center) and stop at the first
- * ACK:
+ * commands, so try each (the first two verified in u-center) and stop at the
+ * first ACK:
  *   1. CFG-TMODE2 (0x06 0x3D), 28-byte payload  — LEA-M8T
  *   2. CFG-TMODE  (0x06 0x1D), 28-byte payload  — LEA-6T (u-blox 6)
+ *   3. CFG-VALSET (0x06 0x8A), CFG-TMODE-* keys  — ZED-F9T (Gen9) *EXPERIMENTAL*
+ *      UNTESTED: no F9T on hand. Gen9 deprecates the legacy CFG-TMODE* frames
+ *      (gone as of firmware TIM 2.24) in favour of the configuration-key
+ *      interface, and reports survey-in via NAV-SVIN (not TIM-SVIN). The key
+ *      IDs and the 0.1 mm accuracy unit below are from u-blox docs/ubxtool,
+ *      not verified on real hardware — treat as a starting point.
  * Returns true on the first ACK. Caller logs which (if any) succeeded. */
 static bool ubx_start_survey_in(void)
 {
@@ -248,6 +254,42 @@ static bool ubx_start_survey_in(void)
         send_ubx(m, sizeof(m));
         if (get_ubx_ack(m, 1500) == +1) {
             OUT_SERIAL.println("LEA-T: accepted CFG-TMODE (0x1D, 28B)");
+            return true;
+        }
+    }
+    flush_rx(150);
+
+    /* ---- Variant 3: CFG-VALSET (0x8A) with CFG-TMODE-* keys (ZED-F9T) ----
+     * *** EXPERIMENTAL / UNTESTED — no F9T on hand ***
+     * Gen9 configuration-key interface. One VALSET frame sets three keys:
+     *   CFG-TMODE-MODE         0x20030001  U1  = 1 (survey-in)
+     *   CFG-TMODE-SVIN_MIN_DUR 0x40030010  U4  = dur [s]
+     *   CFG-TMODE-SVIN_ACC_LIMIT 0x40030011 U4 = acc [0.1 mm]  (NOTE the unit!)
+     * VALSET payload: version u1=0, layer u1=1 (RAM), reserved u2=0,
+     *   then [keyID u4 little-endian][value little-endian] per item.
+     * Accuracy: GPSDO_SVIN_ACC_LIMIT is in mm; F9T wants 0.1 mm, so ×10. */
+    {
+        const uint32_t acc01 = acc * 10u;          /* mm → 0.1 mm */
+        uint8_t m[8 + 4 + (4+1) + (4+4) + (4+4)];   /* = 8+4+5+8+8 = 33 */
+        memset(m, 0, sizeof(m));
+        uint8_t p = 6;                              /* payload write cursor */
+        m[0]=0xB5; m[1]=0x62; m[2]=0x06; m[3]=0x8A;
+        m[4]=(uint8_t)(sizeof(m)-8); m[5]=0x00;     /* payload length = 25 */
+        /* header: version=0, layer=1 (RAM), reserved=0,0 */
+        m[p++]=0x00; m[p++]=0x01; m[p++]=0x00; m[p++]=0x00;
+        /* key CFG-TMODE-MODE = 1 (U1) */
+        m[p++]=0x01; m[p++]=0x00; m[p++]=0x03; m[p++]=0x20;
+        m[p++]=0x01;
+        /* key CFG-TMODE-SVIN_MIN_DUR = dur (U4) */
+        m[p++]=0x10; m[p++]=0x00; m[p++]=0x03; m[p++]=0x40;
+        m[p++]=dur&0xFF; m[p++]=(dur>>8)&0xFF; m[p++]=(dur>>16)&0xFF; m[p++]=(dur>>24)&0xFF;
+        /* key CFG-TMODE-SVIN_ACC_LIMIT = acc01 (U4, 0.1 mm) */
+        m[p++]=0x11; m[p++]=0x00; m[p++]=0x03; m[p++]=0x40;
+        m[p++]=acc01&0xFF; m[p++]=(acc01>>8)&0xFF; m[p++]=(acc01>>16)&0xFF; m[p++]=(acc01>>24)&0xFF;
+        ubx_cksum(m, sizeof(m));
+        send_ubx(m, sizeof(m));
+        if (get_ubx_ack(m, 1500) == +1) {
+            OUT_SERIAL.println("LEA-T: accepted CFG-VALSET (F9T/Gen9, experimental)");
             return true;
         }
     }
@@ -315,6 +357,53 @@ done:
 }
 
 
+/* Poll NAV-SVIN (0x01 0x3B) and parse the survey-in status — the Gen9/F9T
+ * channel (TIM-SVIN may not answer on an F9T). *** EXPERIMENTAL / UNTESTED ***
+ * Same out-params as ubx_poll_svin(). 40-byte payload, from u-blox docs:
+ *   iTOW(u4)@0, dur(u4)@4 [s], meanX/Y/Z(i4)@8..19, meanXHP/YHP/ZHP@20..22,
+ *   reserved@23, meanAcc(u4)@24 [0.1 mm], obs(u4)@28, valid(u1)@32,
+ *   active(u1)@33.
+ * NOTE meanAcc is a DIRECT accuracy in 0.1 mm units (no sqrt, unlike the
+ * TIM-SVIN variance) — convert to mm by /10. Offsets/units are from the
+ * interface description, not verified on hardware. */
+static bool ubx_poll_svin_nav(uint32_t *dur, uint32_t *acc_mm,
+                              bool *valid, bool *active)
+{
+    const uint8_t cls = 0x01, id = 0x3B;   /* NAV-SVIN, 40-byte payload */
+    uint8_t poll[8] = { 0xB5,0x62, cls, id, 0,0, 0,0 };
+    ubx_cksum(poll, sizeof(poll));
+    send_ubx(poll, sizeof(poll));
+
+    uint8_t buf[52]; uint8_t n = 0;
+    int state = 0;
+    const uint8_t MAX_SLICES = 50;          /* 50 × 10 ms = 500 ms cap */
+    for (uint8_t slice = 0; slice < MAX_SLICES; slice++) {
+        while (Serial1.available()) {
+            uint8_t b = Serial1.read();
+            if (state == 0) { if (b == 0xB5) state = 1; else gps.encode(b); }
+            else if (state == 1) { state = (b == 0x62) ? 2 : 0; }
+            else if (state == 2) { state = (b == cls) ? 3 : 0; }
+            else if (state == 3) { state = (b == id) ? 4 : 0; n = 0; }
+            else { if (n < sizeof(buf)) buf[n++] = b;
+                   if (n >= sizeof(buf)) goto done2; }
+        }
+        if (n >= 40) break;                 /* full payload already in */
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+done2:
+    if (n < 40) return false;
+    /* payload starts at buf[2] (buf[0..1] = length) */
+    *dur = buf[2+4] | (buf[2+5]<<8) | (buf[2+6]<<16) | ((uint32_t)buf[2+7]<<24);
+    uint32_t meanAcc01 = buf[2+24]| (buf[2+25]<<8)| (buf[2+26]<<16)| ((uint32_t)buf[2+27]<<24);
+    uint32_t mm = meanAcc01 / 10u;          /* 0.1 mm → mm */
+    if (mm > 65535u) mm = 65535u;
+    *acc_mm = mm;
+    *valid  = buf[2+32] != 0;
+    *active = buf[2+33] != 0;
+    return true;
+}
+
+
 /* Non-blocking survey-in monitor — called periodically from vGpsTask AFTER
  * the scheduler is running. Polls TIM-SVIN once and updates the display
  * state. Clears g_svin_pending / g_svin_active when survey-in completes or
@@ -337,7 +426,12 @@ static void ubx_poll_svin_step(void)
 
     uint32_t dur=0, acc=0; bool valid=false, active=false;
     static bool ever_replied = false;
-    if (ubx_poll_svin(&dur, &acc, &valid, &active)) {
+    /* TIM-SVIN first (LEA-6T/M8T). If it does not answer, fall back to
+     * NAV-SVIN (ZED-F9T/Gen9, experimental). Whichever replies drives the
+     * same completion logic below. */
+    bool got = ubx_poll_svin(&dur, &acc, &valid, &active);
+    if (!got) got = ubx_poll_svin_nav(&dur, &acc, &valid, &active);
+    if (got) {
         no_reply = 0;
         ever_replied = true;
         g_svin_dur   = (uint16_t)dur;
@@ -364,13 +458,14 @@ static void ubx_poll_svin_step(void)
             return;
         }
     } else if (!ever_replied) {
-        /* No TIM-SVIN frame AND we have never had one. The module is likely
-         * not running a survey (plain nav mode, or TIM-SVIN output off) —
-         * stop monitoring after ~30 consecutive misses rather than waiting
-         * the full safety window. Once a survey HAS replied we never give up
-         * here (occasional misses are tolerated; the survey is in progress). */
+        /* Neither TIM-SVIN nor NAV-SVIN replied AND we have never had one. The
+         * module is likely not running a survey (plain nav mode, or the SVIN
+         * message output is off) — stop monitoring after ~30 consecutive
+         * misses rather than waiting the full safety window. Once a survey HAS
+         * replied we never give up here (occasional misses are tolerated; the
+         * survey is in progress). */
         if (++no_reply >= 30) {
-            OUT_SERIAL.println("LEA-T: no TIM-SVIN response — not in survey mode, stopping monitor");
+            OUT_SERIAL.println("LEA-T: no TIM-SVIN/NAV-SVIN response — not in survey mode, stopping monitor");
             g_svin_active = false; g_svin_pending = false;
             return;
         }

@@ -12,6 +12,35 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.50-rtos]
+
+### Added
+- **ZED-F9T (Gen9) timing-receiver support — experimental, untested.** A third
+  survey-in path was added alongside the proven LEA-6T / LEA-M8T ones.
+  `ubx_start_survey_in()` now also sends a `CFG-VALSET` (0x06 0x8A) frame
+  setting the Gen9 configuration keys `CFG-TMODE-MODE` (survey-in),
+  `CFG-TMODE-SVIN_MIN_DUR` and `CFG-TMODE-SVIN_ACC_LIMIT` (the latter converted
+  from mm to the F9T's 0.1 mm unit). The survey-in monitor gained a parallel
+  `NAV-SVIN` (0x01 0x3B) parser and falls back to it when `TIM-SVIN` does not
+  answer, since the F9 generation reports survey-in through NAV-SVIN. ⚠️
+  Written from u-blox documentation/ubxtool with no F9T on hand — key IDs, the
+  0.1 mm unit and the NAV-SVIN payload offsets are NOT verified on hardware.
+  The legacy `CFG-NAV5` stationary frame may NAK on an F9T (harmless; the
+  survey-in path is independent). The two tested receivers are unaffected:
+  TIM-SVIN is still tried first, so LEA-6T / LEA-M8T / NEO-M8T behaviour is
+  unchanged. Documented as experimental in the README and config.
+
+### Changed
+- **LCD 20×4 splash subtitle** changed from `GPS-Disciplined Osc.` to
+  `GPS-Disciplined OCXO`, matching the TFT splash (both 20 chars, full width).
+
+### Notes
+- **NEO-M8T** confirmed (by datasheet analysis) fully compatible with the
+  existing LEA-M8T path — same M8 silicon + FW3, same CFG-TMODE2 / TIM-SVIN —
+  no code change required. Documented in the timing-receiver section.
+
+---
+
 ## [v0.49-rtos]
 
 ### Fixed

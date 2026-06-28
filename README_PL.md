@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.49
+# GPSDO FreeRTOS v0.50
 
 [English](README.md) | **Polski** | [Español](README_ES.md)
 
@@ -253,7 +253,7 @@ I2C — OLED, LCD i TFT mogą działać jednocześnie.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.49-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
+│ GPSDO v0.50-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← częstotliwość (duża, kolorowa)
@@ -494,13 +494,13 @@ EEPROM (emulowane w pamięci Flash STM32) przechowuje 144 bajty:
 
 ---
 
-## Moduły czasowe GPS (LEA-6T / LEA-M8T)
+## Moduły czasowe GPS (LEA-6T / LEA-M8T / NEO-M8T, ZED-F9T eksperymentalnie)
 
 Moduły NEO-6M / NEO-8M działają od razu (domyślnie). Dla odbiornika
 czasowego u-blox włącz opcję w `gpsdo_config.h`:
 
 ```c
-#define GPSDO_GPS_TIMING            // u-blox LEA-6T / LEA-M8T
+#define GPSDO_GPS_TIMING            // odbiornik czasowy u-blox (patrz niżej)
 #define GPSDO_SVIN_MIN_SECS   300   // min. czas survey-in [s]
 #define GPSDO_SVIN_ACC_LIMIT  5000  // próg dokładności [mm] (5 m)
 ```
@@ -513,6 +513,27 @@ próbuje każdej po kolei i zachowuje pierwszą zaakceptowaną (ACK):
 istnieje tylko w firmware high-precision, jak NEO-M8P / ZED-F9P, a nie w tych
 modułach czasowych — zweryfikowane w u-center na LEA-M8T-0 / TIM 1.10 i
 LEA-6T.)
+
+**NEO-M8T** jest w pełni zgodny z LEA-M8T — ten sam układ u-blox M8 i firmware
+FW3, te same komendy `CFG-TMODE2` / `TIM-SVIN` — więc działa bez zmian w
+kodzie poza włączeniem przełącznika. (Oba warianty M8T domyślnie używają
+GPS + GLONASS + QZSS; przekonfiguruj na GPS + QZSS przez `CFG-GNSS` w u-center
+i zapisz do flash, jeśli chcesz rozwiązanie jednokonstelacyjne.)
+
+> **ZED-F9T (Gen9) — eksperymentalny, nietestowany.** Generacja F9 zastąpiła
+> komendy konfiguracyjne legacy (wycofane od firmware TIM 2.24) interfejsem
+> kluczy konfiguracyjnych i raportuje survey-in przez `NAV-SVIN` (0x01 0x3B),
+> a nie `TIM-SVIN`. Obsługa dodana jako trzecia ścieżka:
+> `ubx_start_survey_in()` wysyła też ramkę `CFG-VALSET` (0x06 0x8A)
+> ustawiającą `CFG-TMODE-MODE` / `CFG-TMODE-SVIN_MIN_DUR` /
+> `CFG-TMODE-SVIN_ACC_LIMIT`, a monitor survey-in przechodzi na `NAV-SVIN`,
+> gdy `TIM-SVIN` nie odpowiada. **Napisane na podstawie dokumentacji u-blox,
+> bez modułu F9T pod ręką** — identyfikatory kluczy, jednostka dokładności
+> 0.1 mm i offsety payloadu NAV-SVIN nie są zweryfikowane na sprzęcie. Ramka
+> legacy `CFG-NAV5` (tryb stacjonarny) może zostać odrzucona (NAK) przez F9T;
+> to nieszkodliwe (ścieżka survey-in jest niezależna). Traktuj jako punkt
+> wyjścia do weryfikacji w u-center, nie gotową funkcję.
+
 
 Przy każdym starcie odbiornik wykonuje **survey-in**: uśrednia pozycję
 anteny, po czym przechodzi w tryb **time-only** o stałej pozycji. Daje to

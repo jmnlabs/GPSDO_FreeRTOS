@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.49
+ * Part of GPSDO FreeRTOS v0.50
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -1091,7 +1091,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
  * "T6963C_SPI_bridge" over SPI1 with high-level drawing commands
  * (T6963C_Bridge.h). Layout is a condensed version of the TFT screen:
  *
- *   y  0..17   header  : "GPSDO v0.49"            "14:32:45"   (NCEN10)
+ *   y  0..17   header  : "GPSDO v0.50"            "14:32:45"   (NCEN10)
  *   y 18..54   freq    : "10000000.000 Hz"                     (LOGISOSO28)
  *   y 59..80   status  : [LOCK]  A7 hit   12 sat              (8x13B/6x13)
  *   y 82..117  values  : PWM/Vctl, INA, sensors               (6x13)
@@ -1596,7 +1596,7 @@ void vDisplayTask(void *pvParameters)
         /* 4-line boot splash (centred in 20 cols), held ~3 s:
          *   line0:  ====================
          *   line1:       GPSDO  vX.XX
-         *   line2:  GPS-Disciplined Osc.
+         *   line2:  GPS-Disciplined OCXO
          *   line3:  jmnlabs  +  Claude
          * lcd_set_line uses I2C → guard with the Wire mutex.            */
         if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1605,7 +1605,7 @@ void vDisplayTask(void *pvParameters)
             /* "  GPSDO vX.XX-rtos" — two leading spaces, suffix not cut */
             snprintf(l, sizeof(l), "  GPSDO %s", PROGRAM_VERSION);
             lcd_set_line(1, l);
-            lcd_set_line(2, "GPS-Disciplined Osc.");
+            lcd_set_line(2, "GPS-Disciplined OCXO");
             lcd_set_line(3, " jmnlabs  +  Claude ");
             xSemaphoreGive(xWireMutex);
         }

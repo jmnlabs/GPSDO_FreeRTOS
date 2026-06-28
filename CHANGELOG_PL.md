@@ -12,6 +12,37 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
 
 ---
 
+## [v0.50-rtos]
+
+### Dodane
+- **Obsługa odbiornika czasowego ZED-F9T (Gen9) — eksperymentalna,
+  nietestowana.** Dodano trzecią ścieżkę survey-in obok sprawdzonych LEA-6T /
+  LEA-M8T. `ubx_start_survey_in()` wysyła teraz także ramkę `CFG-VALSET`
+  (0x06 0x8A) ustawiającą klucze konfiguracyjne Gen9: `CFG-TMODE-MODE`
+  (survey-in), `CFG-TMODE-SVIN_MIN_DUR` oraz `CFG-TMODE-SVIN_ACC_LIMIT` (ten
+  ostatni przeliczany z mm na jednostkę 0.1 mm odbiornika F9T). Monitor
+  survey-in zyskał równoległy parser `NAV-SVIN` (0x01 0x3B) i przechodzi na
+  niego, gdy `TIM-SVIN` nie odpowiada, bo generacja F9 raportuje survey-in
+  przez NAV-SVIN. ⚠️ Napisane na podstawie dokumentacji u-blox/ubxtool bez
+  modułu F9T pod ręką — identyfikatory kluczy, jednostka 0.1 mm i offsety
+  payloadu NAV-SVIN NIE są zweryfikowane na sprzęcie. Ramka legacy `CFG-NAV5`
+  (tryb stacjonarny) może zostać odrzucona (NAK) przez F9T (nieszkodliwe;
+  ścieżka survey-in jest niezależna). Dwa przetestowane odbiorniki bez zmian:
+  TIM-SVIN jest nadal próbowany jako pierwszy, więc zachowanie LEA-6T /
+  LEA-M8T / NEO-M8T pozostaje niezmienione. Udokumentowane jako eksperymentalne
+  w README i config.
+
+### Zmienione
+- **Podtytuł splashu LCD 20×4** zmieniony z `GPS-Disciplined Osc.` na
+  `GPS-Disciplined OCXO`, zgodnie ze splashem TFT (oba 20 znaków, pełna szerokość).
+
+### Uwagi
+- **NEO-M8T** potwierdzony (analizą datasheetu) jako w pełni zgodny z istniejącą
+  ścieżką LEA-M8T — ten sam układ M8 + FW3, te same CFG-TMODE2 / TIM-SVIN — bez
+  zmian w kodzie. Udokumentowane w sekcji odbiorników czasowych.
+
+---
+
 ## [v0.49-rtos]
 
 ### Naprawione

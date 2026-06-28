@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.49
+ * Part of GPSDO FreeRTOS v0.50
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.49-rtos"
+#define PROGRAM_VERSION  "v0.50-rtos"
 
 /* ---- Serial output macro ----
  * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
@@ -53,7 +53,7 @@ extern "C" {
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
 //#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
-#define GPSDO_TM1637               /* 4-digit TM1637: HH:MM                  */
+#define GPSDO_TM1637             /* 4-digit TM1637: HH:MM                  */
 
 /* ── HT16K33 clock display — 4-digit 7-seg with colon, I2C ────────────
  * Common AliExpress/Adafruit-style 0.56" clock modules (addr 0x70).
@@ -200,8 +200,18 @@ extern "C" {
  * high-precision firmware like NEO-M8P/ZED-F9P, not on these timing units;
  * verified in u-center against a LEA-M8T-0 / TIM 1.10.)
  *
+ * NEO-M8T is fully compatible with LEA-M8T here (same M8 + FW3, same
+ * CFG-TMODE2/TIM-SVIN) — no code change needed beyond this switch.
+ *
+ * ZED-F9T (Gen9) is supported EXPERIMENTALLY: ubx_start_survey_in() also
+ * tries a CFG-VALSET (CFG-TMODE-* keys) variant, and the monitor falls back
+ * to NAV-SVIN (0x01 0x3B) when TIM-SVIN does not answer. This path is
+ * UNTESTED (no F9T on hand) — key IDs/units are from u-blox docs, not
+ * verified on hardware. The legacy CFG-NAV5 sent for stationary mode may NAK
+ * on an F9T; that is tolerated (the survey-in path is independent).
+ *
  * Survey-in ends when EITHER limit is met (whichever comes first):       */
-#define GPSDO_GPS_TIMING       /* u-blox LEA-6T / LEA-M8T timing receiver */
+#define GPSDO_GPS_TIMING              /* u-blox timing rx: LEA-6T / LEA/NEO-M8T (tested), ZED-F9T (experimental) */
 #define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]   */
 #define GPSDO_SVIN_ACC_LIMIT  5000u   /* position accuracy limit [mm] (5 m) */
 

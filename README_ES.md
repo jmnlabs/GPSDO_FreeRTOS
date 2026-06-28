@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.48
+# GPSDO FreeRTOS v0.49
 
 [English](README.md) | [Polski](README_PL.md) | **Español**
 
@@ -261,7 +261,7 @@ pantallas I2C — OLED, LCD y TFT pueden funcionar a la vez.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.48-rtos        LMT 14:32:45 Thu   │ ← barra de cabecera (azul marino)
+│ GPSDO v0.49-rtos        LMT 14:32:45 Thu   │ ← barra de cabecera (azul marino)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frecuencia (grande, por color)

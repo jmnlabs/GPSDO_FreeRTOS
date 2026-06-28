@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.48
+ * Part of GPSDO FreeRTOS v0.49
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -733,7 +733,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
       s_tft.drawString("GPS-Disciplined OCXO", TFT_W/2, TFT_SY(80), TFT_F(4));
       s_tft.setTextColor(0x8410, TFT_COL_BG);
-      s_tft.drawString("jmnlabs + with Claude (Anthropic)", TFT_W/2, TFT_SY(214), TFT_F(1));
+      s_tft.drawString("jmnlabs with Claude (Anthropic)", TFT_W/2, TFT_SY(214), TFT_F(1));
 
       /* --- two phase-shifted waves converging to synchronism ---
        * Animation requires redrawing each frame, so each wave is erased
@@ -1091,7 +1091,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
  * "T6963C_SPI_bridge" over SPI1 with high-level drawing commands
  * (T6963C_Bridge.h). Layout is a condensed version of the TFT screen:
  *
- *   y  0..17   header  : "GPSDO v0.48"            "14:32:45"   (NCEN10)
+ *   y  0..17   header  : "GPSDO v0.49"            "14:32:45"   (NCEN10)
  *   y 18..54   freq    : "10000000.000 Hz"                     (LOGISOSO28)
  *   y 59..80   status  : [LOCK]  A7 hit   12 sat              (8x13B/6x13)
  *   y 82..117  values  : PWM/Vctl, INA, sensors               (6x13)
@@ -1400,7 +1400,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   static const uint8_t ht_digit[10] = {
       0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
   };
-  #define HT_SEG_o   0x5C            /* lowercase o = c+d+e+g */
+  #define HT_SEG_o    0x5C            /* lowercase o = c+d+e+g */
+  #define HT_SEG_dash 0x40            /* dash = segment g (middle bar) */
   static bool s_ht_ok = false;
 
   static bool ht_cmd(uint8_t cmd)
@@ -1431,7 +1432,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       if (!ht_cmd(0x21)) return false;             /* oscillator on      */
       ht_cmd(0x81);                                 /* display on, no blink */
       ht_cmd(0xE0 | (HT16K33_BRIGHTNESS & 0x0F));   /* brightness         */
-      ht_write(HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);
+      /* Show "----" at startup, matching the TM1637 (mid_dashes) — both LED
+       * clocks now signal "alive, waiting for GPS" the same way. (The
+       * no-fix-during-operation indicator stays "oooo", set elsewhere.) */
+      ht_write(HT_SEG_dash, HT_SEG_dash, HT_SEG_dash, HT_SEG_dash, false);
       return true;
   }
 #endif /* GPSDO_HT16K33 */

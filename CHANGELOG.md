@@ -12,6 +12,33 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.49-rtos]
+
+### Fixed
+- **Config macro ordering: `OUT_SERIAL` now respects `GPSDO_BLUETOOTH`.** The
+  `OUT_SERIAL` routing macro was evaluated near the top of `gpsdo_config.h`,
+  *before* `GPSDO_BLUETOOTH` (and several other feature switches) were defined
+  further down. As a result `OUT_SERIAL` always resolved to USB `Serial` even
+  when Bluetooth was enabled, and a build with `GPSDO_BLUETOOTH` commented out
+  could fail to compile depending on what referenced it. All feature switches
+  are now grouped together near the top of the file, and macros derived from
+  them (`OUT_SERIAL`) are evaluated afterwards in a dedicated "Derived macros"
+  section. No functional change to any enabled feature beyond Bluetooth output
+  now actually going to Serial2. A scan of the other source files found no
+  further define-after-use ordering issues.
+
+### Changed
+- **HT16K33 startup pattern unified with the TM1637.** At power-up the
+  HT16K33 now shows `----` (segment-G dashes) instead of `oooo`, matching the
+  TM1637's startup pattern — both LED clocks signal "alive, waiting for GPS"
+  the same way. The `oooo` indicator is retained for the no-fix-during-
+  operation case (where the TM1637 also shows `oooo`), so the two displays now
+  behave identically in every state.
+- **TFT splash credit line** changed from `jmnlabs + with Claude (Anthropic)`
+  to `jmnlabs with Claude (Anthropic)` (dropped the `+`).
+
+---
+
 ## [v0.48-rtos]
 
 ### Added

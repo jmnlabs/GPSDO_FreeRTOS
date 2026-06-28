@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.48
+ * Part of GPSDO FreeRTOS v0.49
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,17 +31,14 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.48-rtos"
+#define PROGRAM_VERSION  "v0.49-rtos"
 
 /* ---- Serial output macro ----
- * When GPSDO_BLUETOOTH is defined, all user-facing output goes to Serial2.
- * USB Serial is still available for low-level boot diagnostics.
- * CLI_SERIAL and REPORT_SERIAL are defined locally in their .cpp files. */
-#ifdef GPSDO_BLUETOOTH
-  #define OUT_SERIAL Serial2
-#else
-  #define OUT_SERIAL Serial
-#endif
+ * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
+ * (USB). It depends on GPSDO_BLUETOOTH, so it is defined LATER in this file,
+ * AFTER all feature switches — otherwise GPSDO_BLUETOOTH would not yet be
+ * visible here and OUT_SERIAL would always resolve to USB. See the
+ * "Derived macros" section below. */
 #define AUTHOR_NAME      "André Balsa"
 
 /* ── Feature switches ────────────────────────────────────────────────── */
@@ -64,7 +61,7 @@ extern "C" {
  * shares the bus with OLED/LCD/sensors, no extra pins, no conflicts.   */
 #define GPSDO_HT16K33            /* 4-digit HT16K33: HH:MM                 */
 #define HT16K33_I2C_ADDR  0x70   /* default; A0/A1/A2 jumpers raise it     */
-#define HT16K33_BRIGHTNESS  6    /* 0 (dim) .. 15 (max)                    */
+#define HT16K33_BRIGHTNESS  8    /* 0 (dim) .. 15 (max)                    */
 
 /* ── TFT SPI display — select exactly one, or comment all out ─────────
  *
@@ -177,6 +174,44 @@ extern "C" {
 /* ── LCD line-2 rotation: seconds per view ──────────────────────────── */
 #define LCD_LINE2_SWITCH_SECS   10u   /* rotate line 2 content every N seconds     */
 
+/* ── Remaining feature switches (sensors, comms, GPS timing, etc.) ───── */
+#define GPSDO_PWM_DAC
+#define GPSDO_AHT10
+#define GPSDO_BMP280_I2C
+#define GPSDO_INA219
+#define GPSDO_BLUETOOTH
+#define GPSDO_VCC
+#define GPSDO_VDD
+#define GPSDO_UBX_CONFIG
+
+/* ── GPS timing module (LEA-6T / LEA-M8T) ─────────────────────────────
+ *
+ * Uncomment to enable Time Mode (survey-in → time-only fix) on a u-blox
+ * timing receiver. Survey-in runs at every power-up; it averages the
+ * antenna position, then switches to a fixed-position time solution with
+ * a much cleaner 1PPS (single-satellite timing, no navigation jitter).
+ *
+ * Position is still reported in NMEA after survey-in (the frozen, averaged
+ * fix), so location display and auto-timezone (TO A) keep working.
+ *
+ * Protocol: both LEA-6T and LEA-M8T (TIM 1.10, PROTVER 22) use the SAME
+ * messages — CFG-TMODE2 (0x06 0x3D) to start survey-in and TIM-SVIN
+ * (0x0D 0x04) to read progress. (CFG-TMODE3/NAV-SVIN is only on newer
+ * high-precision firmware like NEO-M8P/ZED-F9P, not on these timing units;
+ * verified in u-center against a LEA-M8T-0 / TIM 1.10.)
+ *
+ * Survey-in ends when EITHER limit is met (whichever comes first):       */
+#define GPSDO_GPS_TIMING       /* u-blox LEA-6T / LEA-M8T timing receiver */
+#define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]   */
+#define GPSDO_SVIN_ACC_LIMIT  5000u   /* position accuracy limit [mm] (5 m) */
+
+
+#define GPSDO_PICDIV
+/* #define GPSDO_LTIC */          /* Lars' TIC: read Vphase on PA1, discharge 1nF capacitor */
+#define GPSDO_EEPROM
+#define GPSDO_GEN_2kHz_PB5
+
+
 /* ── Sanity checks ───────────────────────────────────────────────────── */
 #if defined(GPSDO_OLED_SH1106) && defined(GPSDO_OLED_SSD1306)
   #error "Select only one OLED type"
@@ -251,41 +286,17 @@ extern "C" {
   #define GPSDO_OLED
 #endif
 
-#define GPSDO_PWM_DAC
-#define GPSDO_AHT10
-#define GPSDO_BMP280_I2C
-#define GPSDO_INA219
-#define GPSDO_BLUETOOTH
-#define GPSDO_VCC
-#define GPSDO_VDD
-#define GPSDO_UBX_CONFIG
-
-/* ── GPS timing module (LEA-6T / LEA-M8T) ─────────────────────────────
- *
- * Uncomment to enable Time Mode (survey-in → time-only fix) on a u-blox
- * timing receiver. Survey-in runs at every power-up; it averages the
- * antenna position, then switches to a fixed-position time solution with
- * a much cleaner 1PPS (single-satellite timing, no navigation jitter).
- *
- * Position is still reported in NMEA after survey-in (the frozen, averaged
- * fix), so location display and auto-timezone (TO A) keep working.
- *
- * Protocol: both LEA-6T and LEA-M8T (TIM 1.10, PROTVER 22) use the SAME
- * messages — CFG-TMODE2 (0x06 0x3D) to start survey-in and TIM-SVIN
- * (0x0D 0x04) to read progress. (CFG-TMODE3/NAV-SVIN is only on newer
- * high-precision firmware like NEO-M8P/ZED-F9P, not on these timing units;
- * verified in u-center against a LEA-M8T-0 / TIM 1.10.)
- *
- * Survey-in ends when EITHER limit is met (whichever comes first):       */
-#define GPSDO_GPS_TIMING       /* u-blox LEA-6T / LEA-M8T timing receiver */
-#define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]   */
-#define GPSDO_SVIN_ACC_LIMIT  5000u   /* position accuracy limit [mm] (5 m) */
-
-
-#define GPSDO_PICDIV
-/* #define GPSDO_LTIC */          /* Lars' TIC: read Vphase on PA1, discharge 1nF capacitor */
-#define GPSDO_EEPROM
-#define GPSDO_GEN_2kHz_PB5
+/* ── Derived macros (must come AFTER all feature switches) ────────────────
+ * OUT_SERIAL depends on GPSDO_BLUETOOTH, so it has to be evaluated here —
+ * after the switch is defined above — not near the top of the file. When
+ * Bluetooth is enabled all user-facing output goes to Serial2; otherwise to
+ * USB Serial (still available for low-level boot diagnostics regardless).
+ * CLI_SERIAL and REPORT_SERIAL are defined locally in their .cpp files. */
+#ifdef GPSDO_BLUETOOTH
+  #define OUT_SERIAL Serial2
+#else
+  #define OUT_SERIAL Serial
+#endif
 
 /* ── Pin definitions ─────────────────────────────────────────────────── */
 #define PIN_BLUE_LED     PC13

@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.48
+ * Part of GPSDO FreeRTOS v0.49
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa

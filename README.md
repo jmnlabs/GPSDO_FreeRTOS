@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.48
+# GPSDO FreeRTOS v0.49
 
 **English** | [Polski](README_PL.md) | [Español](README_ES.md)
 
@@ -252,7 +252,7 @@ displays — OLED, LCD and TFT can all run simultaneously.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.48-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
+│ GPSDO v0.49-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frequency (large, colour-coded)

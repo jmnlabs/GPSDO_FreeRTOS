@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.48
+# GPSDO FreeRTOS v0.49
 
 [English](README.md) | **Polski** | [Español](README_ES.md)
 
@@ -253,7 +253,7 @@ I2C — OLED, LCD i TFT mogą działać jednocześnie.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.48-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
+│ GPSDO v0.49-rtos        LMT 14:32:45 Thu   │ ← pasek nagłówka (granatowy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← częstotliwość (duża, kolorowa)

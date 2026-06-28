@@ -12,6 +12,34 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
 
 ---
 
+## [v0.49-rtos]
+
+### Naprawione
+- **Kolejność makr w config: `OUT_SERIAL` respektuje teraz `GPSDO_BLUETOOTH`.**
+  Makro routingu `OUT_SERIAL` było ewaluowane blisko początku
+  `gpsdo_config.h`, *przed* zdefiniowaniem `GPSDO_BLUETOOTH` (i kilku innych
+  przełączników funkcji) niżej w pliku. W efekcie `OUT_SERIAL` zawsze
+  rozwijało się do USB `Serial`, nawet gdy Bluetooth był włączony, a build z
+  zakomentowanym `GPSDO_BLUETOOTH` mógł nie kompilować się zależnie od tego,
+  co go używało. Wszystkie przełączniki funkcji są teraz zgrupowane razem
+  blisko początku pliku, a makra od nich pochodne (`OUT_SERIAL`) ewaluowane
+  później, w dedykowanej sekcji „Derived macros". Brak zmian funkcjonalnych
+  poza tym, że wyjście Bluetooth faktycznie trafia teraz na Serial2. Skan
+  pozostałych plików źródłowych nie wykrył innych problemów z kolejnością
+  definicja-po-użyciu.
+
+### Zmienione
+- **Ujednolicono wzorzec startowy HT16K33 z TM1637.** Po starcie HT16K33
+  pokazuje teraz `----` (kreski na segmencie G) zamiast `oooo`, zgodnie ze
+  wzorcem startowym TM1637 — oba zegary LED sygnalizują „żywy, oczekiwanie na
+  GPS" tak samo. Wskaźnik `oooo` pozostaje dla przypadku braku fixa podczas
+  pracy (gdzie TM1637 też pokazuje `oooo`), więc oba wyświetlacze zachowują
+  się teraz identycznie w każdym stanie.
+- **Linia kredytów na splashu TFT** zmieniona z `jmnlabs + with Claude
+  (Anthropic)` na `jmnlabs with Claude (Anthropic)` (usunięto `+`).
+
+---
+
 ## [v0.48-rtos]
 
 ### Dodane

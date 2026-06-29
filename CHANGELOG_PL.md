@@ -12,6 +12,27 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
 
 ---
 
+## [v0.51-rtos]
+
+### Dodane
+- **Komendy CLI są teraz niewrażliwe na wielkość liter.** Dyspozytor komend
+  porównywał je przez `strcmp()`, więc `LA` działało, ale `la` już nie.
+  Dopasowanie komend używa teraz małej funkcji pomocniczej niewrażliwej na
+  wielkość liter (`cli_ieq`), więc akceptowana jest dowolna wielkość liter
+  (`LA` / `la` / `La` są równoważne), włącznie z komendami pisanymi małymi
+  literami (`up1`, `dp10`, …) oraz rodziną `KP`/`KI`/`KD`/`IL` (gdzie litera
+  parametru również jest dopasowywana niewrażliwie). Argumenty komend bez
+  zmian; `TO A` już wcześniej akceptowało obie wielkości.
+
+### Zmienione
+- **Obsługa ZED-F9T (Gen9) nie jest już eksperymentalna.** Ścieżka survey-in
+  CFG-VALSET oraz fallback monitora NAV-SVIN zostały przetestowane na realnym
+  sprzęcie przez użytkownika EEVblog danieljw, więc oznaczenia
+  „eksperymentalny / nietestowany" zostały usunięte z kodu, configu i plików
+  README. Bez zmian w samej ścieżce F9T — tylko jej status.
+
+---
+
 ## [v0.50-rtos]
 
 ### Dodane

@@ -12,6 +12,26 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.51-rtos]
+
+### Added
+- **CLI commands are now case-insensitive.** The command dispatcher compared
+  verbs with `strcmp()`, so `LA` worked but `la` did not. Command matching now
+  uses a small case-insensitive helper (`cli_ieq`), so any letter case is
+  accepted (`LA` / `la` / `La` are equivalent), including the lowercase verbs
+  (`up1`, `dp10`, …) and the `KP`/`KI`/`KD`/`IL` family (whose parameter
+  letter is also matched case-insensitively). Command arguments are unchanged;
+  `TO A` already accepted either case.
+
+### Changed
+- **ZED-F9T (Gen9) support is no longer experimental.** The CFG-VALSET
+  survey-in path and the NAV-SVIN monitor fallback were tested on real
+  hardware by EEVblog user danieljw, so the "experimental / untested" markings
+  have been removed from the code, config and READMEs. No code change to the
+  F9T path itself — only its status.
+
+---
+
 ## [v0.50-rtos]
 
 ### Added

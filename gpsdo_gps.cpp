@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.50
+ * Part of GPSDO FreeRTOS v0.51
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -204,16 +204,14 @@ static uint8_t ubx_reduce_nmea(void)
 #ifdef GPSDO_GPS_TIMING
 
 /* Start survey-in. The LEA-6T and LEA-M8T accept different Time Mode
- * commands, so try each (the first two verified in u-center) and stop at the
- * first ACK:
+ * commands, so try each and stop at the first ACK:
  *   1. CFG-TMODE2 (0x06 0x3D), 28-byte payload  — LEA-M8T
  *   2. CFG-TMODE  (0x06 0x1D), 28-byte payload  — LEA-6T (u-blox 6)
- *   3. CFG-VALSET (0x06 0x8A), CFG-TMODE-* keys  — ZED-F9T (Gen9) *EXPERIMENTAL*
- *      UNTESTED: no F9T on hand. Gen9 deprecates the legacy CFG-TMODE* frames
- *      (gone as of firmware TIM 2.24) in favour of the configuration-key
- *      interface, and reports survey-in via NAV-SVIN (not TIM-SVIN). The key
- *      IDs and the 0.1 mm accuracy unit below are from u-blox docs/ubxtool,
- *      not verified on real hardware — treat as a starting point.
+ *   3. CFG-VALSET (0x06 0x8A), CFG-TMODE-* keys  — ZED-F9T (Gen9)
+ *      Gen9 deprecates the legacy CFG-TMODE* frames (gone as of firmware
+ *      TIM 2.24) in favour of the configuration-key interface, and reports
+ *      survey-in via NAV-SVIN (not TIM-SVIN). Tested on real hardware by
+ *      EEVblog user danieljw. The accuracy key is in 0.1 mm units (×10).
  * Returns true on the first ACK. Caller logs which (if any) succeeded. */
 static bool ubx_start_survey_in(void)
 {
@@ -260,8 +258,8 @@ static bool ubx_start_survey_in(void)
     flush_rx(150);
 
     /* ---- Variant 3: CFG-VALSET (0x8A) with CFG-TMODE-* keys (ZED-F9T) ----
-     * *** EXPERIMENTAL / UNTESTED — no F9T on hand ***
-     * Gen9 configuration-key interface. One VALSET frame sets three keys:
+     * Gen9 configuration-key interface. Tested on real hardware by EEVblog
+     * user danieljw. One VALSET frame sets three keys:
      *   CFG-TMODE-MODE         0x20030001  U1  = 1 (survey-in)
      *   CFG-TMODE-SVIN_MIN_DUR 0x40030010  U4  = dur [s]
      *   CFG-TMODE-SVIN_ACC_LIMIT 0x40030011 U4 = acc [0.1 mm]  (NOTE the unit!)
@@ -289,7 +287,7 @@ static bool ubx_start_survey_in(void)
         ubx_cksum(m, sizeof(m));
         send_ubx(m, sizeof(m));
         if (get_ubx_ack(m, 1500) == +1) {
-            OUT_SERIAL.println("LEA-T: accepted CFG-VALSET (F9T/Gen9, experimental)");
+            OUT_SERIAL.println("LEA-T: accepted CFG-VALSET (F9T/Gen9)");
             return true;
         }
     }
@@ -358,14 +356,14 @@ done:
 
 
 /* Poll NAV-SVIN (0x01 0x3B) and parse the survey-in status — the Gen9/F9T
- * channel (TIM-SVIN may not answer on an F9T). *** EXPERIMENTAL / UNTESTED ***
+ * channel (TIM-SVIN may not answer on an F9T). Tested on real hardware by
+ * EEVblog user danieljw.
  * Same out-params as ubx_poll_svin(). 40-byte payload, from u-blox docs:
  *   iTOW(u4)@0, dur(u4)@4 [s], meanX/Y/Z(i4)@8..19, meanXHP/YHP/ZHP@20..22,
  *   reserved@23, meanAcc(u4)@24 [0.1 mm], obs(u4)@28, valid(u1)@32,
  *   active(u1)@33.
  * NOTE meanAcc is a DIRECT accuracy in 0.1 mm units (no sqrt, unlike the
- * TIM-SVIN variance) — convert to mm by /10. Offsets/units are from the
- * interface description, not verified on hardware. */
+ * TIM-SVIN variance) — convert to mm by /10. */
 static bool ubx_poll_svin_nav(uint32_t *dur, uint32_t *acc_mm,
                               bool *valid, bool *active)
 {
@@ -427,7 +425,7 @@ static void ubx_poll_svin_step(void)
     uint32_t dur=0, acc=0; bool valid=false, active=false;
     static bool ever_replied = false;
     /* TIM-SVIN first (LEA-6T/M8T). If it does not answer, fall back to
-     * NAV-SVIN (ZED-F9T/Gen9, experimental). Whichever replies drives the
+     * NAV-SVIN (ZED-F9T/Gen9). Whichever replies drives the
      * same completion logic below. */
     bool got = ubx_poll_svin(&dur, &acc, &valid, &active);
     if (!got) got = ubx_poll_svin_nav(&dur, &acc, &valid, &active);

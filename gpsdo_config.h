@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.50
+ * Part of GPSDO FreeRTOS v0.51
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.50-rtos"
+#define PROGRAM_VERSION  "v0.51-rtos"
 
 /* ---- Serial output macro ----
  * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
@@ -203,15 +203,14 @@ extern "C" {
  * NEO-M8T is fully compatible with LEA-M8T here (same M8 + FW3, same
  * CFG-TMODE2/TIM-SVIN) — no code change needed beyond this switch.
  *
- * ZED-F9T (Gen9) is supported EXPERIMENTALLY: ubx_start_survey_in() also
- * tries a CFG-VALSET (CFG-TMODE-* keys) variant, and the monitor falls back
- * to NAV-SVIN (0x01 0x3B) when TIM-SVIN does not answer. This path is
- * UNTESTED (no F9T on hand) — key IDs/units are from u-blox docs, not
- * verified on hardware. The legacy CFG-NAV5 sent for stationary mode may NAK
- * on an F9T; that is tolerated (the survey-in path is independent).
+ * ZED-F9T (Gen9) is also supported: ubx_start_survey_in() additionally tries
+ * a CFG-VALSET (CFG-TMODE-* keys) variant, and the monitor falls back to
+ * NAV-SVIN (0x01 0x3B) when TIM-SVIN does not answer. Tested on real hardware
+ * by EEVblog user danieljw. The legacy CFG-NAV5 sent for stationary mode may
+ * NAK on an F9T; that is tolerated (the survey-in path is independent).
  *
  * Survey-in ends when EITHER limit is met (whichever comes first):       */
-#define GPSDO_GPS_TIMING              /* u-blox timing rx: LEA-6T / LEA/NEO-M8T (tested), ZED-F9T (experimental) */
+#define GPSDO_GPS_TIMING              /* u-blox timing rx: LEA-6T / LEA/NEO-M8T / ZED-F9T */
 #define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]   */
 #define GPSDO_SVIN_ACC_LIMIT  5000u   /* position accuracy limit [mm] (5 m) */
 

@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.50
+# GPSDO FreeRTOS v0.51
 
 **English** | [Polski](README_PL.md) | [Español](README_ES.md)
 
@@ -252,7 +252,7 @@ displays — OLED, LCD and TFT can all run simultaneously.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.50-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
+│ GPSDO v0.51-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frequency (large, colour-coded)
@@ -410,7 +410,8 @@ Manual command `MH` sets holdover independently (indicated as `H`).
 ## CLI commands (Serial / Bluetooth)
 
 Connection: 115200 Bd (USB) or 57600 Bd (Bluetooth HC-06, `GPSDO_BLUETOOTH`).
-Commands terminated by `\r\n` or `\n`.
+Commands terminated by `\r\n` or `\n`. Command names are **case-insensitive**
+(`LA`, `la` and `La` are equivalent), so any letter case works.
 
 ### General
 
@@ -492,7 +493,7 @@ EEPROM (emulated in STM32 Flash) stores 144 bytes:
 
 ---
 
-## GPS timing receivers (LEA-6T / LEA-M8T / NEO-M8T, ZED-F9T experimental)
+## GPS timing receivers (LEA-6T / LEA-M8T / NEO-M8T / ZED-F9T)
 
 NEO-6M / NEO-8M modules work out of the box (default). For a u-blox timing
 receiver, enable the option in `gpsdo_config.h`:
@@ -517,18 +518,18 @@ no code change beyond enabling the switch. (Note both M8T variants default to
 GPS + GLONASS + QZSS; reconfigure to GPS + QZSS via `CFG-GNSS` in u-center and
 save to flash if you want a single-constellation timing solution.)
 
-> **ZED-F9T (Gen9) — experimental, untested.** The F9 generation replaced the
-> legacy configuration messages (deprecated as of firmware TIM 2.24) with a
-> configuration-key interface, and reports survey-in via `NAV-SVIN` (0x01
-> 0x3B) rather than `TIM-SVIN`. Support is wired in as a third path:
-> `ubx_start_survey_in()` also sends a `CFG-VALSET` (0x06 0x8A) frame setting
-> `CFG-TMODE-MODE` / `CFG-TMODE-SVIN_MIN_DUR` / `CFG-TMODE-SVIN_ACC_LIMIT`,
-> and the survey-in monitor falls back to `NAV-SVIN` when `TIM-SVIN` does not
-> answer. **This was written from u-blox documentation with no F9T on hand** —
-> the key IDs, the 0.1 mm accuracy unit, and the NAV-SVIN payload offsets are
-> not verified on hardware. The legacy `CFG-NAV5` stationary-mode frame may be
-> NAKed by an F9T; that is harmless (the survey-in path is independent). Treat
-> as a starting point to validate in u-center, not a finished feature.
+**ZED-F9T (Gen9)** is supported as well. The F9 generation replaced the legacy
+configuration messages (deprecated as of firmware TIM 2.24) with a
+configuration-key interface, and reports survey-in via `NAV-SVIN` (0x01 0x3B)
+rather than `TIM-SVIN`. Support is wired in as a third path:
+`ubx_start_survey_in()` also sends a `CFG-VALSET` (0x06 0x8A) frame setting
+`CFG-TMODE-MODE` / `CFG-TMODE-SVIN_MIN_DUR` / `CFG-TMODE-SVIN_ACC_LIMIT` (the
+last converted from mm to the F9T's 0.1 mm unit), and the survey-in monitor
+falls back to `NAV-SVIN` when `TIM-SVIN` does not answer. This path was tested
+on real hardware by EEVblog user **danieljw**. The legacy `CFG-NAV5`
+stationary-mode frame may be NAKed by an F9T; that is harmless (the survey-in
+path is independent).
+
 
 At every power-up the receiver runs a **survey-in**: it averages the
 antenna position, then switches to a fixed-position **time-only** solution.

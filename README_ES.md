@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.50
+# GPSDO FreeRTOS v0.51
 
 [English](README.md) | [Polski](README_PL.md) | **Español**
 
@@ -261,7 +261,7 @@ pantallas I2C — OLED, LCD y TFT pueden funcionar a la vez.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.50-rtos        LMT 14:32:45 Thu   │ ← barra de cabecera (azul marino)
+│ GPSDO v0.51-rtos        LMT 14:32:45 Thu   │ ← barra de cabecera (azul marino)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frecuencia (grande, por color)
@@ -415,7 +415,9 @@ como `H`). `MD` desactiva el holdover (tanto manual como automático).
 ## Comandos CLI (Serial / Bluetooth)
 
 Conexión: 115200 Bd (USB) o 57600 Bd (Bluetooth HC-06, `GPSDO_BLUETOOTH`).
-Comandos terminados con `\r\n` o `\n`.
+Comandos terminados con `\r\n` o `\n`. Los nombres de comando **no distinguen
+mayúsculas de minúsculas** (`LA`, `la` y `La` son equivalentes), así que
+funciona cualquier combinación de mayúsculas/minúsculas.
 
 ### Generales
 
@@ -495,7 +497,7 @@ La EEPROM (emulada en la Flash del STM32) almacena 144 bytes:
 
 ---
 
-## Receptores de temporización GPS (LEA-6T / LEA-M8T / NEO-M8T, ZED-F9T experimental)
+## Receptores de temporización GPS (LEA-6T / LEA-M8T / NEO-M8T / ZED-F9T)
 
 Los módulos NEO-6M / NEO-8M funcionan sin configuración (por defecto). Para un
 receptor de temporización u-blox, active la opción en `gpsdo_config.h`:
@@ -521,20 +523,18 @@ sin cambios de código más allá de activar la opción. (Ambas variantes M8T us
 por defecto GPS + GLONASS + QZSS; reconfigure a GPS + QZSS mediante `CFG-GNSS`
 en u-center y guarde en flash si desea una solución de una sola constelación.)
 
-> **ZED-F9T (Gen9) — experimental, sin probar.** La generación F9 reemplazó
-> los mensajes de configuración heredados (obsoletos desde el firmware
-> TIM 2.24) por la interfaz de claves de configuración, e informa el survey-in
-> mediante `NAV-SVIN` (0x01 0x3B) en lugar de `TIM-SVIN`. El soporte se añade
-> como una tercera vía: `ubx_start_survey_in()` también envía una trama
-> `CFG-VALSET` (0x06 0x8A) que fija `CFG-TMODE-MODE` / `CFG-TMODE-SVIN_MIN_DUR`
-> / `CFG-TMODE-SVIN_ACC_LIMIT`, y el monitor de survey-in recurre a `NAV-SVIN`
-> cuando `TIM-SVIN` no responde. **Esto se escribió a partir de la
-> documentación de u-blox sin un F9T disponible** — los identificadores de
-> clave, la unidad de exactitud de 0,1 mm y los desplazamientos del payload de
-> NAV-SVIN no están verificados en hardware. La trama heredada `CFG-NAV5` (modo
-> estacionario) puede ser rechazada (NAK) por un F9T; eso es inofensivo (la vía
-> de survey-in es independiente). Trátelo como un punto de partida para validar
-> en u-center, no como una función terminada.
+**ZED-F9T (Gen9)** también es compatible. La generación F9 reemplazó los
+mensajes de configuración heredados (obsoletos desde el firmware TIM 2.24) por
+la interfaz de claves de configuración, e informa el survey-in mediante
+`NAV-SVIN` (0x01 0x3B) en lugar de `TIM-SVIN`. El soporte se añade como una
+tercera vía: `ubx_start_survey_in()` también envía una trama `CFG-VALSET`
+(0x06 0x8A) que fija `CFG-TMODE-MODE` / `CFG-TMODE-SVIN_MIN_DUR` /
+`CFG-TMODE-SVIN_ACC_LIMIT` (este último convertido de mm a la unidad de
+0,1 mm del F9T), y el monitor de survey-in recurre a `NAV-SVIN` cuando
+`TIM-SVIN` no responde. Esta vía fue probada en hardware real por el usuario de
+EEVblog **danieljw**. La trama heredada `CFG-NAV5` (modo estacionario) puede
+ser rechazada (NAK) por un F9T; eso es inofensivo (la vía de survey-in es
+independiente).
 
 En cada encendido el receptor ejecuta un **survey-in**: promedia la posición
 de la antena y luego cambia a una solución de **solo tiempo** con posición

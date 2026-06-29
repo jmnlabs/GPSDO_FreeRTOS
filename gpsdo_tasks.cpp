@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.50
+ * Part of GPSDO FreeRTOS v0.51
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -1091,7 +1091,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
  * "T6963C_SPI_bridge" over SPI1 with high-level drawing commands
  * (T6963C_Bridge.h). Layout is a condensed version of the TFT screen:
  *
- *   y  0..17   header  : "GPSDO v0.50"            "14:32:45"   (NCEN10)
+ *   y  0..17   header  : "GPSDO v0.51"            "14:32:45"   (NCEN10)
  *   y 18..54   freq    : "10000000.000 Hz"                     (LOGISOSO28)
  *   y 59..80   status  : [LOCK]  A7 hit   12 sat              (8x13B/6x13)
  *   y 82..117  values  : PWM/Vctl, INA, sensors               (6x13)

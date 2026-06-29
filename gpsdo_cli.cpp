@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.50
+ * Part of GPSDO FreeRTOS v0.51
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -28,6 +28,22 @@
 #else
   #define CLI_SERIAL Serial
 #endif
+
+/* Case-insensitive string compare for command verbs, so the CLI accepts any
+ * letter case ("LA", "la", "La" all match, likewise "up1"/"UP1"). Used in
+ * place of strcmp() for the command keywords; returns true when equal. Kept
+ * local (not strcasecmp) for toolchain portability under STM32duino. */
+static bool cli_ieq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;   /* to lower */
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return false;
+        a++; b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
 
 /* -----------------------------------------------------------------------
  * Output helpers - all protected by xSerialMutex
@@ -148,7 +164,7 @@ static void dispatch(char *line)
     }
 
     /* ---- version ---- */
-    if (strcmp(verb, "V") == 0) {
+    if (cli_ieq(verb, "V")) {
         cli_putln(PROGRAM_NAME " " PROGRAM_VERSION);
         cli_putln("FreeRTOS port by J. M. Niewinski");
         cli_putln("https://github.com/jmnlabs/GPSDO_FreeRTOS");
@@ -160,13 +176,13 @@ static void dispatch(char *line)
     }
 
     /* ---- help ---- */
-    if (strcmp(verb, "H") == 0 || strcmp(verb, "?") == 0) {
+    if (cli_ieq(verb, "H") || cli_ieq(verb, "?")) {
         print_help();
         return;
     }
 
     /* ---- flush ---- */
-    if (strcmp(verb, "F") == 0) {
+    if (cli_ieq(verb, "F")) {
         if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             gFreq.flush_requested = true;
             xSemaphoreGive(xFreqMutex);
@@ -176,14 +192,14 @@ static void dispatch(char *line)
     }
 
     /* ---- calibration ---- */
-    if (strcmp(verb, "C") == 0) {
+    if (cli_ieq(verb, "C")) {
         xEventGroupSetBits(xSysEvents, EVT_NEED_CALIBRATION);
         cli_putln("Auto-calibration sequence started");
         return;
     }
 
     /* ---- CT: calibrate K + auto-tune all PID from measured gain ---- */
-    if (strcmp(verb, "CT") == 0) {
+    if (cli_ieq(verb, "CT")) {
         xEventGroupSetBits(xSysEvents, EVT_NEED_TUNE);
         cli_putln("CT: calibrate + auto-tune started (~3 min, 3 PWM points)");
         cli_putln("Derives K then computes PID for algos 3-9. 'ES' saves.");
@@ -191,36 +207,36 @@ static void dispatch(char *line)
     }
 
     /* ---- tunnel mode ---- */
-    if (strcmp(verb, "T") == 0) {
+    if (cli_ieq(verb, "T")) {
         xEventGroupSetBits(xSysEvents, EVT_TUNNEL_MODE);
         cli_putln("Switching to GPS tunnel mode");
         return;
     }
 
     /* ---- reporting format ---- */
-    if (strcmp(verb, "RH") == 0) {
+    if (cli_ieq(verb, "RH")) {
         xEventGroupClearBits(xSysEvents, EVT_REPORT_TAB);
         cli_putln("Switching to Human Readable reporting");
         return;
     }
-    if (strcmp(verb, "RD") == 0) {
+    if (cli_ieq(verb, "RD")) {
         xEventGroupSetBits(xSysEvents, EVT_REPORT_TAB);
         cli_putln("Switching to Tab Delimited reporting");
         return;
     }
-    if (strcmp(verb, "RP") == 0) {
+    if (cli_ieq(verb, "RP")) {
         g_report_paused = true;
         cli_putln("Reports paused (type RR to resume)");
         return;
     }
-    if (strcmp(verb, "RR") == 0) {
+    if (cli_ieq(verb, "RR")) {
         g_report_paused = false;
         cli_putln("Reports resumed");
         return;
     }
 
     /* ---- holdover / disciplined ---- */
-    if (strcmp(verb, "MH") == 0) {
+    if (cli_ieq(verb, "MH")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             gCtrl.holdover_mode = true;
             gCtrl.holdover_auto = false;   /* manual override — clear auto flag */
@@ -229,7 +245,7 @@ static void dispatch(char *line)
         cli_putln("Switching to Holdover Mode (manual)");
         return;
     }
-    if (strcmp(verb, "MD") == 0) {
+    if (cli_ieq(verb, "MD")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             gCtrl.holdover_mode = false;
             gCtrl.holdover_auto = false;   /* clear auto flag too */
@@ -240,7 +256,7 @@ static void dispatch(char *line)
     }
 
     /* ---- arm picDIV ---- */
-    if (strcmp(verb, "AP") == 0) {
+    if (cli_ieq(verb, "AP")) {
 #ifdef GPSDO_PICDIV
         xEventGroupSetBits(xSysEvents, EVT_ARM_PICDIV);
         cli_putln("picDIV arm requested (1.0-1.2s output gap, then syncs to 1PPS)");
@@ -252,7 +268,7 @@ static void dispatch(char *line)
     }
 
     /* ---- PWM adjustments ---- */
-    if (strcmp(verb, "up1") == 0) {
+    if (cli_ieq(verb, "up1")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (gCtrl.pwm_output < 65535) gCtrl.pwm_output++;
             analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
@@ -261,7 +277,7 @@ static void dispatch(char *line)
         cli_puts("PWM+1: "); cli_putint(gCtrl.pwm_output);
         return;
     }
-    if (strcmp(verb, "up10") == 0) {
+    if (cli_ieq(verb, "up10")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (gCtrl.pwm_output <= 65525) gCtrl.pwm_output += 10;
             analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
@@ -270,7 +286,7 @@ static void dispatch(char *line)
         cli_puts("PWM+10: "); cli_putint(gCtrl.pwm_output);
         return;
     }
-    if (strcmp(verb, "dp1") == 0) {
+    if (cli_ieq(verb, "dp1")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (gCtrl.pwm_output > 1) gCtrl.pwm_output--;
             analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
@@ -279,7 +295,7 @@ static void dispatch(char *line)
         cli_puts("PWM-1: "); cli_putint(gCtrl.pwm_output);
         return;
     }
-    if (strcmp(verb, "dp10") == 0) {
+    if (cli_ieq(verb, "dp10")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (gCtrl.pwm_output >= 11) gCtrl.pwm_output -= 10;
             analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
@@ -290,7 +306,7 @@ static void dispatch(char *line)
     }
 
     /* ---- SP <n> ---- */
-    if (strcmp(verb, "SP") == 0) {
+    if (cli_ieq(verb, "SP")) {
         if (arg == NULL) {
             cli_puts("No value. Default PWM: ");
             cli_putint(DEFAULT_PWM_OUTPUT);
@@ -316,7 +332,7 @@ static void dispatch(char *line)
     }
 
     /* ---- LA <0-9> ---- */
-    if (strcmp(verb, "LA") == 0) {
+    if (cli_ieq(verb, "LA")) {
         if (arg == NULL) {
             cli_puts("Algorithm: "); cli_putint(gCtrl.active_algo);
         } else {
@@ -335,7 +351,7 @@ static void dispatch(char *line)
     }
 
     /* ---- LP [n] — List PID Parameters ---- */
-    if (strcmp(verb, "LP") == 0) {
+    if (cli_ieq(verb, "LP")) {
         int n = (arg != NULL) ? atoi(arg) : (int)gCtrl.active_algo;
         if (n < 0 || n > 9) { cli_putln("LP: algo 0..9"); return; }
 
@@ -377,8 +393,8 @@ static void dispatch(char *line)
     /* ---- KP/KI/KD/IL n val — set PID param for algo n ----
      * arg format: "n val" (e.g. "3 100.5")
      * Split arg into algo number and float value. */
-    if (strcmp(verb, "KP") == 0 || strcmp(verb, "KI") == 0 ||
-        strcmp(verb, "KD") == 0 || strcmp(verb, "IL") == 0)
+    if (cli_ieq(verb, "KP") || cli_ieq(verb, "KI") ||
+        cli_ieq(verb, "KD") || cli_ieq(verb, "IL"))
     {
         if (arg == NULL) {
             cli_puts(verb); cli_putln(": need <algo> <value>");
@@ -393,10 +409,12 @@ static void dispatch(char *line)
             /* No value given — show current */
             if (n < 0 || n > 9) { cli_puts(verb); cli_putln(": algo 0..9"); return; }
             double cur = 0.0;
-            if      (verb[1] == 'P') cur = g_pid[n].Kp;
-            else if (verb[1] == 'I') cur = g_pid[n].Ki;
-            else if (verb[1] == 'D') cur = g_pid[n].Kd;
-            else                     cur = g_pid[n].I_LIMIT;
+            char vk = verb[1];
+            if (vk >= 'a' && vk <= 'z') vk -= 32;   /* to upper for the test */
+            if      (vk == 'P') cur = g_pid[n].Kp;
+            else if (vk == 'I') cur = g_pid[n].Ki;
+            else if (vk == 'D') cur = g_pid[n].Kd;
+            else                cur = g_pid[n].I_LIMIT;
             char tmp[48]; snprintf(tmp, sizeof(tmp), "Algo %d %s=", n, verb);
             cli_puts(tmp); cli_putfloat((float)cur, 6);
             return;
@@ -404,7 +422,7 @@ static void dispatch(char *line)
 
         double val = atof(val_str);
         bool ok_range = true;
-        if (strcmp(verb, "IL") == 0) {
+        if (cli_ieq(verb, "IL")) {
             /* I_LIMIT valid for algos 3-9, range 100..100000 */
             if (n < 3 || n > 9 || val < 100.0 || val > 100000.0) ok_range = false;
         } else {
@@ -413,15 +431,17 @@ static void dispatch(char *line)
         }
         if (!ok_range) {
             cli_puts(verb);
-            if (strcmp(verb, "IL") == 0) cli_putln(": algo 3-9, val 100..100000");
+            if (cli_ieq(verb, "IL")) cli_putln(": algo 3-9, val 100..100000");
             else                         cli_putln(": algo 3-7, val 0..100000");
             return;
         }
 
-        if      (verb[1] == 'P') g_pid[n].Kp      = val;
-        else if (verb[1] == 'I') g_pid[n].Ki      = val;
-        else if (verb[1] == 'D') g_pid[n].Kd      = val;
-        else                     g_pid[n].I_LIMIT  = val;
+        char vk2 = verb[1];
+        if (vk2 >= 'a' && vk2 <= 'z') vk2 -= 32;   /* to upper for the test */
+        if      (vk2 == 'P') g_pid[n].Kp      = val;
+        else if (vk2 == 'I') g_pid[n].Ki      = val;
+        else if (vk2 == 'D') g_pid[n].Kd      = val;
+        else                 g_pid[n].I_LIMIT  = val;
 
         char tmp[48]; snprintf(tmp, sizeof(tmp), "Algo %d %s=", n, verb);
         cli_puts(tmp); cli_putfloat((float)val, 6);
@@ -429,7 +449,7 @@ static void dispatch(char *line)
     }
 
     /* ---- BC [val] — algo 8 Blend Crossover ---- */
-    if (strcmp(verb, "BC") == 0) {
+    if (cli_ieq(verb, "BC")) {
         if (arg == NULL) {
             cli_puts("Blend crossover: "); cli_putfloat((float)g_blend_crossover, 4);
         } else {
@@ -445,7 +465,7 @@ static void dispatch(char *line)
     }
 
     /* ---- BS [val] — algo 8 Blend Scale ---- */
-    if (strcmp(verb, "BS") == 0) {
+    if (cli_ieq(verb, "BS")) {
         if (arg == NULL) {
             cli_puts("Blend scale: "); cli_putfloat((float)g_blend_scale, 4);
         } else {
@@ -461,7 +481,7 @@ static void dispatch(char *line)
     }
 
     /* ---- NS [val] — algo 9 NN max Step ---- */
-    if (strcmp(verb, "NS") == 0) {
+    if (cli_ieq(verb, "NS")) {
         if (arg == NULL) {
             cli_puts("NN max step: "); cli_putfloat((float)g_nn_max_step, 1);
         } else {
@@ -477,7 +497,7 @@ static void dispatch(char *line)
     }
 
     /* ---- TO [n | A] — time offset: manual hours or Auto from GPS ---- */
-    if (strcmp(verb, "TO") == 0) {
+    if (cli_ieq(verb, "TO")) {
         if (arg == NULL) {
             cli_puts("Time offset: "); cli_putint((int)g_time_offset);
             cli_puts(g_tz_auto ? "  (auto: GPS position + EU DST)"
@@ -501,7 +521,7 @@ static void dispatch(char *line)
     }
 
     /* ---- SV [0|1] — survey-in (Time Mode) enable, saved by ES ---- */
-    if (strcmp(verb, "SV") == 0) {
+    if (cli_ieq(verb, "SV")) {
 #ifdef GPSDO_GPS_TIMING
         if (arg == NULL) {
             cli_puts("Survey-in (Time Mode): ");
@@ -525,7 +545,7 @@ static void dispatch(char *line)
     }
 
     /* ---- PO <f> ---- */
-    if (strcmp(verb, "PO") == 0) {
+    if (cli_ieq(verb, "PO")) {
         if (arg == NULL) {
             cli_puts("Pressure offset: "); cli_putfloat(g_pressure_offset, 2);
         } else {
@@ -541,7 +561,7 @@ static void dispatch(char *line)
     }
 
     /* ---- AO <f> ---- */
-    if (strcmp(verb, "AO") == 0) {
+    if (cli_ieq(verb, "AO")) {
         if (arg == NULL) {
             cli_puts("Altitude offset: "); cli_putfloat(g_altitude_offset, 2);
         } else {
@@ -557,18 +577,18 @@ static void dispatch(char *line)
     }
 
     /* ---- EEPROM ---- */
-    if (strcmp(verb, "ES") == 0) {
+    if (cli_ieq(verb, "ES")) {
         cli_putln("Saving EEPROM...");
         eeprom_save();
         cli_putln("Done.");
         return;
     }
-    if (strcmp(verb, "ER") == 0) {
+    if (cli_ieq(verb, "ER")) {
         cli_putln("Recalling EEPROM...");
         eeprom_recall();
         return;
     }
-    if (strcmp(verb, "EE") == 0) {
+    if (cli_ieq(verb, "EE")) {
         cli_putln("Erasing EEPROM...");
         eeprom_erase();
         cli_putln("Done.");
@@ -576,7 +596,7 @@ static void dispatch(char *line)
     }
 
     /* ---- SW - stack watermarks ---- */
-    if (strcmp(verb, "SW") == 0) {
+    if (cli_ieq(verb, "SW")) {
         cli_putln("Stack high-water marks (min free words since start):");
         char tmp[56];
         #define SWPR(h, name) \

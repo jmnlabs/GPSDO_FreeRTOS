@@ -1,5 +1,9 @@
 # Changelog — GPSDO FreeRTOS
 
+**English** | [Polski](CHANGELOG_PL.md) | [Español](CHANGELOG_ES.md)
+
+📖 Back to [README](README.md)
+
 All notable changes to this project are documented here.
 
 Project by **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>

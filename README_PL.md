@@ -5,6 +5,8 @@
 Firmware czasu rzeczywistego (FreeRTOS) dla oscylatora sterowanego GPS (GPSDO)
 na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
 
+📋 Historia wersji: [Lista zmian](CHANGELOG_PL.md)
+
 ## Autorzy i podziękowania
 
 | Rola | Osoba / źródło |

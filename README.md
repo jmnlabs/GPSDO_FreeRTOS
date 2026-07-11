@@ -5,6 +5,8 @@
 Real-time (FreeRTOS) firmware for a GPS-Disciplined Oscillator (GPSDO)
 on the STM32 BlackPill platform (WeAct F411CE / F401CCU6).
 
+📋 Version history: [Changelog](CHANGELOG.md)
+
 ## Credits
 
 | Role | Person / source |

@@ -5,6 +5,8 @@
 Firmware en tiempo real (FreeRTOS) para un oscilador disciplinado por GPS
 (GPSDO) sobre la plataforma STM32 BlackPill (WeAct F411CE / F401CCU6).
 
+📋 Historial de versiones: [Registro de cambios](CHANGELOG_ES.md)
+
 ## Créditos
 
 | Rol | Persona / fuente |

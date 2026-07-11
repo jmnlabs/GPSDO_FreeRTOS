@@ -497,7 +497,7 @@ Los demás comandos de abajo fijan/muestran parámetros, que `ES` guarda.
 
 | Comando | Descripción |
 |---------|-------------|
-| `LC` | **Autocalibración** de ns/V, zero-offset y rango (auto, ~70 s) |
+| `LC` | **Autocalibración** de ns/V (pendiente local), zero-offset (anclado ~1,85 V) y rango (auto, ~7 min; imprime diagnóstico `t=/V=/n=` por segundo) |
 | `LL` | Lista todos los parámetros LTIC + estado actual |
 | `LNV [v]` | Calibración: ns por voltio (pendiente voltaje TIC→tiempo) |
 | `LZO [v]` | Calibración: voltios TIC en diferencia de fase cero |
@@ -531,120 +531,87 @@ del receptor), por lo que nunca se aplica un valor obsoleto.
 
 `SAW` sin argumento muestra el estado y el qErr en vivo; `SAW 1`/`SAW 0` lo
 conmuta (guardado con `ES`, desactivado por defecto). Cuando está activo, la
-línea de telemetría `Learn:` muestra `qErr=…ns` para el algoritmo 10. El filtro
-RC de la ruta TIC debe ser lo bastante lento como para asentarse entre pulsos
-de 1 Hz (p. ej. 51 kΩ/1 µF, τ≈51 ms) para que cada lectura de fase se empareje
-limpiamente con el qErr de su pulso.
+línea de telemetría `Learn:` muestra `qErr=…ns` para el algoritmo 10, y el
+valor se resta de cada lectura de fase del TIC. Como Vphase se muestrea en el
+pico de la rampa justo tras el flanco PPS (véanse las notas de hardware TIC más
+abajo), cada lectura de fase se empareja con el qErr reportado para el pulso de
+ese mismo segundo.
 
 ---
 
 ## Notas del hardware TIC — integrador de rampa con puerta (Kaashoek)
 
-> **Errata (v0.90, corrige la sección de abajo).** El análisis siguiente
-> describe el detector como un "detector de ciclo de trabajo" que necesita un
-> RC grande (51 kΩ/1 µF). Eso resultó **incorrecto**. Confirmado con el post de
-> André Balsa (EEVblog) y capturas de osciloscopio: es el **integrador de rampa
-> con puerta de Kaashoek** (esquema rev 0.4). Un par de flip-flops 74 convierte
-> la diferencia de fase entre dos señales 1PPS en un pulso — **la carga empieza
-> en el flanco de subida del 1PPS del GPS y termina en el del picDIV** — que a
-> través de un diodo Schottky carga C13; el ancho del pulso es la fase. Por eso
-> el RC correcto es el **pequeño** (1 kΩ/1 nF, τ ≈ 1 µs), igual que el original
-> de Lars, y **no** un filtro grande. La lectura del ADC debe caer en el pico de
-> la rampa (~50 µs tras el flanco PPS), no 2 s después. La calibración `LC`
-> ancla `zero_offset` en ~1,85 V (punto repetible del detector, lejos de las
-> zonas muertas medidas por Dan Wiering) y lee ns/V de la pendiente local. Para
-> la versión en inglés/polaco, consúltese la sección corregida equivalente. La
-> traducción completa de esta sección al español está pendiente.
-
-## Notas del hardware TIC — por qué el filtro RC *no* es el 1 nF de Lars
-
-> **Errata (hallazgos v0.90).** El análisis siguiente describía una
-> construcción en la que el segundo flip-flop NO estaba reloj­ado por 10 MHz
-> (ambos FF veían solo las dos señales 1PPS — tal como está dibujado en el
-> esquema base, cuyo bloque «Kaashoek 1 ns» parece carecer de la conexión de
-> 10 MHz al CLK de U3B). Tal detector es un comparador BINARIO promediado por
-> jitter (una sigmoide, sin diente de sierra), y solo entonces tiene sentido
-> un RC grande (51 kΩ/1 µF). Con el detector completado según el original de
-> Kaashoek — 10 MHz en el segundo FF, carga por diodo — la ventana es un
-> periodo de 10 MHz (100 ns) y el RC pequeño ORIGINAL (1 kΩ/1 nF, τ = 1 µs,
-> nota «R8×C13 = 1000 ns») es correcto, exactamente como en el integrador de
-> rampa de Lars descrito abajo.
-
-
-Este diseño desciende del Arduino GPSDO de Lars Walenius (vía la v0.06c de
-André Balsa), pero el **front-end del detector de fase es fundamentalmente
-distinto**, y esa diferencia costó tiempo real de banco — tres flip-flops (dos
-74HC74 a 5 V, finalmente un 74LVC74 a 3,3 V) y un largo desvío — antes de
-entenderla. Se documenta aquí para que la próxima persona que porte esto no lo
+El detector de fase es el **TIC de 1 ns de Erik Kaashoek** (como en el STM32
+GPSDO de André Balsa, esquema rev 0.4). Entender exactamente cómo funciona
+costó tiempo real de banco — tres flip-flops (dos 74HC74 a 5 V, finalmente un
+74LVC74 a 3,3 V), un valor de filtro equivocado y un largo desvío por dos
+modelos de detector incorrectos. Se documenta aquí para que el siguiente no lo
 repita.
 
-### El original de Lars: un integrador de rampa (el RC pequeño es esencial)
+### Cómo funciona en realidad (confirmado con el osciloscopio)
 
-El TIC de Lars usa un **detector de fase-frecuencia HC4046 alimentado a
-1 MHz**, un diodo Schottky (1N5711) y un RC pequeño (≈3,7 kΩ / 1 nF, τ≈3,7 µs)
-hacia el ADC, con una fuga de 10 MΩ a masa. El 4046 emite un pulso cuyo *ancho
-es igual a la diferencia de fase*; el diodo carga el condensador **solo durante
-ese pulso**, así que el voltaje capturado es proporcional al ancho del pulso —
-una rampa directa tiempo-a-voltaje. El ADC la lee una vez por segundo, luego
-los 10 MΩ descargan lentamente el condensador antes del siguiente pulso.
+Un **par de flip-flops D tipo 74** (`xx74`) convierte la diferencia de fase
+entre dos señales 1PPS en un pulso: **la carga empieza en el flanco de subida
+del 1PPS del GPS y termina en el del 1PPS del picDIV**, así que el ancho del
+pulso *es igual al intervalo de fase* entre ellos. Ese pulso abre un diodo
+Schottky (1N5711) que carga C13 a través de R8 — una **rampa tiempo-tensión**,
+igual que el original de Lars Walenius, solo que con un flip-flop en lugar de
+un HC4046. El MCU lee el pico de la rampa una vez por segundo y la carga se
+disipa después (~25 ms) antes del siguiente pulso.
 
-Aquí el RC **debe** ser pequeño: el 4046 corre a 1 MHz (periodo 1 µs) y el
-pulso de fase es 0–1000 ns, así que la constante de tiempo de carga ha de ser
-del orden de un microsegundo para que el condensador siga linealmente el ancho
-del pulso. Lars midió 500 ns → ADC ≈530, 1000 ns → ≈1000: excelente
-linealidad, resolución ~1 ns. Un RC *grande* apenas movería el condensador
-durante un pulso de 1 µs y destruiría la resolución. Así que 1 nF no era
-arbitrario — estaba ajustado a una ventana de carga temporizada a escala de µs.
+Dos consecuencias, ambas aprendidas por las malas:
 
-### Este diseño: un detector de ciclo de trabajo (el RC grande es necesario)
+- **El RC debe ser pequeño.** R8×C13 = 1 kΩ × 1 nF, τ ≈ 1 µs — ajustado al
+  pulso de escala µs para que el condensador siga el ancho del pulso
+  linealmente. Es el valor del esquema de Kaashoek (nota "R8×C13 = 100 ns" en
+  rev 0.4, 1000 ns en la hoja posterior); **no** es un promedio paso-bajo de un
+  ciclo de trabajo. Una revisión anterior de estas notas afirmaba lo contrario
+  (un "detector de ciclo de trabajo" que necesitaba un filtro grande de
+  51 kΩ/1 µF) — era **incorrecto**. Con 51 kΩ/1 µF el pulso de µs apenas movía
+  el condensador (≈14 mV de span en `LC`); con 1 kΩ/1 nF la rampa abarca
+  ~1,5–2 V y `LC` funciona.
+- **La lectura debe caer en el pico.** La rampa llega al pico al final del pulso
+  (≤ ~2 µs tras el flanco del GPS) y se mantiene menos de ~1 ms antes de
+  decaer. Muestrearla desde el bucle de sensores de 2 s siempre capturaba el
+  condensador descargado (~0,065 V, independiente de la fase — la causa raíz de
+  semanas de "calibraciones fallidas"). Ahora Vphase se lee ~50 µs tras el
+  flanco PPS, desde la tarea de relé notificada por PPS, cayendo en el pico. Sin
+  descarga activa: el diodo bloquea y la fuga de ~25 ms limpia el condensador
+  antes del siguiente pulso de 1 Hz.
 
-Nuestro front-end es un **flip-flop tipo D de la familia 74** (`xx74`), no un
-4046. Produce una salida cuyo **ciclo de trabajo** — no un único pulso
-temporizado — codifica la fase, a baja frecuencia de repetición (10 MHz
-dividido por picDIV). Para convertir eso en un voltaje DC de fase, el RC debe
-**promediar el ciclo de trabajo**, es decir actuar como un verdadero filtro
-paso-bajo con una frecuencia de corte *muy por debajo* de la tasa de
-conmutación del detector.
+### El papel del picDIV
 
-Poner el 1 nF de Lars sin cambios (empezamos con 1 kΩ/1 nF, τ=1 µs, f_c≈159
-kHz) hace lo contrario de filtrar: el corte queda muy *por encima* de la tasa
-del detector, así que el ADC muestrea el rizado crudo en vez de un promedio
-asentado. En el banco esto apareció como un **span de 14 mV** durante `LC` — la
-calibración lo rechazó correctamente como físicamente imposible. Solo tras
-cambiar a **51 kΩ / 1 µF (τ≈51 ms, f_c≈3,1 Hz)** el condensador promedió el
-ciclo de trabajo en un voltaje DC de fase limpio, y `LC`/lock empezaron a
-funcionar.
+El picDIV **no** forma parte del valor de la rampa — genera la **salida 1PPS**
+disciplinada (sincronizada con UTC, capaz de holdover), y su flanco marca el
+final del pulso de carga. El paso `AP`/arm al principio de `LC` solo aparca la
+fase cerca del flanco del GPS para que el barrido empiece desde un punto
+conocido; el detector compara el 1PPS del GPS con el del picDIV (derivados,
+respectivamente, del cielo y del OCXO disciplinado), por lo que minimizar
+Vphase alinea el PPS de salida con UTC.
 
-**Por qué no se pueden intercambiar 1:1:** resuelven problemas opuestos. El
-nodo de Lars debe *seguir* un pulso de 1 µs (τ pequeño); el nuestro debe
-*promediar* una forma de onda de conmutación (τ grande). Los mismos
-componentes, la misma posición en el esquema, requisito opuesto — la trampa
-clásica de portar un valor cuyo significado vivía por completo en la
-temporización del circuito original.
+### Calibración: punto de trabajo anclado (Opción D)
 
-### ¿El RC grande costó resolución de lock? No.
+La rampa es exponencial (τ ≈ 1 µs), así que ns/V **no es constante** a lo largo
+de ella. Un promedio de todo el tránsito (range/span) depende de dónde el arm
+aparcó la fase, y variaba ~15–20 % entre ejecuciones. Registros `LC` con
+resolución de 1 s mostraron que la **pendiente local** dV/dt es repetible en una
+banda estrecha cerca de **1,85 V** y diverge por encima y por debajo — esa
+tensión es el punto óptimo repetible de este detector (≈0,63·Vsat, el centro
+del rango útil). `LC` ancla ahí `zero_offset` y lee ns/V de la pendiente local
+en una ventana de ±0,20 V, lejos de las **zonas muertas** que caracterizó Dan
+Wiering: la caída del Schottky + pull-down por debajo de ~0,05 V, y el riel/
+wraparound del ADC cerca de 3,3 V (PA1 tolera 5 V pero solo lee hasta ~3,23 V).
+Si un barrido nunca cruza la banda de anclaje, `LC` recurre al promedio
+range/span y lo indica.
 
-Una duda legítima, ya que un filtro lento suele significar pérdida de ancho de
-banda. Separando las tres cosas que se confunden:
+### Resolución
 
-- **Cuantización:** nuestra ventana de 333 ns en un ADC de 12 bits sobre los
-  3,3 V completos es ≈81 ps/LSB, frente a los 1000 ns de Lars en 10 bits y
-  rango de 1,1 V ≈977 ps/LSB — unas **12× más fino**, porque una ventana de
-  tiempo más estrecha se mapea sobre más códigos ADC.
-- **Ruido de medida:** el sobremuestreo 16× con mediana rechaza glitches y
-  reduce el jitter, algo que la lectura de rampa única de Lars no tiene.
-- **Ancho de banda:** el único coste real del RC grande. τ≈51 ms añade ~51 ms
-  de retardo de grupo — pero LOCK actualiza cada pocos segundos (ancho de banda
-  del lazo muy por debajo de 0,2 Hz), así que f_c≈3,1 Hz está órdenes de
-  magnitud por encima del lazo y el retardo es ~1 % de un ciclo. Nunca limita
-  DPLL ni LOCK.
-
-Así que el cambio a 51 kΩ/1 µF **mejoró** la medida (cuantización más fina,
-menos ruido) y el coste de ancho de banda es despreciable en la escala temporal
-del lazo. El diente de sierra residual de ±21 ns en lock está dominado por el
-propio qErr del receptor LEA-6T (ver `SAW`), no por el filtro TIC.
-
----
+La rampa de 1 kΩ/1 nF abarca ~1,5–2 V del ADC de 12 bits en la ventana de fase
+útil, y el sobremuestreo 16× con mediana rechaza glitches — comparable o mejor
+que la lectura única del HC4046 de Lars a ~1 ns. La caída de ~25 ms es
+irrelevante para el ancho de banda del lazo: LOCK actualiza cada pocos segundos
+(muy por debajo de 0,2 Hz), así que la constante de tiempo del detector está
+órdenes de magnitud por encima del lazo.
 
 ## EEPROM
 
@@ -854,7 +821,9 @@ Un dispositivo ausente informa `not found` y el firmware continúa sin él.
 Con `GPSDO_LTIC` activado, el firmware lee un contador de intervalo de tiempo
 por hardware (el TIC de Lars Walenius): un condensador de 1 nF se carga con una
 corriente constante durante el intervalo GPS-1PPS → OCXO-1PPS, y la tensión
-retenida en PA1 se muestrea (media móvil) y se descarga en cada PPS. La tensión
+retenida en PA1 se muestrea en el pico de la rampa ~50 µs tras el flanco PPS;
+no hace falta descarga activa: el diodo bloquea y la fuga de ~25 ms limpia el
+condensador antes del siguiente pulso de 1 Hz. La tensión
 es una medida directa y de alta resolución de la diferencia de fase entre ambos
 pulsos — mucho más fina que el contador de ciclos TIM2 que usa el lazo hoy.
 

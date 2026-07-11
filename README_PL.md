@@ -527,9 +527,10 @@ nie jest stosowana.
 
 `SAW` bez argumentu pokazuje stan i qErr na żywo; `SAW 1`/`SAW 0` przełącza
 (zapis przez `ES`, domyślnie wyłączone). Gdy włączone, linia telemetrii
-`Learn:` pokazuje `qErr=…ns` dla algorytmu 10. Filtr RC toru TIC powinien być
-dość wolny, by ustabilizować się między impulsami 1 Hz (np. 51 kΩ/1 µF,
-τ≈51 ms), aby każdy odczyt fazy czysto parował się z qErr swojego impulsu.
+`Learn:` pokazuje `qErr=…ns` dla algorytmu 10, a wartość jest odejmowana od
+każdego odczytu fazy TIC. Ponieważ Vphase jest próbkowane na szczycie rampy
+tuż po zboczu PPS (patrz uwagi o sprzęcie TIC niżej), każdy odczyt fazy paruje
+się z qErr zgłoszonym dla impulsu tej samej sekundy.
 
 ---
 
@@ -810,7 +811,9 @@ Brakujące urządzenie zgłasza `not found`, a firmware działa dalej bez niego.
 Przy włączonym `GPSDO_LTIC` firmware odczytuje sprzętowy licznik interwału
 czasu (TIC Larsa Waleniusa): kondensator 1 nF jest ładowany stałym prądem w
 interwale GPS-1PPS → OCXO-1PPS, a zatrzaśnięte napięcie na PA1 jest próbkowane
-(średnia krocząca) i rozładowywane co PPS. Napięcie to bezpośrednia,
+na szczycie rampy ~50 µs po zboczu PPS; aktywne rozładowanie nie jest potrzebne
+— dioda odcina, a upływ ~25 ms czyści kondensator przed kolejnym impulsem 1 Hz.
+Napięcie to bezpośrednia,
 wysokorozdzielcza miara różnicy faz między oboma impulsami — znacznie
 dokładniejsza niż licznik cykli TIM2, którego pętla używa dziś.
 

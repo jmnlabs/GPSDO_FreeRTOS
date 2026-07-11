@@ -477,16 +477,24 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
     uint8_t state = g_ltic.state;
     if (state > LTIC_LOCK) state = LTIC_ACQ;
     /* BOOT SANITY: a persisted LOCK/DPLL is only trustworthy if the present
-     * phase read is valid. After a power cycle the OCXO has thermally drifted
-     * and the picDIV edge can be anywhere — frequently the detector starts
-     * saturated (seen on air: Vphase 3.09 V while state read LOCK, holding PWM
-     * and stuck ~6 min before DPLL→ACQ finally re-acquired). On the FIRST call
-     * of this boot (prev_state == 0xFF, the static-init sentinel), if the phase
-     * is not valid, demote to ACQ so the full pull-in runs and re-arms picDIV. */
+     * phase is both VALID and already CLOSE to zero_offset. After a power cycle
+     * the OCXO has thermally drifted and the picDIV edge can be anywhere, so
+     * the detector may start railed OR merely far off centre. Seen on air: a
+     * warm boot resumed LOCK with Vphase ≈2.09 V while zero_offset was 1.85 V
+     * (~300 mV ≈ hundreds of ns off) — technically "on the ramp" so the old
+     * valid-only check passed, but far too coarse for LOCK; DPLL then dropped
+     * it to ACQ a minute later and the full ~6 min pull-in ran anyway. On the
+     * FIRST call of this boot (prev_state == 0xFF), demote a persisted
+     * LOCK/DPLL to ACQ unless the phase is valid AND within the ACQ window of
+     * zero_offset — i.e. genuinely where a lock belongs. This costs nothing on
+     * a clean warm boot (already centred → stays LOCK) and skips the wasted
+     * LOCK→DPLL→ACQ bounce when it isn't. */
     if (prev_state == 0xFF && state != LTIC_ACQ) {
         bool boot_valid = false;
-        (void)ltic_phase_error_ns(&boot_valid);
-        if (!boot_valid) {
+        double boot_ph = ltic_phase_error_ns(&boot_valid);
+        bool near_centre = boot_valid &&
+                           fabs(boot_ph) <= (double)g_ltic.acq_threshold_ns;
+        if (!near_centre) {
             state = LTIC_ACQ;
             g_ltic.state = LTIC_ACQ;
         }

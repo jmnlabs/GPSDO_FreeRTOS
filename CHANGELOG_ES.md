@@ -1,245 +1,289 @@
-# Changelog — GPSDO FreeRTOS
+# Registro de cambios — GPSDO FreeRTOS
 
-All notable changes to this project are documented here.
+Todos los cambios notables de este proyecto se documentan aquí.
 
-Project by **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>
-Based on **GPSDO v0.06c** by André Balsa
-(<https://github.com/AndrewBCN/STM32-GPSDO>), FreeRTOS port and algorithms
-3–9 by the author, with Claude AI as programming assistant and PCB design
-by Scrachi (EEVBlog forum).
+Proyecto de **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>
+Basado en **GPSDO v0.06c** de André Balsa
+(<https://github.com/AndrewBCN/STM32-GPSDO>), port a FreeRTOS y algoritmos
+3–9 del autor, con Claude AI como asistente de programación y diseño de PCB
+por Scrachi (foro EEVBlog).
 
-The version suffix `-rtos` marks the FreeRTOS port lineage.
+El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
+
+> **Nota sobre la traducción.** Esta es la versión en español del registro de
+> cambios. Las entradas más recientes se mantienen al día; para el máximo
+> detalle histórico consúltense también las versiones en inglés
+> (`CHANGELOG.md`) y polaco (`CHANGELOG_PL.md`).
 
 ---
 
 ## [v0.91-rtos] — 2026-07-11
 
-### Added
-- **LC calibration — anchored operating point + local-slope ns/V (Option D).**
-  The ramp phase detector is exponential (1k/1n, τ≈1 µs), so ns/V is not
-  constant along the ramp and a whole-transit average (range/span) drifted
-  ~15–20 % between runs depending on where the picDIV arm parked the phase.
-  ns/V is now taken from the LOCAL slope dV/dt in a window around a fixed
-  operating point (LTIC_ZERO_ANCHOR_V = 1.85 V). zero_offset is anchored to
-  that point — the repeatable middle of the ramp, clear of the detector dead
-  zones Dan Wiering measured (the Schottky drop + pull-down below ~0.05 V, and
-  the ADC rail/wraparound near 3.3 V). If a sweep never crosses the anchor band
-  the code falls back to the previous range/span average and says so.
+### Añadido
+- **Calibración LC — punto de trabajo anclado + ns/V por pendiente local (Opción D).**
+  El detector de fase de rampa es exponencial (1k/1n, τ≈1 µs), así que ns/V no es
+  constante a lo largo de la rampa, y un promedio de todo el tránsito (range/span)
+  variaba ~15–20 % entre ejecuciones — según dónde el arm del picDIV aparcara la
+  fase. ns/V se toma ahora de la pendiente LOCAL dV/dt en una ventana de ±0,20 V
+  alrededor de un punto de trabajo fijo (LTIC_ZERO_ANCHOR_V = 1,85 V). zero_offset
+  se ancla en ese punto — el centro repetible de la rampa, lejos de las zonas
+  muertas del detector medidas por Dan Wiering (la caída del Schottky + pull-down
+  por debajo de ~0,05 V, y el riel/wraparound del ADC cerca de 3,3 V). Si un
+  barrido nunca cruza la banda de anclaje, el código recurre al antiguo promedio
+  range/span y lo indica.
 
-  Bench findings across several 1 s-resolved LC runs:
-  * The anchor is exact — back-to-back runs land zero_offset on 1.8500 V every
-    time.
-  * Run-to-run ns/V spread fell from ~15–20 % (old range/span average) to a few
-    percent. With both runs swept at the SAME rate it is ~2.8 %; the residual is
-    dominated by the sweep-rate quantisation, not the slope fit — avg100 resolves
-    the rate to 1 ns/s, so a "−5" vs "−6" label carries ±0.5 ns/s and the two
-    ns/V confidence bands overlap. This does not hurt LOCK: the loop uses the
-    exact ns/V it measured, at the voltage where it actually works.
-  * The fit window was widened to ±0.20 V (LTIC_ANCHOR_WIN_V): more points in
-    the band (~70 vs ~35) average down the ADC noise, taking the same-rate
-    spread from ~5.9 % at ±0.10 V to ~2.8 %.
-- **LC per-second diagnostic log.** During the sampling sweep LC now prints one
-  `t=/V=/n=` line per second, making the whole ramp visible in a capture (used
-  to derive Option D).
+  Hallazgos de banco en varias ejecuciones LC con resolución de 1 s:
+  * El anclaje es exacto — ejecuciones consecutivas sitúan zero_offset en
+    1,8500 V cada vez.
+  * La dispersión de ns/V entre ejecuciones cayó de ~15–20 % (antiguo promedio
+    range/span) a unos pocos por ciento. Con ambas ejecuciones barridas a la
+    MISMA tasa es ~2,8 %; el residuo lo domina la cuantización de la tasa de
+    barrido, no el ajuste de pendiente — avg100 resuelve la tasa a 1 ns/s, así
+    que una etiqueta «−5» vs «−6» lleva ±0,5 ns/s y las bandas de confianza de
+    ambos ns/V se solapan. Esto no perjudica a LOCK: el lazo usa el ns/V exacto
+    que midió, a la tensión en la que realmente trabaja.
+  * La ventana de ajuste se amplió a ±0,20 V (LTIC_ANCHOR_WIN_V): más puntos en
+    la banda (~70 vs ~35) promedian el ruido del ADC, reduciendo la dispersión a
+    igual tasa de ~5,9 % con ±0,10 V a ~2,8 %.
+- **Registro de diagnóstico LC por segundo.** Durante el barrido de muestreo, LC
+  imprime ahora una línea `t=/V=/n=` por segundo, haciendo visible toda la rampa
+  en una captura (se usó para derivar la Opción D).
 
-### Fixed
-- **Serial report printed twice per second in RD/RH when GPS had a fix.**
-  vDisplayTask is notified by two ~1 Hz sources — the frequency relay (per PPS)
-  and the GPS parser (per time sentence) — so with a fix it woke twice a second
-  and emitted two report lines. The serial line is now gated on a change of the
-  PPS counter, so exactly one line prints per second; the on-screen display
-  still refreshes on every notification. Reported by Dan Wiering.
-- **Credit spelling.** "Wieringa" → "Wiering" in the acknowledgements.
-- **Warm-boot LOCK bounce (wasted ~1 min of the ~8 min boot-to-lock).** A
-  persisted LOCK/DPLL was resumed as long as the phase read was valid (on the
-  ramp), even when it sat far from zero_offset — e.g. Vphase ≈2.09 V against a
-  1.85 V anchor (~260 ns off). LOCK then engaged, DPLL judged the phase too far
-  a minute later and dropped all the way to ACQ, so the full pull-in ran anyway
-  after a needless detour. The boot guard now demotes a persisted LOCK/DPLL to
-  ACQ unless the phase is valid AND within the ACQ window of zero_offset. Cold
-  boot is unaffected (state defaults to ACQ); a genuinely centred warm boot
-  still resumes LOCK immediately.
+### Corregido
+- **El informe serie se imprimía dos veces por segundo en RD/RH con fix del GPS.**
+  vDisplayTask recibe notificación de dos fuentes de ~1 Hz — el relé de frecuencia
+  (por PPS) y el parser del GPS (por sentencia de tiempo) — así que con fix se
+  despertaba dos veces por segundo y emitía dos líneas de informe. La línea serie
+  se controla ahora por un cambio del contador de PPS, de modo que se imprime
+  exactamente una por segundo; la pantalla sigue refrescándose en cada
+  notificación. Reportado por Dan Wiering.
+- **Ortografía del nombre en los agradecimientos** corregida a «Wiering» (a
+  petición del autor).
+- **Rebote de LOCK en arranque en caliente (desperdiciaba ~1 min de los ~8 min
+  de arranque a lock).** Un LOCK/DPLL persistido se reanudaba mientras la lectura
+  de fase fuera válida (en la rampa), aunque estuviera lejos de zero_offset —
+  p. ej. Vphase ≈2,09 V frente a un anclaje de 1,85 V (~260 ns de desvío). LOCK
+  se enganchaba, DPLL juzgaba la fase demasiado lejos un minuto después y caía
+  hasta ACQ, así que el pull-in completo corría igualmente tras un desvío inútil.
+  La protección de arranque ahora degrada un LOCK/DPLL persistido a ACQ salvo que
+  la fase sea válida Y esté dentro de la ventana ACQ de zero_offset. El arranque
+  en frío no se ve afectado (el estado por defecto es ACQ); un arranque en
+  caliente genuinamente centrado sigue reanudando LOCK de inmediato.
 
 ---
 
 ## [v0.90-rtos]
 
-### Added
-- **Wear-levelled flash ring buffer for "live" data.** Learned drift/damping,
-  LC calibration and last PWM are now auto-saved to a dedicated flash sector
-  (sector 6, 0x08040000, 128 KB) as a ring of 32-byte slots. Each save
-  programs the next empty slot; the sector is erased only when the ring wraps
-  (once per 4095 saves), so at 100 saves/day the flash lasts on the order of a
-  thousand years. Each slot carries a CRC and a sequence number; a half-written
-  slot (power loss) fails CRC and the previous good slot is used. A signature +
-  format-version header makes the firmware robust to full-chip-erase,
-  sector-only programming, first boot and leftover flash junk alike (a foreign
-  or blank sector is detected and re-initialised).
-- **Auto-save with hysteresis.** Live data is written only when it has settled
-  on a new level: drift changed by > 8 LSB or damping by > 0.03, AND at least
-  20 min since the last save. A successful `LC` calibration saves immediately.
-- **`FR 0|1` command** (saved with `ES`, default on) toggles the ring buffer at
-  runtime — no compile flag, so no build-cache surprises. `FR 0` stops all
-  flash-ring activity.
-- **`EW` command** shows flash-wear diagnostics: erase cycles and slots used.
-- **Sawtooth (qErr) correction for LTIC (`SAW 0|1`).** u-blox timing receivers
-  generate 1PPS by dividing an internal clock, so each pulse lands up to one
-  clock period off true GPS time — a per-pulse quantization error the receiver
-  reports as `qErr` in UBX-TIM-TP. A passive sniffer parses that message
-  (qErr is a signed 32-bit picosecond field at the same offset on LEA-6T,
-  LEA/NEO-M8T and ZED-F9T, so one parser serves all) and the TIC phase path
-  subtracts it, removing the receiver's granularity sawtooth and leaving the
-  OCXO's own error. On a LEA-6T (21 ns granularity) this is the dominant
-  short-term phase term. TIM-TP is enabled automatically at GPS init; `SAW`
-  toggles the correction (saved with `ES`, default off) and shows live qErr.
+### Añadido
+- **Búfer en anillo en Flash con nivelado de desgaste para datos "vivos".** La
+  deriva/amortiguación aprendidas, la calibración LC y el último PWM se
+  auto-guardan ahora en un sector de Flash dedicado (sector 6, 0x08040000,
+  128 KB) como un anillo de slots de 32 bytes. Cada guardado programa el
+  siguiente slot vacío; el sector se borra solo cuando el anillo da la vuelta
+  (una vez cada 4095 guardados), así que a 100 guardados/día el Flash dura del
+  orden de mil años. Cada slot lleva un CRC y un número de secuencia; un slot
+  escrito a medias (corte de energía) falla el CRC y se usa el anterior válido.
+  Una cabecera con firma + versión de formato hace el firmware robusto frente a
+  borrado de chip completo, programación solo por sectores, primer arranque y
+  restos de basura en Flash por igual (un sector ajeno o en blanco se detecta y
+  reinicializa).
+- **Auto-guardado con histéresis.** Los datos vivos se escriben solo cuando se
+  han asentado en un nuevo nivel: la deriva cambió > 8 LSB o la amortiguación
+  > 0,03, Y han pasado al menos 20 min desde el último guardado. Una calibración
+  `LC` exitosa guarda de inmediato.
+- **Comando `FR 0|1`** (guardado con `ES`, activo por defecto) conmuta el búfer
+  en anillo en tiempo de ejecución — sin flag de compilación, así que sin
+  sorpresas de caché de compilación. `FR 0` detiene toda actividad del anillo.
+- **Comando `EW`** muestra diagnósticos de desgaste del Flash: ciclos de borrado
+  y slots usados.
+- **Corrección de diente de sierra (qErr) para LTIC (`SAW 0|1`).** Los receptores
+  de temporización u-blox generan el 1PPS dividiendo un reloj interno, así que
+  cada pulso cae hasta un periodo de reloj lejos del tiempo GPS real — un error
+  de cuantización por pulso que el receptor reporta como `qErr` en UBX-TIM-TP.
+  Un sniffer pasivo parsea ese mensaje (qErr es un campo con signo de 32 bits en
+  picosegundos, en el mismo offset en LEA-6T, LEA/NEO-M8T y ZED-F9T, así que un
+  solo parser sirve para todos) y la ruta de fase del TIC lo resta, eliminando
+  el diente de sierra de granularidad del receptor y dejando el error propio del
+  OCXO. En un LEA-6T (21 ns de granularidad) este es el término de fase de corto
+  plazo dominante. TIM-TP se habilita automáticamente al iniciar el GPS; `SAW`
+  conmuta la corrección (guardada con `ES`, desactivada por defecto) y muestra
+  qErr en vivo.
 
-### Changed
-- **`ES` no longer overwrites learned/calibration values when the ring is on.**
-  With `FR 1`, calibration (ns_per_volt, zero_offset, range_ns, centre_v) and
-  learned drift/damp are owned solely by the ring; `ES` writes only genuine
-  settings (PID gains, thresholds, flags). With `FR 0`, `ES` still saves those
-  live values to EEPROM as a fallback, and `eeprom_recall()` seeds them at boot
-  so migrating an older EEPROM keeps its calibration.
+### Cambiado
+- **`ES` ya no sobrescribe los valores aprendidos/de calibración con el anillo
+  activo.** Con `FR 1`, la calibración (ns_per_volt, zero_offset, range_ns,
+  centre_v) y la deriva/amortiguación aprendidas pertenecen exclusivamente al
+  anillo; `ES` escribe solo ajustes genuinos (ganancias PID, umbrales, flags).
+  Con `FR 0`, `ES` sigue guardando esos valores vivos en EEPROM como respaldo, y
+  `eeprom_recall()` los siembra al arrancar, de modo que migrar una EEPROM
+  antigua conserva su calibración.
 
-### Fixed
-- **`LC` no longer fights the discipline loop.** Running `LC` while algorithm
-  10 was actively disciplining let the loop move PWM at the same time as the
-  calibration sweep, so the two corrupted each other — the measured sweep rate
-  came out at ±1 ns/s and the range as absurd values (1502 / 3518 ns), which
-  the physics gate correctly rejected. The control loop is now suppressed
-  whenever a calibration is active (`g_calib_active`), so `LC` can be run at
-  any time, including under `LA 10`.
-- **Calibration-safe PWM paths.** The same guard now also covers the algorithm
-  9 thermal-holdover steering and the manual PWM commands (`up1`/`up10`/`dp1`/
-  `dp10`/`SP`), which are refused with a clear message while `LC`/`CT` runs, so
-  no path can perturb a sweep in progress.
-- **`LC` no wrap is no longer flagged as a failure.** A detector that does not
-  wrap within the sweep now passes with a good slope/centre/span and is
-  auto-saved; only a genuinely weak result (tiny span or off-band centre) is
-  called out, with the specific reason. Messages no longer tell the user to run
-  `ES` after `LC` — a passing `LC` auto-saves to the flash ring (this is live
-  data). `CT` still prompts for `ES`, since it tunes PID settings.
+### Corregido
+- **`LC` ya no pelea con el lazo de disciplina.** Ejecutar `LC` mientras el
+  algoritmo 10 disciplinaba activamente permitía que el lazo moviera el PWM al
+  mismo tiempo que el barrido de calibración, de modo que ambos se corrompían —
+  la tasa de barrido medida salía a ±1 ns/s y el rango como valores absurdos
+  (1502 / 3518 ns), que la comprobación física rechazaba correctamente. El lazo
+  de control se suprime ahora siempre que hay una calibración activa
+  (`g_calib_active`), así que `LC` puede ejecutarse en cualquier momento,
+  incluso bajo `LA 10`.
+- **Rutas de PWM seguras durante la calibración.** La misma protección cubre
+  ahora también el pilotaje de holdover térmico del algoritmo 9 y los comandos
+  manuales de PWM (`up1`/`up10`/`dp1`/`dp10`/`SP`), que se rechazan con un
+  mensaje claro mientras corre `LC`/`CT`, de modo que ninguna ruta pueda
+  perturbar un barrido en curso.
+- **Que `LC` no dé la vuelta ya no se marca como fallo.** Un detector que no da
+  la vuelta dentro del barrido ahora pasa con buena pendiente/centro/span y se
+  auto-guarda; solo un resultado genuinamente débil (span diminuto o centro
+  fuera de banda) se señala, con el motivo específico. Los mensajes ya no piden
+  al usuario ejecutar `ES` tras `LC` — un `LC` exitoso auto-guarda en el anillo
+  Flash (esto son datos vivos). `CT` sigue pidiendo `ES`, ya que ajusta valores
+  PID.
 
-### Credits
-- Attribution refined: André Balsa credited as author of v0.06c, the
-  inspiration for the RTOS port. Repository link corrected.
+### Créditos
+- Atribución afinada: André Balsa acreditado como autor de v0.06c, la
+  inspiración del port a RTOS. Enlace del repositorio corregido.
 
 ---
 
 ## [v0.89-rtos]
 
-### Added
-- **Self-learning loop aid (`LRN`), shared by algorithm 7 and LTIC.** Two slow,
-  passive learners — informed by Dan Wiering's overnight Rb-referenced traces
-  (a ~9000 s ±80 ns phase sawtooth, an ADEV bump at the loop time constant, and
-  8E-12/day drift): (1) a **drift feed-forward** that estimates the OCXO's mean
-  phase slope over 30 s windows and adds a PWM term to cancel it, so the loop
-  stops chasing a moving target and the phase goes flat; (2) a **damping
-  adaption** that watches phase-error zero-crossings and eases the correction
-  gain down on overshoot, up when sluggish — flattening the ADEV bump at the
-  loop time constant. Both run ONLY when locked, update at most every 30 s, and
-  are hard-clamped (feed-forward ±400 LSB, damping 0.5–1.5) so a bad estimate
-  cannot destabilise the loop; neither injects any excitation. `LRN 1|0` enables
-  /disables (default on), `LRN R` resets to theory, `LRN` alone prints live
-  state; learned values are saved by `ES` (EEPROM 222–230) and recalled at
-  boot. The serial report shows a live `Learn:` line (drift, slope, damping,
-  observed limit-cycle period/amplitude).
-- **Learning now covers every disciplining algorithm (3–10), not just 7/8.**
-  A single `lrn_apply()` wrapper feeds each loop's own phase accumulator and
-  frequency error to the learners; the NN (algo 9), having no explicit phase
-  accumulator, uses damping only. `LRN` state is shared across algorithms.
+### Añadido
+- **Ayuda de lazo auto-aprendida (`LRN`), compartida por el algoritmo 7 y LTIC.**
+  Dos aprendices lentos y pasivos — informados por las trazas nocturnas
+  referenciadas a Rb de Dan Wiering (un diente de sierra de fase de ~9000 s
+  ±80 ns, un bache de ADEV en la constante de tiempo del lazo, y deriva de
+  8E-12/día): (1) un **feed-forward de deriva** que estima la pendiente media de
+  fase del OCXO en ventanas de 30 s y añade un término de PWM para cancelarla,
+  de modo que el lazo deja de perseguir un objetivo móvil y la fase se aplana;
+  (2) una **adaptación de amortiguación** que vigila los cruces por cero del
+  error de fase y baja la ganancia de corrección ante sobreoscilación, la sube
+  cuando va lento — aplanando el bache de ADEV en la constante de tiempo del
+  lazo. Ambos corren SOLO en lock, se actualizan como mucho cada 30 s, y están
+  fuertemente acotados (feed-forward ±400 LSB, amortiguación 0,5–1,5) de modo
+  que una mala estimación no pueda desestabilizar el lazo; ninguno inyecta
+  excitación. `LRN 1|0` activa/desactiva (activo por defecto), `LRN R` restaura
+  a la teoría, `LRN` a secas imprime el estado en vivo; los valores aprendidos
+  se guardan con `ES` (EEPROM 222–230) y se recuperan al arrancar. El informe
+  serie muestra una línea `Learn:` en vivo (deriva, pendiente, amortiguación,
+  periodo/amplitud del ciclo límite observado).
+- **El aprendizaje cubre ahora todos los algoritmos de disciplina (3–10), no
+  solo 7/8.** Un único envoltorio `lrn_apply()` alimenta el acumulador de fase y
+  el error de frecuencia propios de cada lazo a los aprendices; la NN (algo 9),
+  al no tener acumulador de fase explícito, usa solo amortiguación. El estado de
+  `LRN` se comparte entre algoritmos.
 
-### UI / Display
-- **Colour TFT reworked for clarity and a little life.** Consistent single-space
-  label formatting throughout (`Alt: 144m`, `PWM:...`, `Uptime: ...`); the value
-  fields align optically in the proportional font. A navy frame (matching the
-  header) now boxes the data area, with the three separators joined by side
-  rails. The frequency turns green on lock. `DATE:` label added.
-- **Boot splash refined**: title at the frequency's height, two oscillator waves
-  that fade in out of phase, drift into agreement and merge into one green wave
-  with a swelling-then-fading halo, followed by a scrolling hardware-detection
-  list (fixed-height window, credits stay put).
-- **`SPL 0|1` command** (saved with `ES`, default 1) toggles the boot animation.
-  `SPL 0` shows just the title and credits for two seconds — for the
-  art-indifferent.
+### UI / Pantalla
+- **TFT en color reelaborado para claridad y un poco de vida.** Formato de
+  etiquetas consistente con un solo espacio en todo (`Alt: 144m`, `PWM:...`,
+  `Uptime: ...`); los campos de valor se alinean ópticamente en la fuente
+  proporcional. Un marco azul marino (a juego con la cabecera) enmarca ahora el
+  área de datos, con los tres separadores unidos por rieles laterales. La
+  frecuencia se vuelve verde en lock. Etiqueta `DATE:` añadida.
+- **Splash de arranque refinado**: título a la altura de la frecuencia, dos ondas
+  de oscilador que aparecen desfasadas, derivan hasta coincidir y se fusionan en
+  una sola onda verde con un halo que crece y se desvanece, seguido de una lista
+  de detección de hardware con scroll (ventana de altura fija, los créditos se
+  quedan en su sitio).
+- **Comando `SPL 0|1`** (guardado con `ES`, 1 por defecto) conmuta la animación
+  de arranque. `SPL 0` muestra solo el título y los créditos durante dos
+  segundos — para los indiferentes al arte.
 
 ---
 
 ## [v0.88-rtos]
 
-### Fixed
-- **TFT frequency field no longer keeps digit slivers after CAL/WARMUP/SVIN
-  messages.** The busy messages and the big frequency use different text
-  heights, so text padding wiped only the current font's band; the whole
-  field is now cleared on every busy↔normal transition.
+### Corregido
+- **El campo de frecuencia del TFT ya no conserva restos de dígitos tras los
+  mensajes CAL/WARMUP/SVIN.** Los mensajes de ocupado y la frecuencia grande
+  usan alturas de texto distintas, así que el relleno de texto borraba solo la
+  banda de la fuente actual; ahora todo el campo se limpia en cada transición
+  ocupado↔normal.
 
-### Removed
-- **SPI→T6963C bridge support removed** (an experiment): `T6963C_Bridge.h`,
-  its display task section, config block and cross-references are gone.
+### Eliminado
+- **Soporte del puente SPI→T6963C eliminado** (un experimento): `T6963C_Bridge.h`,
+  su sección de tarea de pantalla, bloque de configuración y referencias cruzadas
+  han desaparecido.
 
-### Docs
-- READMEs (EN/PL/ES) updated with the LTIC v0.5x–v0.88 feature set (LC
-  auto-calibration, autotuned gains, ADC median path, runaway guard, WU,
-  LED animations, trustworthy lock colour) and a new section on colour TFT
-  support: any TFT_eSPI panel at 320×240 or 480×320 with setup steps.
+### Documentación
+- READMEs (EN/PL/ES) actualizados con el conjunto de funciones LTIC v0.5x–v0.88
+  (auto-calibración LC, ganancias auto-ajustadas, ruta de mediana del ADC,
+  protección anti-fuga, WU, animaciones LED, color de lock fiable) y una nueva
+  sección sobre soporte de TFT en color: cualquier panel TFT_eSPI a 320×240 o
+  480×320 con los pasos de configuración.
 
 ---
 
 ## [v0.87-rtos]
 
-### Fixed
-- **Zero dead time before sampling — the prep was eating the whole band.**
-  The ADC keeps up fine (1 sample/s ≈ 8 mV/step at 9 ns/s); what failed was
-  the ~60 s of settling and d1/d2 reads between commanding the ramp and the
-  first sample. A fixed offset lands on top of whatever df the saved PWM
-  already has (measured +9 ns/s on air), so the phase flew 0.061→2.62 V
-  through the entire band BEFORE sampling began and the fit saw only
-  saturation. LC now re-arms picDIV (deterministic bottom start), commands
-  the offset and starts sampling within ~3 s; the exact rate is read AFTER
-  the pass from clean avg100. If saturation still arrives before 10 fit
-  points, the offset is halved, picDIV re-armed and the pass retried once.
-  The pre-sweep d1/d2 measurement and the adaptive reduce/increase machinery
-  are removed — the physics gate and the post-pass precise rate make them
-  redundant.
+### Corregido
+- **Cero tiempo muerto antes del muestreo — la preparación se comía toda la
+  banda.** El ADC sigue el ritmo bien (1 muestra/s ≈ 8 mV/paso a 9 ns/s); lo que
+  fallaba eran los ~60 s de asentamiento y las lecturas d1/d2 entre comandar la
+  rampa y la primera muestra. Un offset fijo se suma a cualquier df que el PWM
+  guardado ya tenga (medido +9 ns/s en el banco), así que la fase voló
+  0,061→2,62 V a través de toda la banda ANTES de que empezara el muestreo, y el
+  ajuste solo veía saturación. Ahora LC re-arma el picDIV (arranque
+  determinista desde abajo), comanda el offset y empieza a muestrear en ~3 s; la
+  tasa exacta se lee DESPUÉS de la pasada desde un avg100 limpio. Si la
+  saturación aún llega antes de 10 puntos de ajuste, el offset se reduce a la
+  mitad, se re-arma el picDIV y la pasada se reintenta una vez. La medición
+  d1/d2 previa al barrido y la maquinaria adaptativa de reducir/aumentar se
+  eliminan — la comprobación física y la tasa precisa posterior a la pasada las
+  hacen redundantes.
 
 ---
 
 ## [v0.86-rtos]
 
-### Changed
-- **LC redesigned as a single bottom-to-top pass — no direction probing, no
-  flipping, no wraps needed.** Field logs proved the picDIV arm parks the
-  phase DETERMINISTICALLY ~60 ns above the sync point (Vphase ≈0.061 V after
-  every re-arm), that the negative side below that point is DEAD (edge order
-  inverts, the pulse vanishes — avg100 showed a real −3 ns/s drift while the
-  voltage stood still), and that the positive side runs the whole band up
-  into soft saturation. LC now exploits this: after arming it COMMANDS a
-  positive ~+4 ns/s sweep (offset from the measured K), samples the entire
-  band in one pass, and treats sustained upper saturation as the natural END
-  of the measurement rather than a fault. The precise avg100 read-back
-  (v0.85) scales ns/V exactly. The in-sweep direction flip and its restart
-  machinery are removed.
+### Cambiado
+- **LC rediseñado como una única pasada de abajo hacia arriba — sin sondeo de
+  dirección, sin inversiones, sin necesidad de dar la vuelta.** Los registros de
+  campo demostraron que el arm del picDIV aparca la fase de forma DETERMINISTA
+  ~60 ns por encima del punto de sync (Vphase ≈0,061 V tras cada re-arm), que el
+  lado negativo por debajo de ese punto está MUERTO (el orden de los flancos se
+  invierte, el pulso desaparece — avg100 mostró una deriva real de −3 ns/s
+  mientras la tensión no se movía), y que el lado positivo recorre toda la banda
+  hasta una saturación suave. Ahora LC lo explota: tras armar, COMANDA un barrido
+  positivo de ~+4 ns/s (offset a partir de la K medida), muestrea toda la banda
+  en una pasada, y trata la saturación superior sostenida como el FINAL natural
+  de la medición en vez de un fallo. La relectura precisa de avg100 (v0.85)
+  escala ns/V con exactitud. La inversión de dirección en pleno barrido y su
+  maquinaria de reinicio se eliminan.
 
 ---
 
 ## [v0.85-rtos]
 
-### Fixed
-- **The direction flip now COMMANDS a sweep rate instead of trusting a blind
-  read — and the phase no longer parks at the band's edge.** On air the flip
-  iteration stopped at a nominal "−1 ns/s" that was really ≈0: avg10
-  quantises at 0.1 Hz (d1=0.1000, d2=0.0000 in the log), so below 0.1 Hz the
-  read is noise. With df≈0 the phase sat wherever the picDIV re-arm dropped
-  it (Vphase 0.061 V — the band's lower edge, where too-narrow pulses barely
-  charge the RC), the sweep covered 5 mV, and the physics gate had to abort.
-  Now, when the sign flips between iterations, LC interpolates the 10 MHz
-  point P0 from the last two offsets and sets the ramp to P0 − 0.06 Hz·(LSB/Hz)
-  — a COMMANDED −6 ns/s derived from the measured K, independent of the
-  quantised read. At the end of the sweep (PWM constant throughout, so avg100
-  is clean at 0.01 Hz resolution) the true rate is read back and replaces the
-  commanded one before ns/V is computed, so the fit scale is exact.
+### Corregido
+- **La inversión de dirección ahora COMANDA una tasa de barrido en vez de fiarse
+  de una lectura ciega — y la fase ya no se aparca en el borde de la banda.** En
+  el banco, la iteración de inversión se detenía en un nominal «−1 ns/s» que en
+  realidad era ≈0: avg10 cuantiza a 0,1 Hz (d1=0,1000, d2=0,0000 en el registro),
+  así que por debajo de 0,1 Hz la lectura es ruido. Con df≈0 la fase se quedaba
+  donde el re-arm del picDIV la dejaba (Vphase 0,061 V — el borde inferior de la
+  banda, donde pulsos demasiado estrechos apenas cargan el RC), el barrido
+  cubría 5 mV, y la comprobación física tenía que abortar. Ahora, cuando el
+  signo se invierte entre iteraciones, LC interpola el punto de 10 MHz P0 a
+  partir de los dos últimos offsets y fija la rampa en P0 − 0,06 Hz·(LSB/Hz) —
+  un −6 ns/s COMANDADO derivado de la K medida, independiente de la lectura
+  cuantizada. Al final del barrido (PWM constante en toda la pasada, así que
+  avg100 es limpio a resolución de 0,01 Hz) la tasa real se relee y reemplaza a
+  la comandada antes de calcular ns/V, de modo que la escala del ajuste es
+  exacta.
 
 ---
+
+<!-- ============================================================= -->
+<!-- Las versiones anteriores a v0.85 aún no están traducidas al    -->
+<!-- español. El texto en inglés se conserva abajo verbatim y se    -->
+<!-- traducirá en revisiones sucesivas. Para el historial completo  -->
+<!-- traducido, véanse CHANGELOG.md (EN) y CHANGELOG_PL.md (PL).     -->
+<!-- ============================================================= -->
+
+> **⚠ Traducción pendiente.** Las entradas de v0.84 hacia abajo todavía están
+> en inglés; se irán traduciendo en próximas revisiones. El contenido técnico es
+> idéntico al de `CHANGELOG.md`.
 
 ## [v0.84-rtos]
 

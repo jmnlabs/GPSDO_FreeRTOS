@@ -533,9 +533,10 @@ out if TIM-TP stops (receiver reset) so a stale value is never applied.
 
 `SAW` with no argument shows the state and live qErr; `SAW 1`/`SAW 0` toggles
 it (saved with `ES`, default off). When on, the `Learn:` telemetry line shows
-`qErr=…ns` for algorithm 10. The TIC RC filter should be slow enough to settle
-between 1 Hz pulses (e.g. 51 kΩ/1 µF, τ≈51 ms) so each phase reading pairs
-cleanly with that pulse's qErr.
+`qErr=…ns` for algorithm 10, and the value is subtracted from each TIC phase
+reading. Because Vphase is sampled on the ramp peak right after the PPS edge
+(see the TIC hardware notes below), each phase reading already pairs with the
+qErr reported for that same second's pulse.
 
 ---
 
@@ -807,7 +808,9 @@ A missing device reports `not found` and the firmware continues without it.
 With `GPSDO_LTIC` enabled, the firmware reads a hardware time-interval
 counter (Lars Walenius' TIC): a 1 nF capacitor is charged with a constant
 current during the GPS-1PPS → OCXO-1PPS interval, and the latched voltage on
-PA1 is sampled (moving-averaged) then discharged every PPS. The voltage is a
+PA1 is sampled on the ramp peak ~50 µs after the PPS edge; no active
+discharge is needed — the diode blocks and the ~25 ms leakage clears the cap
+before the next 1 Hz pulse. The voltage is a
 direct, high-resolution measure of the phase difference between the two pulses
 — far finer than the TIM2 cycle-counter the loop uses today.
 

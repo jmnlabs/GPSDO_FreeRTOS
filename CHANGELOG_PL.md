@@ -51,6 +51,15 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
   licznika PPS, więc drukuje się dokładnie jedna na sekundę; wyświetlacz nadal
   odświeża się przy każdej notyfikacji. Zgłoszone przez Dana Wiering.
 - **Pisownia nazwiska w podziękowaniach** poprawiona na „Wiering” (na prośbę autora).
+- **Odbicie LOCK przy ciepłym starcie (marnowało ~1 min z ~8 min boot-to-lock).**
+  Zapisany LOCK/DPLL był wznawiany, dopóki odczyt fazy był ważny (na rampie),
+  nawet gdy siedział daleko od zero_offset — np. Vphase ≈2,09 V przy kotwicy
+  1,85 V (~260 ns od centrum). LOCK wtedy wchodził, DPLL po minucie uznawał fazę
+  za zbyt odległą i schodził aż do ACQ, więc pełna akwizycja i tak się wykonywała
+  po zbędnym objeździe. Guard startowy demotuje teraz zapisany LOCK/DPLL do ACQ,
+  chyba że faza jest ważna I mieści się w oknie ACQ wokół zero_offset. Zimny start
+  bez zmian (stan domyślnie ACQ); naprawdę wycentrowany ciepły start nadal wznawia
+  LOCK natychmiast.
 
 ---
 

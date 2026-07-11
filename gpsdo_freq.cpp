@@ -1,7 +1,7 @@
 /**
  * gpsdo_freq.cpp — vFreqRelayTask — frequency measurement processing
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -138,6 +138,8 @@ void gpsdo_calc_averages(FreqData_t *f)
 /* -----------------------------------------------------------------------
  * vFreqRelayTask
  * ----------------------------------------------------------------------- */
+extern void ltic_read_fast(void);
+
 void vFreqRelayTask(void *pvParameters)
 {
     (void)pvParameters;
@@ -147,6 +149,29 @@ void vFreqRelayTask(void *pvParameters)
     {
         /* Block until ISR notifies us (2 s safety timeout) */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
+
+#ifdef GPSDO_LTIC
+        /* FAST LTIC READ — must happen HERE, microseconds after the PPS edge.
+         * The Kaashoek ramp on C13 charges during the FF pulse (width = phase,
+         * ≤ ~2 µs) and its peak then holds under ~1 ms before the ~25 ms
+         * leakage decay pulls it down (confirmed on Marek's scope). The old
+         * path read it from vSensorTask, whose loop ends in vTaskDelay(2000) —
+         * so the sample landed up to 2 s late, always on the fully-discharged
+         * cap (~0.065 V regardless of phase). This task wakes straight from
+         * the PPS ISR, so a short settle here lands squarely on the peak.
+         * The end of the pulse is at most ~2 µs after the edge and the peak
+         * holds ~1 ms, so a ~300 µs settle catches the top for any phase. */
+        {
+            /* Charging STARTS on the GPS-PPS edge (this ISR's trigger) and
+             * ENDS on the picPPS edge — so the ramp PEAK is at the END of the
+             * pulse, [phase] µs after the edge, phase ≤ ~2 µs across the
+             * working window. ltic_read_fast() waits past the widest pulse
+             * (~50 µs, done inside it where Arduino timing is available) then
+             * samples the peak. No discharge: the diode blocks and the ~25 ms
+             * leakage clears the cap before the next 1 Hz pulse. */
+            ltic_read_fast();
+        }
+#endif
 
         /* Drain all events posted while we were computing */
         while (xQueueReceive(xPpsQueue, &evt, 0) == pdTRUE)

@@ -1,7 +1,7 @@
 /**
  * GPSDO_FreeRTOS.ino — Main entry point — hardware init and FreeRTOS scheduler start
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -67,6 +67,8 @@ extern void gpsdo_gps_init(void);
 /* declared in gpsdo_state.cpp */
 extern bool eeprom_check_on_boot(void);
 extern void eeprom_recall(void);
+#include "flash_ring.h"
+#include "live_store.h"
 
 /* declared in gpsdo_cli.cpp — single byte, safe to read without mutex */
 extern int8_t g_time_offset;
@@ -135,8 +137,8 @@ void setup()
     OUT_SERIAL.println(PROGRAM_NAME " " PROGRAM_VERSION);
     OUT_SERIAL.println("FreeRTOS port by J. M. Niewinski  with Claude AI");
     OUT_SERIAL.println("https://github.com/jmnlabs/GPSDO_FreeRTOS");
-    OUT_SERIAL.println("Based on GPSDO v0.06c by " AUTHOR_NAME);
-    OUT_SERIAL.println("https://github.com/AndrewBCN/STM32-GPSDO/tree/main/software/GPSDO_V006c");
+    OUT_SERIAL.println("Inspired by GPSDO v0.06c by " AUTHOR_NAME);
+    OUT_SERIAL.println("https://github.com/AndrewBCN/STM32-GPSDO");
     OUT_SERIAL.println("Type H = help  SW = stack diagnostics");
     OUT_SERIAL.println("================================================\r\n");
 
@@ -198,6 +200,17 @@ void setup()
 #else
     analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
 #endif
+
+    /* ---- live-data flash ring buffer (wear-levelled; opt-in via
+     * FR 0|1, saved in EEPROM). Returns false when disabled. ---- */
+    if (flash_ring_begin())
+        OUT_SERIAL.println("Flash ring: live data recalled");
+    else
+        OUT_SERIAL.println("Flash ring: no live data (fresh or disabled)");
+
+    /* recall learned/calibration values from the ring (if present) */
+    if (live_store_begin())
+        OUT_SERIAL.println("Live store: LRN + LC applied from flash ring");
 
     OUT_SERIAL.print("Initial PWM=");    OUT_SERIAL.print(gCtrl.pwm_output);
     OUT_SERIAL.print(" algo=");          OUT_SERIAL.print(gCtrl.active_algo);

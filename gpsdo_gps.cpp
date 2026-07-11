@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -19,6 +19,7 @@
 
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
+#include "ubx_timtp.h"
 #include <Arduino.h>
 #include <TinyGPS++.h>
 #include <string.h>
@@ -594,15 +595,32 @@ static bool ubx_config(void)
  * Without this notification both displays froze for the entire tunnel
  * timeout (up to 300 s).
  */
+volatile uint32_t g_tunnel_baud = 0;   /* T <baud>: GPS UART rate for the bridge (0 = keep) */
+
 static void run_tunnel_mode(void)
 {
+    /* The bridge ALWAYS runs on the USB CDC (Serial): with Bluetooth enabled
+     * the CLI and telemetry live on Serial2, so USB becomes a clean,
+     * dedicated service port for u-center; without Bluetooth the 1 Hz report
+     * is muted for the session (see vDisplayTask) so nothing pollutes the
+     * NMEA/UBX stream. USB CDC has no real baud rate — only the GPS-side
+     * UART matters. If the CLI passed "T <baud>", reopen Serial1 at that
+     * rate and KEEP it afterwards (u-center may have re-configured the
+     * receiver; the firmware must follow to keep parsing NMEA). */
+    if (g_tunnel_baud != 0) {
+        Serial1.flush();
+        Serial1.begin(g_tunnel_baud);
+    }
     CLI_SER.println("Entering tunnel mode...");
+#ifdef GPSDO_BLUETOOTH
+    Serial.println("GPS tunnel active on this USB port.");
+#endif
     uint32_t end_ms        = millis() + (TUNNEL_TIMEOUT_SECS * 1000UL);
     uint32_t last_notify   = millis();
 
     while (millis() < end_ms) {
-        if (Serial1.available())  CLI_SER.write(Serial1.read());
-        if (CLI_SER.available())  Serial1.write(CLI_SER.read());
+        if (Serial1.available())  Serial.write(Serial1.read());
+        if (Serial.available())   Serial1.write(Serial.read());
 
         /* Notify DisplayTask ~1 Hz so displays stay alive */
         uint32_t now = millis();
@@ -694,6 +712,7 @@ void vGpsTask(void *pvParameters)
             for (int i = 0; i < to_read; i++) {
                 uint8_t c = Serial1.read();
                 gps.encode(c);
+                ubx_timtp_feed(c);   /* parallel UBX sniffer for TIM-TP qErr */
 
 #ifdef GPSDO_VERBOSE_NMEA
                 /* Only echo in human-readable mode (not tab-delimited) */
@@ -840,6 +859,9 @@ void vGpsTask(void *pvParameters)
             }
         }
 #endif
+
+        /* Age out stale qErr if TIM-TP stops arriving (receiver reset etc.) */
+        ubx_timtp_tick(millis());
 
         /* Yield between bursts — allows higher-priority tasks to run */
         vTaskDelay(pdMS_TO_TICKS(GPS_YIELD_MS));
@@ -1108,6 +1130,14 @@ void gpsdo_gps_init(void)
     flush_rx(100);
     OUT_SERIAL.print("GPS: running at "); OUT_SERIAL.print(working_baud); OUT_SERIAL.println(" baud (no UBX config)");
 #endif /* GPSDO_UBX_CONFIG */
+
+    /* Enable UBX-TIM-TP (0x0D 0x01) so we receive per-pulse qErr for the
+     * sawtooth correction. Harmless if unused; the sniffer only acts on it
+     * when SAW is on. Works on 6T/M8T/F9T (same message id). */
+    if (ubx_send_cfg_msg(0x0D, 0x01, 1))
+        OUT_SERIAL.println("GPS: UBX-TIM-TP enabled (sawtooth qErr)");
+    else
+        OUT_SERIAL.println("GPS: TIM-TP enable not ACKed (receiver may lack it)");
 
     OUT_SERIAL.println("GPS init done");
 }

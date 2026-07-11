@@ -1,7 +1,7 @@
 /**
  * GPSDO_algorithms.h — Control loop algorithm declarations and tunable parameters
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -41,6 +41,53 @@ extern double g_blend_scale;       /* Hz — sigmoid width,  default 0.01       
 /* Algo 9 (NN) output scaling */
 extern double g_nn_max_step;       /* LSB — max PWM delta per step, default 200 */
 
+/* ---- Algorithm 10: LTIC three-stage PLL (ACQ → DPLL → LOCK) ----------
+ * Disciplines the OCXO from the hardware TIC phase voltage (PA1) instead of
+ * the TIM2 cycle counter. A state machine: ACQ pulls phase into the
+ * detector's unambiguous range (and auto-arms the picDIV), DPLL settles
+ * frequency+phase quickly with a wide-band PID, LOCK then updates slowly
+ * (every lock_interval_s) with a narrow-band PID to approach minimum error.
+ *
+ * NOTE: the loop itself is not implemented yet (planned "phase A"); these
+ * parameters, their CLI commands and EEPROM persistence exist now so the
+ * configuration survives reboots and is ready when the loop is written.
+ * Calibrate ns_per_volt / zero_offset / range_ns on real hardware first. */
+typedef struct {
+    /* TIC calibration */
+    float ns_per_volt;       /* voltage→time slope [ns/V] (0 = uncalibrated) */
+    float zero_offset;       /* TIC volts at zero phase difference [V]        */
+    float range_ns;          /* detector unambiguous range [ns] (wrap-around) */
+    /* Three PID sets — ACQ (coarse pull-in), DPLL (wide-band), LOCK (narrow) */
+    PidParams_t acq;         /* ACQ stage PID (coarse, frequency-led)         */
+    PidParams_t dpll;        /* DPLL stage PID (fast settle)                  */
+    PidParams_t lock;        /* LOCK stage PID (slow, narrow-band)            */
+    /* State transition thresholds + LOCK cadence */
+    float acq_threshold_ns;  /* |phase| below this → ACQ done, enter DPLL     */
+    float dpll_lock_thresh;  /* frequency error below this → enter LOCK       */
+    uint16_t lock_interval_s;/* LOCK update period [s] (default 300)          */
+    uint8_t  state;          /* last ACQ/DPLL/LOCK state (resume after warm)  */
+    uint8_t  submode;        /* 0 = pure LTIC, 1 = hybrid (reserved/future)   */
+    int8_t   polarity;       /* PWM→phase sign: 0 = auto-detect, +1/-1 forced */
+    float    centre_v;       /* ACQ centring target [V]; 0 = use range middle */
+} LticParams_t;
+
+extern LticParams_t g_ltic;
+void ltic_autotune(void);
+extern bool     g_lrn_enable;
+extern float    g_lrn_drift;
+extern float    g_lrn_damp;
+extern float    g_nn_tempco;
+extern float    g_ltic_acq_centre_gain;  /* algo 10: ACQ centring gain [LSB/V]  */
+extern float    g_ltic_acq_centre_cap;   /* algo 10: ACQ centring cap   [LSB]   */ /* algo 9: learned oscillator tempco [LSB/°C] */
+int16_t nn_thermal_holdover_step(void); /* algo 9: HO thermal steering */
+extern float    g_lrn_slope_ns_s;
+extern uint16_t g_lrn_osc_period;
+extern float    g_lrn_osc_amp_ns;
+
+/* LTIC state enum (stored in g_ltic.state) */
+enum { LTIC_ACQ = 0, LTIC_DPLL = 1, LTIC_LOCK = 2 };
+
+
 /* ---- Algorithm selector --------------------------------------------- */
 uint16_t adjustVctlPWM(uint16_t prev_pwm, uint32_t ppscount, uint8_t algo_no);
 
@@ -75,6 +122,9 @@ uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount);
 
 /* 9 — Neural network MLP (3→8→1, tanh), pre-trained weights embedded */
 uint16_t nn_mlp_ctl_loop(uint16_t pwm, uint32_t ppscount);
+#ifdef GPSDO_LTIC
+uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount);
+#endif
 
 /* ---- Helper exposed to ControlTask ---------------------------------- */
 void gpsdo_calc_averages(FreqData_t *f);

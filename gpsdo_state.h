@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -146,6 +146,7 @@ typedef struct {
 #define EVT_REPORT_TAB        (1u << 4)
 #define EVT_HALF_SECOND       (1u << 5)
 #define EVT_NEED_TUNE         (1u << 6)   /* CT: calibrate K + auto-tune PID */
+#define EVT_NEED_LTIC_CAL     (1u << 7)   /* LC: LTIC self-calibration       */
 
 /* ---- RTOS handles ------------------------------------------------------ */
 extern SemaphoreHandle_t xFreqMutex;
@@ -197,6 +198,9 @@ extern volatile uint16_t g_calib_remaining;  /* seconds left in this step */
 
 /* Warmup progress — shown on displays during OCXO warmup at boot. */
 extern volatile bool     g_warmup_active;    /* true while warming up      */
+extern volatile bool     g_warmup_enable;    /* WU 0/1 (EEPROM byte 221)   */
+extern volatile bool     g_splash_enable;    /* SPL 0/1 (EEPROM byte 231)  */
+extern volatile bool     g_flash_ring_enable; /* FR 0/1 (EEPROM byte 232)   */
 extern volatile uint16_t g_warmup_remaining; /* seconds left in warmup     */
 
 /* Survey-in progress — shown on displays during LEA-T Time Mode survey-in.

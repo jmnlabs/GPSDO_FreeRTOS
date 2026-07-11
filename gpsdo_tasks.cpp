@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -24,6 +24,8 @@
 
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
+#include "ubx_timtp.h"
+#include "GPSDO_algorithms.h"   /* g_ltic (calibrated span) for the ADC outlier gate */
 #include <Arduino.h>
 #include <string.h>
 #include <Wire.h>
@@ -51,44 +53,105 @@ float  g_ina_volt = 0.0f, g_ina_curr = 0.0f;
 
 /* ---- LTIC globals (Lars TIC) ------------------------------------------ */
 #ifdef GPSDO_LTIC
-/* Simple 10-sample circular-buffer moving average — no external library.
- * All access is from SensorTask only (single writer, other tasks read the
- * final averaged result g_ltic_voltage which is updated atomically). */
-static int16_t  s_ltic_buf[LTIC_AVG_SAMPLES];
-static uint8_t  s_ltic_idx  = 0;
-static bool     s_ltic_full = false;
-static int32_t  s_ltic_sum  = 0;
-
 volatile bool g_ltic_must_read = false;
 int16_t       g_ltic_adc_raw   = 0;
 int16_t       g_ltic_adc_avg   = 0;
 float         g_ltic_voltage   = 0.0f;
 
-/* ltic_moving_avg — feed one new sample, return averaged value */
-static int16_t ltic_moving_avg(int16_t sample)
+/* ltic_read — oversample PA1 within ONE PPS slot, take the median, gate
+ * single-sample outliers, then discharge the capacitor.
+ *
+ * WHY (replaces the old 10-sample / 10-second moving average): averaging
+ * ACROSS seconds had a ~5 s group delay (the loop corrected on stale data)
+ * and, worse, blended pre- and post-wrap voltages into phantom mid-levels —
+ * the loop saw a smooth ~30 ns/s drift that did not physically exist and
+ * "corrected" it, kicking the real phase (LOCK steps up to 152 LSB on air).
+ * A burst median WITHIN one second has no cross-second memory: no lag, no
+ * wrap blending, and single-read ADC/EMI glitches fall out of the median.
+ *
+ * Outlier gate: a jump larger than ~25%% of the detector span must repeat in
+ * the NEXT read to be believed (a real wrap persists; a glitch does not).
+ * Until confirmed, the previous accepted value is held. */
+/* Fast Vphase read, called ~300 µs after the PPS edge from vFreqRelayTask —
+ * i.e. on the ramp PEAK. Bursts the ADC, medians, applies the single-outlier
+ * gate, and publishes g_ltic_voltage. Crucially it does NOT discharge and
+ * NEVER switches the pin to open-drain: the Kaashoek detector self-clears
+ * through leakage (~25 ms ≪ 1 s pulse spacing), and driving the pin low was
+ * both unnecessary and a way to corrupt the very charge we want to measure.
+ * The pin stays INPUT_ANALOG for the whole life of the program. */
+void ltic_read_fast(void)
 {
-    s_ltic_sum -= s_ltic_buf[s_ltic_idx];
-    s_ltic_buf[s_ltic_idx] = sample;
-    s_ltic_sum += sample;
-    s_ltic_idx = (s_ltic_idx + 1) % LTIC_AVG_SAMPLES;
-    if (!s_ltic_full && s_ltic_idx == 0) s_ltic_full = true;
-    int16_t count = s_ltic_full ? LTIC_AVG_SAMPLES : (int16_t)s_ltic_idx;
-    if (count == 0) count = 1;
-    return (int16_t)(s_ltic_sum / count);
+    /* Settle onto the ramp peak. Charging ends on the picPPS edge, at most
+     * ~2 µs after the GPS-PPS edge that woke the caller; 50 µs clears the
+     * widest pulse while sitting only ~1 % down the ~5 ms leakage decay. */
+    delayMicroseconds(50);
+
+    int16_t s[LTIC_OVERSAMPLE];
+    for (int i = 0; i < LTIC_OVERSAMPLE; i++) {
+        int16_t x = (int16_t)analogRead(PIN_LTIC_VPHASE);
+        int j = i;
+        while (j > 0 && s[j-1] > x) { s[j] = s[j-1]; j--; }
+        s[j] = x;
+    }
+    int16_t med = s[LTIC_OVERSAMPLE / 2];
+    g_ltic_adc_raw = med;
+
+    static int16_t last_ok = -1, pending = -1;
+    int16_t thr = 120;
+    if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
+        float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
+        thr = (int16_t)(0.25f * span_v * 4096.0f / 3.3f);
+        if (thr < 60)  thr = 60;
+        if (thr > 400) thr = 400;
+    }
+    int16_t accepted;
+    if (last_ok < 0 || abs(med - last_ok) <= thr) {
+        accepted = med;  pending = -1;
+    } else if (pending >= 0 && abs(med - pending) <= thr) {
+        accepted = med;  pending = -1;
+    } else {
+        pending = med;   accepted = last_ok;
+    }
+    last_ok = accepted;
+    g_ltic_adc_avg = accepted;
+    g_ltic_voltage = ((float)accepted / 4096.0f) * 3.3f;
 }
 
-/* ltic_read — read PA1 ADC, compute moving average, discharge capacitor.
- * Must be called from task context (uses vTaskDelay, not delay()).
- * PA1 is reconfigured as open-drain output to discharge the 1nF capacitor,
- * then restored to INPUT_ANALOG — identical to André's original readvphase().
- */
 static void ltic_read(void)
 {
     g_ltic_must_read = false;   /* clear flag before reading so we don't miss next PPS */
 
-    g_ltic_adc_raw = (int16_t)analogRead(PIN_LTIC_VPHASE);
-    g_ltic_adc_avg = ltic_moving_avg(g_ltic_adc_raw);
-    g_ltic_voltage = ((float)g_ltic_adc_avg / 4096.0f) * 3.3f;
+    /* burst-oversample + insertion sort (N is small) → median */
+    int16_t s[LTIC_OVERSAMPLE];
+    for (int i = 0; i < LTIC_OVERSAMPLE; i++) {
+        int16_t x = (int16_t)analogRead(PIN_LTIC_VPHASE);
+        int j = i;
+        while (j > 0 && s[j-1] > x) { s[j] = s[j-1]; j--; }
+        s[j] = x;
+    }
+    int16_t med = s[LTIC_OVERSAMPLE / 2];
+    g_ltic_adc_raw = med;
+
+    /* single-outlier gate (threshold from the calibrated span when known) */
+    static int16_t last_ok = -1, pending = -1;
+    int16_t thr = 120;                                   /* ~0.10 V fallback */
+    if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
+        float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
+        thr = (int16_t)(0.25f * span_v * 4096.0f / 3.3f);
+        if (thr < 60)  thr = 60;
+        if (thr > 400) thr = 400;
+    }
+    int16_t accepted;
+    if (last_ok < 0 || abs(med - last_ok) <= thr) {
+        accepted = med;  pending = -1;                   /* normal read      */
+    } else if (pending >= 0 && abs(med - pending) <= thr) {
+        accepted = med;  pending = -1;                   /* jump confirmed   */
+    } else {
+        pending = med;   accepted = last_ok;             /* hold; await confirm */
+    }
+    last_ok = accepted;
+    g_ltic_adc_avg = accepted;
+    g_ltic_voltage = ((float)accepted / 4096.0f) * 3.3f;
 
     /* Discharge 1 nF TIC capacitor */
     pinMode(PIN_LTIC_VPHASE, OUTPUT_OPEN_DRAIN);
@@ -173,7 +236,7 @@ void vSensorTask(void *pvParameters)
     /* Initialise PA1 as analog input and take the first reading */
     pinMode(PIN_LTIC_VPHASE, INPUT_ANALOG);
     analogRead(PIN_LTIC_VPHASE);   /* dummy read to settle ADC mux */
-    ltic_read();
+    ltic_read_fast();              /* no discharge; pin stays analog */
     OUT_SERIAL.println("HW: LTIC phase input      OK  (PA1 analog)");
 #endif
 
@@ -210,14 +273,12 @@ void vSensorTask(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
 #endif
 #ifdef GPSDO_LTIC
-        /* Read Vphase as soon as the PPS ISR sets the flag.
-         * The vTaskDelay(2000) below means we might service the flag
-         * up to 2s late, which is acceptable — the voltage on the 1nF
-         * capacitor holds well beyond 2s with a high-impedance input.
-         * For better accuracy enable GPSDO_LTIC only when the hardware
-         * is actually connected (PA1 floating gives meaningless values). */
-        if (g_ltic_must_read) ltic_read();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* Vphase is now sampled in vFreqRelayTask ~300 µs after the PPS edge
+         * (ltic_read_fast), on the ramp peak. The old read here fired from
+         * this 2 s loop — far too late for a <1 ms peak — and its open-drain
+         * discharge actively corrupted the charge. Disabled; the flag is left
+         * for compatibility but no longer drives a read/discharge. */
+        g_ltic_must_read = false;
 #endif
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
@@ -428,6 +489,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
     if (f->full10)    { p=sa(buf,p,"  10s:");  p=sd(buf,p,f->avg10,   1); }
     if (f->full100)   { p=sa(buf,p," 100s:");  p=sd(buf,p,f->avg100,  2); }
     if (f->full1000)  { p=sa(buf,p,"  1ks:");  p=sd(buf,p,f->avg1000, 3); }
+    if (f->full10000) { p=sa(buf,p," 10ks:");  p=sd(buf,p,f->avg10000,4); }
     buf[p++]='\r'; buf[p++]='\n';
 
     /* PWM / Vctl */
@@ -436,6 +498,35 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
     p=sa(buf,p,"V");
     if (c->holdover_mode) p=sa(buf,p," [HOLDOVER]");
     else { p=sa(buf,p," "); p=sa(buf,p,c->trendstr); }
+    /* live self-learning telemetry: always shown when LRN is on, so the user
+     * can see it is active even before it has gathered enough to act on */
+    if (g_lrn_enable) {
+        /* algorithm number + short name, so the log says which loop is learning */
+        static const char *algo_name[] = {
+            "primitive", "forced-drift", "random-walk", "FLL-PID-man",
+            "PLL-PI-man", "PLL-PID-man", "FLL-PID-gen", "PLL-PID-gen",
+            "hybrid-FLL-PLL", "NN-MLP", "LTIC-3stage" };
+        p=sa(buf,p,"\r\nLearn: algo="); p=si(buf,p,c->active_algo);
+        p=sa(buf,p," (");
+        p=sa(buf,p,(c->active_algo <= 10) ? algo_name[c->active_algo] : "?");
+        p=sa(buf,p,") drift="); p=sd(buf,p,(double)g_lrn_drift,1);
+        p=sa(buf,p,"LSB slope="); p=sd(buf,p,(double)g_lrn_slope_ns_s,3);
+        p=sa(buf,p,"ns/s damp="); p=sd(buf,p,(double)g_lrn_damp,3);
+        if (g_lrn_osc_period) { p=sa(buf,p," osc="); p=si(buf,p,g_lrn_osc_period);
+                                p=sa(buf,p,"s/"); p=sd(buf,p,(double)g_lrn_osc_amp_ns,1); p=sa(buf,p,"ns"); }
+        else                  { p=sa(buf,p," (gathering)"); }
+        if (c->active_algo == 9) {   /* NN learned oscillator tempco */
+            p=sa(buf,p," tempco="); p=sd(buf,p,(double)g_nn_tempco,1);
+            p=sa(buf,p,"LSB/C");
+        }
+        if (c->active_algo == 10 && g_qerr_enable) {   /* sawtooth correction */
+            p=sa(buf,p," qErr=");
+            if (g_qerr_valid) { p=sd(buf,p,(double)g_qerr_ns,1); p=sa(buf,p,"ns"); }
+            else              { p=sa(buf,p,"(wait)"); }
+        }
+    } else {
+        p=sa(buf,p,"\r\nLearn: off");
+    }
     buf[p++]='\r'; buf[p++]='\n';
 
     /* Sensors */
@@ -636,9 +727,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   /* Colours (RGB565) */
   #define TFT_COL_BG      TFT_BLACK
   #define TFT_COL_HEADER  0x0A33u        /* dark navy           */
-  #define TFT_COL_LABEL   0x8C51u        /* mid grey            */
-  #define TFT_COL_VALUE   TFT_WHITE
-  #define TFT_COL_LOCK    0x07E0u        /* green               */
+  #define TFT_COL_LABEL   0x0C1Fu        /* brighter navy — frame (header is darker) */
+  #define TFT_COL_VALUE   TFT_WHITE      /* white — data values          */
+  #define TFT_COL_LOCK    0x07E0u        /* green                        */
+  #define TFT_COL_FREQ    TFT_WHITE      /* white — frequency (green on lock) */
   #define TFT_COL_HOLD    0xFC60u        /* orange              */
   #define TFT_COL_ALERT   0xF800u        /* red                 */
   #define TFT_COL_SINEL   0x3D7Fu        /* blue  (left wave)   */
@@ -705,9 +797,16 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.setTextPadding(0);
       s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, TFT_S(6), TFT_SY(4), TFT_F(2));
 
+      s_tft.drawFastHLine(0, TFT_SY(26),  TFT_W, TFT_COL_LABEL);   /* top of frame, under header */
       s_tft.drawFastHLine(0, TFT_SY(66),  TFT_W, TFT_COL_LABEL);
       s_tft.drawFastHLine(0, TFT_SY(152), TFT_W, TFT_COL_LABEL);
       s_tft.drawFastHLine(0, TFT_SY(200), TFT_W, TFT_COL_LABEL);
+      /* Vertical side rails joining the top and bottom separators at both
+       * screen edges — turns the horizontals into a closed data-area frame.
+       * Run from the header edge (26) to the bottom separator (200) so the
+       * top corners close around the frequency. Same 1px weight/colour. */
+      s_tft.drawFastVLine(0,         TFT_SY(26), TFT_SY(200) - TFT_SY(26), TFT_COL_LABEL);
+      s_tft.drawFastVLine(TFT_W - 1, TFT_SY(26), TFT_SY(200) - TFT_SY(26), TFT_COL_LABEL);
   }
 
   /* Animated boot splash: credits first, then two phase-shifted sine waves
@@ -715,78 +814,181 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
    * coincide and merge into a single thick green 10 MHz wave — a visual
    * metaphor for GPS and OCXO pulling into phase lock. A hardware
    * checklist follows. Purely cosmetic; runs once before the layout. */
+  /* Blend an RGB565 colour toward the background by factor a (0=background,
+   * 1=full colour) — used for the splash wave fade-in. Channels are unpacked,
+   * scaled and repacked. */
+  static uint16_t tft_fade565(uint16_t c, float a)
+  {
+      if (a <= 0.0f) return TFT_COL_BG;
+      if (a >= 1.0f) return c;
+      uint16_t bg = TFT_COL_BG;
+      int r  = (c  >> 11) & 0x1F, g  = (c  >> 5) & 0x3F, b  = c  & 0x1F;
+      int rb = (bg >> 11) & 0x1F, gb = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+      r = rb + (int)((r - rb) * a);
+      g = gb + (int)((g - gb) * a);
+      b = bb + (int)((b - bb) * a);
+      return (uint16_t)((r << 11) | (g << 5) | b);
+  }
+
   static void tft_splash(bool oled_ok, bool lcd_ok, bool ht_ok,
                          bool aht_ok, bool bmp_ok, bool ina_ok)
   {
       s_tft.fillScreen(TFT_COL_BG);
 
-      /* Header bar */
-      s_tft.fillRect(0, 0, TFT_W, TFT_SY(26), TFT_COL_HEADER);
-      s_tft.setTextDatum(TL_DATUM);
-      s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
-      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, TFT_S(6), TFT_SY(5), TFT_F(2));
-
-      /* --- credits drawn FIRST, and they persist through the animation --- */
+      /* --- title/credits drawn FIRST; they persist through the animation.
+       * Title sits at the frequency field's height so the splash and the live
+       * screen share a visual anchor. --- */
       s_tft.setTextDatum(MC_DATUM);
       s_tft.setTextColor(TFT_COL_LOCK, TFT_COL_BG);
-      s_tft.drawString("GPSDO", TFT_W/2, TFT_SY(48), TFT_F(6));
+      s_tft.drawString("GPSDO", TFT_W/2, TFT_SY(22), TFT_F(6));
       s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
-      s_tft.drawString("GPS-Disciplined OCXO", TFT_W/2, TFT_SY(80), TFT_F(4));
+      s_tft.drawString("GPS-Disciplined OCXO", TFT_W/2, TFT_SY(50), TFT_F(4));
       s_tft.setTextColor(0x8410, TFT_COL_BG);
-      s_tft.drawString("jmnlabs with Claude (Anthropic)", TFT_W/2, TFT_SY(214), TFT_F(1));
+      s_tft.drawString("jmnlabs with Claude (Anthropic)", TFT_W/2, TFT_SY(206), TFT_F(1));
+      s_tft.drawString("inspired by STM32-GPSDO v0.06c by Andre Balsa", TFT_W/2, TFT_SY(218), TFT_F(1));
+
+      /* The animated boot sequence below — two oscillators fading in out of
+       * phase, drifting into agreement, and merging into one green wave with a
+       * halo of victory — is a small labour of love. Some souls, however, are
+       * immune to art and just want to see "10 MHz" already. `SPL 0` is for
+       * them: title and credits, a dignified two-second pause, done. Their
+       * loss. (SPL 1 restores civilisation; saved by ES.) */
+      if (!g_splash_enable) {
+          vTaskDelay(pdMS_TO_TICKS(2000));
+          return;
+      }
 
       /* --- two phase-shifted waves converging to synchronism ---
        * Animation requires redrawing each frame, so each wave is erased
        * (drawn in background colour) before the next frame is drawn. The
-       * waves live in a band around y=130, clear of the credits above.
-       * All geometry scales with TFT_S() so the band fits the larger panel. */
-      const int   yc      = TFT_SY(130); /* wave centre line               */
+       * wave band is raised (now that the header bar is gone) to sit below
+       * the title, clear of the credits. All geometry scales with TFT_S().
+       * The waves also FADE IN: their colour is blended from the background
+       * toward full colour over the first ~3 s, a soft tonal reveal. */
+      const int   yc      = TFT_SY(108); /* wave centre line              */
       const float SPL_AMP  = TFT_S(15); /* amplitude px                   */
       const float SPL_WCYC = 5.0f;      /* cycles across the screen       */
       const float SPL_PH0  = 2.5f;      /* initial phase offset [rad]     */
-      const int   SPL_GAP  = TFT_S(12); /* initial vertical separation px */
+      const int   SPL_GAP  = TFT_S(12); /* upper wave initial offset up   */
+      const int   SPL_GAPB = TFT_S(12) + TFT_S(30); /* lower wave offset down (extra 30px) */
+      /* Convergence meets at the proportional midpoint of the two starts:
+       * upper starts at yc-SPL_GAP, lower at yc+SPL_GAPB, so they merge at
+       * yc + (SPL_GAPB - SPL_GAP)/2 rather than at yc. */
+      const int   SPL_MEET = (SPL_GAPB - SPL_GAP) / 2;
       const int   STEP     = TFT_S(4);  /* x sampling step                */
 
       #define WAVE_Y(xx,yoff,ph) \
           (yc + (yoff) + (int)(SPL_AMP * sinf((float)(xx)/(float)TFT_W*6.2831853f*SPL_WCYC + (ph))))
+
+      /* --- FADE-IN phase: the two waves hold at their initial (out-of-phase)
+       * positions and brighten from the background to full colour over ~1.5 s.
+       * This is a dedicated, motionless stage so the tonal reveal is actually
+       * visible — during the moving convergence the eye tracks motion and a
+       * slow brightness ramp is lost. No band erase between steps here: we
+       * only ever draw brighter over the same pixels, so it truly "fades up".*/
+      {
+          const int FADE_STEPS = 24;                 /* ×45ms ≈ 1.1 s */
+          int g0u = SPL_GAP, g0b = SPL_GAPB;
+          for (int fs = 1; fs <= FADE_STEPS; fs++) {
+              float a = (float)fs / (float)FADE_STEPS;   /* 0..1 brightness */
+              uint16_t colL = tft_fade565(TFT_COL_SINEL, a);
+              uint16_t colR = tft_fade565(TFT_COL_SINER, a);
+              int ptx = 0, pty = WAVE_Y(0, -g0u, SPL_PH0);
+              int pbx = 0, pby = WAVE_Y(0, +g0b, 0.0f);
+              for (int x = STEP; x <= TFT_W; x += STEP) {
+                  int ty = WAVE_Y(x, -g0u, SPL_PH0);
+                  int by = WAVE_Y(x, +g0b, 0.0f);
+                  for (int th = 0; th <= 1; th++) {   /* 2px */
+                      s_tft.drawLine(ptx, pty+th, x, ty+th, colL);
+                      s_tft.drawLine(pbx, pby+th, x, by+th, colR);
+                  }
+                  ptx = x; pty = ty; pbx = x; pby = by;
+              }
+              vTaskDelay(pdMS_TO_TICKS(45));
+          }
+      }
 
       const int FRAMES = 64;       /* convergence frames             */
       for (int fr = 0; fr <= FRAMES; fr++) {
           float k    = (float)fr / (float)FRAMES;     /* 0..1 */
           float ease = k * k * (3.0f - 2.0f * k);     /* smoothstep */
           float ph   = SPL_PH0 * (1.0f - ease);           /* phase → 0 */
-          int   g    = (int)(SPL_GAP * (1.0f - ease));   /* gap → 0   */
+          /* each wave interpolates from its own start toward the shared meet
+           * point SPL_MEET: upper from -SPL_GAP, lower from +SPL_GAPB */
+          int gu = (int)(-SPL_GAP  + (SPL_MEET - (-SPL_GAP)) * ease);
+          int gb = (int)( SPL_GAPB + (SPL_MEET -  SPL_GAPB ) * ease);
 
-          int ptx = 0, pty = WAVE_Y(0, -g, ph);
-          int pbx = 0, pby = WAVE_Y(0, +g, 0.0f);
+          int ptx = 0, pty = WAVE_Y(0, gu, ph);
+          int pbx = 0, pby = WAVE_Y(0, gb, 0.0f);
 
-          /* erase previous frame band, then draw current two waves */
+          /* erase previous frame band (covers the full initial spread) */
           s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
-                         2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+                         (int)SPL_AMP*2 + SPL_GAP + SPL_GAPB + 8, TFT_COL_BG);
+
+          /* full brightness — the fade-in already happened above */
+          uint16_t colL = TFT_COL_SINEL;
+          uint16_t colR = TFT_COL_SINER;
 
           for (int x = STEP; x <= TFT_W; x += STEP) {
-              int ty = WAVE_Y(x, -g, ph);
-              int by = WAVE_Y(x, +g, 0.0f);
-              /* 2px thickness: draw the segment twice, offset by 1px */
-              s_tft.drawLine(ptx, pty,   x, ty,   TFT_COL_SINEL);
-              s_tft.drawLine(ptx, pty+1, x, ty+1, TFT_COL_SINEL);
-              s_tft.drawLine(pbx, pby,   x, by,   TFT_COL_SINER);
-              s_tft.drawLine(pbx, pby+1, x, by+1, TFT_COL_SINER);
+              int ty = WAVE_Y(x, gu, ph);
+              int by = WAVE_Y(x, gb, 0.0f);
+              /* 2px thickness */
+              for (int th = 0; th <= 1; th++) {
+                  s_tft.drawLine(ptx, pty+th, x, ty+th, colL);
+                  s_tft.drawLine(pbx, pby+th, x, by+th, colR);
+              }
               ptx = x; pty = ty; pbx = x; pby = by;
           }
           vTaskDelay(pdMS_TO_TICKS(45));    /* ~2.9 s convergence */
       }
 
-      /* --- merge: erase band, draw one thick (4px) green wave --- */
+      /* --- merge: erase band, draw one 4px green wave --- */
       s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
-                     2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+                     (int)SPL_AMP*2 + SPL_GAP + SPL_GAPB + 8, TFT_COL_BG);
       {
-          int px0 = 0, py0 = WAVE_Y(0, 0, 0.0f);
+          int px0 = 0, py0 = WAVE_Y(0, SPL_MEET, 0.0f);
           for (int x = STEP; x <= TFT_W; x += STEP) {
-              int y = WAVE_Y(x, 0, 0.0f);
-              for (int t = -1; t <= 2; t++)   /* 4px thickness */
+              int y = WAVE_Y(x, SPL_MEET, 0.0f);
+              for (int t = -1; t <= 2; t++)   /* 4px core */
                   s_tft.drawLine(px0, py0+t, x, y+t, TFT_COL_LOCK);
               px0 = x; py0 = y;
+          }
+      }
+
+      /* --- HALO: a green glow that first SWELLS out of the locked wave, then
+       * dissipates — a clear "settling into lock" flourish. Brightness is a
+       * triangular envelope over the whole pulse (rise then fall) multiplied
+       * by a radial falloff (dimmer further from the 4px core). 12px reach,
+       * many steps and a long duration so the bloom is unmistakable. The
+       * core is redrawn each step so it stays crisp on top of the glow. */
+      {
+          const int   HALO_STEPS = 60;                 /* ×55ms ≈ 3.3 s */
+          const int   HALO_MAX   = TFT_S(12);          /* glow reach px */
+          for (int hs = 0; hs < HALO_STEPS; hs++) {
+              float u = (float)hs / (float)(HALO_STEPS - 1);   /* 0..1 */
+              /* triangular envelope: 0 → 1 at the middle → 0 */
+              float env = (u < 0.5f) ? (u * 2.0f) : (2.0f - u * 2.0f);
+              env = env * env * (3.0f - 2.0f * env);           /* smoothstep */
+
+              s_tft.fillRect(0, yc + SPL_MEET - (int)SPL_AMP - HALO_MAX - 1, TFT_W,
+                             2*((int)SPL_AMP + HALO_MAX + 1), TFT_COL_BG);
+              int px0 = 0, py0 = WAVE_Y(0, SPL_MEET, 0.0f);
+              for (int x = STEP; x <= TFT_W; x += STEP) {
+                  int y = WAVE_Y(x, SPL_MEET, 0.0f);
+                  /* glow rings, dim → outer */
+                  for (int off = HALO_MAX; off >= 3; off--) {
+                      float radial = 1.0f - (float)(off - 2) / (float)(HALO_MAX - 1);
+                      float a = env * radial * 0.85f;
+                      if (a < 0.02f) continue;
+                      uint16_t gc = tft_fade565(TFT_COL_LOCK, a);
+                      s_tft.drawLine(px0, py0-off, x, y-off, gc);
+                      s_tft.drawLine(px0, py0+off, x, y+off, gc);
+                  }
+                  for (int t = -1; t <= 2; t++)   /* crisp 4px core on top */
+                      s_tft.drawLine(px0, py0+t, x, y+t, TFT_COL_LOCK);
+                  px0 = x; py0 = y;
+              }
+              vTaskDelay(pdMS_TO_TICKS(55));
           }
       }
       #undef WAVE_Y
@@ -796,7 +998,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
       /* clear the wave band to make room for the checklist */
       s_tft.fillRect(0, yc - (int)SPL_AMP - SPL_GAP - 4, TFT_W,
-                     2*((int)SPL_AMP + SPL_GAP + 4), TFT_COL_BG);
+                     (int)SPL_AMP*2 + SPL_GAP + SPL_GAPB + 8, TFT_COL_BG);
 
       /* --- hardware checklist (rows light up sequentially) ---
        * `show` reflects whether the device is COMPILED IN (#ifdef), so a
@@ -860,22 +1062,60 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                                               false
 #endif
           },
+          /* LTIC is read-only (we sample its ADC, can't probe presence), so
+           * show [x] when compiled in — like the TM1637/TFT. */
+#ifdef GPSDO_LTIC
+          { "LTIC  phase (PA1)",      true,   true   },
+#endif
       };
 
       s_tft.setTextDatum(TL_DATUM);
       /* brief pause so the eye moves from the wave to the checklist before
        * the first item appears (otherwise the first rows are missed) */
       vTaskDelay(pdMS_TO_TICKS(600));
-      int y = TFT_SY(120);
-      for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
-          if (!rows[i].show) continue;
-          uint16_t col = rows[i].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
-          s_tft.setTextColor(col, TFT_COL_BG);
-          s_tft.drawString(rows[i].ok ? "[x]" : "[ ]", TFT_S(36), y, TFT_F(2));
-          s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
-          s_tft.drawString(rows[i].label, TFT_S(72), y, TFT_F(2));
-          y += TFT_SY(15);
-          vTaskDelay(pdMS_TO_TICKS(650));   /* slower sequential reveal */
+
+      /* Scrolling window (DAPU-style): rows reveal sequentially inside a
+       * FIXED-HEIGHT window that ends above the credits, so the credits never
+       * move and the list can be any length. Once the window is full, the
+       * content scrolls up one line — the oldest row drops off the top and the
+       * new row appears at the bottom, like a terminal. */
+      const int LIST_TOP = TFT_SY(80);
+      const int ROW_H    = TFT_SY(14);
+      const int WIN_ROWS = 6;                     /* visible rows; window ends ~192, credits at 214 */
+      const int WIN_H    = WIN_ROWS * ROW_H;
+
+      /* collect the rows that are actually shown */
+      int shown_idx[16]; int n_shown = 0;
+      for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]) && n_shown < 16; i++)
+          if (rows[i].show) shown_idx[n_shown++] = (int)i;
+
+      int first_visible = 0;                       /* index into shown_idx of top window row */
+      for (int r = 0; r < n_shown; r++) {
+          /* if this row would fall below the window, scroll up by one */
+          if (r - first_visible >= WIN_ROWS) {
+              first_visible = r - WIN_ROWS + 1;
+              s_tft.fillRect(0, LIST_TOP, TFT_W, WIN_H, TFT_COL_BG);   /* clear window */
+              /* redraw the rows now inside the window */
+              for (int k = first_visible; k <= r; k++) {
+                  int idx = shown_idx[k];
+                  int yy  = LIST_TOP + (k - first_visible) * ROW_H;
+                  uint16_t col = rows[idx].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
+                  s_tft.setTextColor(col, TFT_COL_BG);
+                  s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy, TFT_F(2));
+                  s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
+                  s_tft.drawString(rows[idx].label, TFT_S(72), yy, TFT_F(2));
+              }
+          } else {
+              /* still filling the window: just draw the new row at its slot */
+              int idx = shown_idx[r];
+              int yy  = LIST_TOP + (r - first_visible) * ROW_H;
+              uint16_t col = rows[idx].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
+              s_tft.setTextColor(col, TFT_COL_BG);
+              s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy, TFT_F(2));
+              s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
+              s_tft.drawString(rows[idx].label, TFT_S(72), yy, TFT_F(2));
+          }
+          vTaskDelay(pdMS_TO_TICKS(650));   /* sequential reveal / scroll cadence */
       }
 
       vTaskDelay(pdMS_TO_TICKS(1800));       /* final hold before operating screen */
@@ -913,9 +1153,25 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
        *   10000-s window: |e| ≤ 1.0 mHz  (1e-10)
        *    1000-s window: |e| ≤ 10  mHz  (1e-9)                          */
       {
-          uint16_t fcol = TFT_COL_VALUE;
+          uint16_t fcol = TFT_COL_FREQ;   /* white by default; green on lock */
           bool locked = false;
           bool busy = (g_svin_active || g_warmup_active || g_calib_active);
+          /* busy messages (F4, centred) and the big frequency use different
+           * text heights, so setTextPadding only wipes the CURRENT font's
+           * band — switching modes left slivers of the taller digits above/
+           * below. On every busy↔normal transition wipe the whole field. */
+          static bool tft_prev_busy = false;
+          if (tft_prev_busy != busy) {
+              tft_prev_busy = busy;
+              s_tft.fillRect(0, TFT_SY(28), TFT_W, TFT_SY(44), TFT_COL_BG);
+              /* that rect reaches y=72 across the full width and wipes the
+               * separator at y=66 and the frame side rails between 28..72 —
+               * redraw them so the frame around the frequency survives */
+              s_tft.drawFastHLine(0, TFT_SY(66), TFT_W, TFT_COL_LABEL);
+              s_tft.drawFastVLine(0,         TFT_SY(28), TFT_SY(72) - TFT_SY(28), TFT_COL_LABEL);
+              s_tft.drawFastVLine(TFT_W - 1, TFT_SY(28), TFT_SY(72) - TFT_SY(28), TFT_COL_LABEL);
+              tft_prev[0][0] = '\0';
+          }
           if (busy) {
               if (g_svin_active)
                   snprintf(s, sizeof(s), "SVIN %us %um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
@@ -939,11 +1195,28 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                * shows current PWM and Vctl, which is exactly what the user
                * wants to watch while C/CT sweeps the DAC. */
           } else {
-          if      (f->full10000) { double e = f->avg10000 - 10000000.0;
-                                   locked = (e > -0.001 && e < 0.001); }
-          else if (f->full1000)  { double e = f->avg1000  - 10000000.0;
-                                   locked = (e > -0.010 && e < 0.010); }
-          if (strncmp(c->trendstr,"hit",3) == 0) locked = true;
+          /* Green must mean a TRUSTWORTHY, CURRENT lock — not the echo of a
+           * long averaging window (a 1000-s average keeps showing ~10 MHz for
+           * minutes after discipline is lost, e.g. when LTIC drops to ACQ).
+           *  - algo 10 (LTIC): the loop has an authoritative live state, so
+           *    green comes ONLY from trend "LOCK"; no average fallback.
+           *  - algos 0-9: no live lock flag exists ("hit" is rare), so the
+           *    long-window criterion stays, but it must be BACKED by the
+           *    fast 10-s average still sitting near 10 MHz (±50 mHz) —
+           *    losing discipline now kills the green in ~10 s, not minutes. */
+          if (c->active_algo == 10) {
+              locked = (strncmp(c->trendstr,"LOCK",4) == 0);
+          } else {
+              if      (f->full10000) { double e = f->avg10000 - 10000000.0;
+                                       locked = (e > -0.001 && e < 0.001); }
+              else if (f->full1000)  { double e = f->avg1000  - 10000000.0;
+                                       locked = (e > -0.010 && e < 0.010); }
+              if (locked && f->full10) {
+                  double e10 = f->avg10 - 10000000.0;
+                  if (e10 < -0.050 || e10 > 0.050) locked = false;  /* stale echo */
+              }
+              if (strncmp(c->trendstr,"hit",3) == 0) locked = true;
+          }
 
           if      (c->holdover_mode) fcol = TFT_COL_HOLD;
           else if (locked)           fcol = TFT_COL_LOCK;
@@ -973,7 +1246,9 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #else
               s_tft.setTextSize(3);   /* font1 x3 (18x24)                   */
 #endif
-              s_tft.drawString(s, TFT_W/2, TFT_SY(30));
+              /* +4px down: bare digits have no descenders and read
+               * optically high in the band — nudge to sit visually centred */
+              s_tft.drawString(s, TFT_W/2, TFT_SY(37));
               s_tft.setTextSize(1);
           }
           s_tft.setTextDatum(TL_DATUM);
@@ -982,70 +1257,98 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
       /* ---- info grid, left column ---- */
       if (g->valid)
-          snprintf(s,sizeof(s),"UTC:%02d:%02d:%02d %s", g->hours,g->mins,g->secs,
+          snprintf(s,sizeof(s),"UTC: %02d:%02d:%02d %s", g->hours,g->mins,g->secs,
                    day_of_week_str(g->day,g->month,g->year));
-      else snprintf(s,sizeof(s),"UTC:--:--:--");
+      else snprintf(s,sizeof(s),"UTC: --:--:--");
       tft_val(1, TFT_COL_L, TFT_GRID_Y+0*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
-      if (g->valid) snprintf(s,sizeof(s),"%02d/%02d/%04d", g->day,g->month,g->year);
-      else          snprintf(s,sizeof(s),"--/--/----");
+      if (g->valid) snprintf(s,sizeof(s),"DATE: %02d/%02d/%04d", g->day,g->month,g->year);
+      else          snprintf(s,sizeof(s),"DATE: --/--/----");
       tft_val(2, TFT_COL_L, TFT_GRID_Y+1*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
-      snprintf(s,sizeof(s),"Up %s %s", u->days_str, u->time_str);
+      snprintf(s,sizeof(s),"Uptime: %s %s", u->days_str, u->time_str);
       tft_val(3, TFT_COL_L, TFT_GRID_Y+2*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
-      snprintf(s,sizeof(s),"Algo:%u  %s", c->active_algo, c->trendstr);
+      snprintf(s,sizeof(s),"Algo: %u %s", c->active_algo, c->trendstr);
       tft_val(4, TFT_COL_L, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       { static char fv[8];
         double vctl = ((double)c->avg_vctl_adc / 4096.0) * 3.3;
         dtostrf(vctl, 5, 3, fv);
-        snprintf(s,sizeof(s),"PWM:%5u V:%s", c->pwm_output, fv); }
+        snprintf(s,sizeof(s),"PWM:%5u Vct:%sV", c->pwm_output, fv); }
       tft_val(5, TFT_COL_L, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       /* ---- info grid, right column ---- */
       if (g->pos_valid) {
           if (g->time_mode) {
-              snprintf(s,sizeof(s),"Sat:%2d HDOP:TIME", g->sats);
+              snprintf(s,sizeof(s),"Sat: %2d HDOP: TIME", g->sats);
           } else {
               static char fhd[8]; dtostrf((double)g->hdop/100.0,4,2,fhd);
-              snprintf(s,sizeof(s),"Sat:%2d HDOP:%s", g->sats, fhd);
+              snprintf(s,sizeof(s),"Sat: %2d HDOP: %s", g->sats, fhd);
           }
-      } else snprintf(s,sizeof(s),"Sat:%2d  no fix", g->sats);
+      } else snprintf(s,sizeof(s),"Sat: %2d no fix", g->sats);
       tft_val(6, TFT_COL_R, TFT_GRID_Y+0*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (g->pos_valid) { static char fl[12]; dtostrf(g->lat,10,6,fl);
-          snprintf(s,sizeof(s),"Lat:%s",fl); }
+          snprintf(s,sizeof(s),"Lat: %s",fl); }
       else snprintf(s,sizeof(s),"Lat: ---");
       tft_val(7, TFT_COL_R, TFT_GRID_Y+1*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (g->pos_valid) { static char fn[12]; dtostrf(g->lon,10,6,fn);
-          snprintf(s,sizeof(s),"Lon:%s",fn); }
+          snprintf(s,sizeof(s),"Lon: %s",fn); }
       else snprintf(s,sizeof(s),"Lon: ---");
       tft_val(8, TFT_COL_R, TFT_GRID_Y+2*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
-      if (g->pos_valid) snprintf(s,sizeof(s),"Alt:%5dm",(int)g->alt);
+      if (g->pos_valid) snprintf(s,sizeof(s),"Alt:  %dm",(int)g->alt);
       else              snprintf(s,sizeof(s),"Alt: ---");
       tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (ina_ok) { static char fv[10],fi[10];
           dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
-          snprintf(s,sizeof(s),"INA:%sV %smA",fv,fi); }
+          snprintf(s,sizeof(s),"INA: %sV %smA",fv,fi); }
       else snprintf(s,sizeof(s),"INA: ---");
       tft_val(10, TFT_COL_R, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       /* ---- sensor row ---- */
       if (bmp_ok) { static char ft[8],fp[10];
-          dtostrf(g_bmp_temp,4,2,ft); dtostrf(g_bmp_pres,7,2,fp);
-          snprintf(s,sizeof(s),"BMP:%sC %shPa",ft,fp); }
+          dtostrf(g_bmp_temp,4,2,ft); dtostrf(g_bmp_pres,6,2,fp);
+          snprintf(s,sizeof(s),"BMP: %sC %shPa",ft,fp); }
       else snprintf(s,sizeof(s),"BMP: ---");
       tft_val(11, TFT_COL_L, TFT_SENS_Y, TFT_S(156), TFT_COL_VALUE, s);
 
       if (aht_ok) { static char ft[8],fh[8];
           dtostrf(g_aht_temp,4,2,ft); dtostrf(g_aht_humi,4,2,fh);
-          snprintf(s,sizeof(s),"AHT:%sC %s%%rH",ft,fh); }
+          snprintf(s,sizeof(s),"AHT: %sC %s%%rH",ft,fh); }
       else snprintf(s,sizeof(s),"AHT: ---");
       tft_val(12, TFT_COL_R, TFT_SENS_Y, TFT_S(148), TFT_COL_VALUE, s);
+
+#ifdef GPSDO_LTIC
+      /* ---- LTIC phase row (only when the TIC hardware is built in) ----
+       * Preview/telemetry only — the loop does not yet discipline on this.
+       * Shows the latched TIC voltage; if LTIC_NS_PER_VOLT is calibrated
+       * (non-zero) it also shows the derived phase in ns. */
+      {
+          static char fv[8]; dtostrf((double)g_ltic_voltage, 5, 3, fv);
+          if (LTIC_NS_PER_VOLT != 0.0f) {
+              double ns = (double)g_ltic_voltage * (double)LTIC_NS_PER_VOLT;
+              snprintf(s, sizeof(s), "Vph: %sV %ldns", fv, (long)ns);
+          } else {
+              snprintf(s, sizeof(s), "Vph: %sV", fv);
+          }
+      }
+      tft_val(13, TFT_COL_L, TFT_SENS_Y + TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
+
+      /* Vdd (MCU 3.3 V rail) from the internal reference: VREFINT gives
+       * Vdd = 1.21 V * 4096 / adc. Same formula as the serial telemetry. */
+      {
+          static char fv[8];
+          float vdd = (c->avg_vdd_adc > 0)
+                    ? (float)((1.21 * 4096.0) / (double)c->avg_vdd_adc) : 0.0f;
+          dtostrf(vdd, 4, 2, fv);
+          snprintf(s, sizeof(s), "Vdd: %sV", fv);
+      }
+      tft_val(14, TFT_COL_R, TFT_SENS_Y + TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
+#endif
 
       /* ---- status bar (full redraw only on state change) ---- */
       {
@@ -1070,267 +1373,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
               s_tft.setTextDatum(MC_DATUM);
               s_tft.setTextColor(TFT_BLACK, bg);
               s_tft.setTextPadding(0);
-              s_tft.drawString(txt, TFT_W/2, TFT_STATUS_Y + TFT_SY(18), TFT_F(4));
+              /* +2px down: all-caps text has no descenders and sits
+               * optically high against the mixed-case elsewhere */
+              s_tft.drawString(txt, TFT_W/2, TFT_STATUS_Y + TFT_SY(20), TFT_F(4));
               s_tft.setTextDatum(TL_DATUM);
           }
       }
   }
 #endif /* GPSDO_TFT */
 
-/* ======================================================================
- * SPI→T6963C bridge (PowerTip PG240128, 240x128 mono)
- *
- * *** EXPERIMENTAL / UNTESTED — see the banner in gpsdo_config.h ***
- * This backend compiles and the protocol matches the bridge firmware, but
- * the link has not yet worked cleanly on real hardware: long-wire/breadboard
- * bring-up showed oscilloscope ringing and CS-edge glitches (the same on the
- * proven reference master), i.e. a signal-integrity problem to be solved in
- * hardware before this is trusted. Leave GPSDO_T6963C disabled until then.
- *
- * Alternative graphical display to the TFT. Talks to the external
- * "T6963C_SPI_bridge" over SPI1 with high-level drawing commands
- * (T6963C_Bridge.h). Layout is a condensed version of the TFT screen:
- *
- *   y  0..17   header  : "GPSDO v0.51"            "14:32:45"   (NCEN10)
- *   y 18..54   freq    : "10000000.000 Hz"                     (LOGISOSO28)
- *   y 59..80   status  : [LOCK]  A7 hit   12 sat              (8x13B/6x13)
- *   y 82..117  values  : PWM/Vctl, INA, sensors               (6x13)
- *   y 120..127 svin bar: progress() during survey-in
- *
- * Mono panel → colour cues become inversion: the lock/holdover state is a
- * filled (inverted) box around the status word. One batched transaction per
- * refresh (single READY wait), with the library's auto-split as a safety net.
- * ====================================================================== */
-#ifdef GPSDO_T6963C
-  #include "T6963C_Bridge.h"
-
-  static T6963C_Bridge s_lcd(PIN_T6963C_CS, PIN_T6963C_READY, T6963C_SPI_HZ);
-  static bool s_t6963c_ok = false;
-
-  /* Cache of last-drawn strings so we can skip a full repaint when nothing
-   * changed (saves SPI traffic). Indexed: 0 freq,1 hdr-time,2 status,
-   * 3 pwm,4 ina,5 sensor. */
-  static char t69_prev[6][40];
-  static uint8_t t69_prev_state = 0xFF;
-
-  /* Panel geometry */
-  #define T69_W      240
-  #define T69_H      128
-  #define T69_FREQ_Y  20
-  #define T69_STAT_Y  60
-  #define T69_VAL_Y   84
-  #define T69_VROW    13
-  #define T69_BAR_Y  120
-
-  static void t6963c_init(void)
-  {
-      SPI.begin();
-      s_lcd.begin();
-      s_lcd.setReadyTimeout(1000);
-      /* Wait for the bridge to finish its OWN power-on sequence before the
-       * first frame. Both boards power up together, but the bridge only
-       * enables its SPI2 slave AFTER u8g2.begin() (T6963C init over the slow
-       * 8080 bus) and autotest() (renders a test pattern). Until then it
-       * cannot receive a single byte, so an early splash is lost and the
-       * autotest pattern stays on screen. 200 ms was too short; give a
-       * generous margin. vTaskDelay yields (runs in vDisplayTask). */
-      vTaskDelay(pdMS_TO_TICKS(800));
-      s_t6963c_ok = true;
-      for (uint8_t i = 0; i < 6; i++) t69_prev[i][0] = '\0';
-      OUT_SERIAL.println("T6963C: bridge init (SPI1 PA5/PA7, CS=PB13, READY=PB12)");
-  }
-
-  /* Static boot splash: logo + subtitle + hardware checklist. No animation —
-   * the bridge renders via batched SPI, so a smooth wave would be costly and
-   * add little on a small mono panel. */
-  static void t6963c_splash(bool oled_ok, bool lcd_ok, bool ht_ok,
-                            bool aht_ok, bool bmp_ok, bool ina_ok)
-  {
-      (void)oled_ok; (void)lcd_ok; (void)ht_ok;
-      /* One batch = one transaction = one READY wait, exactly like the
-       * proven reference master. Sending each command as its own
-       * transaction worked less reliably during bring-up. */
-      s_lcd.batchBegin();
-      s_lcd.clear();
-      s_lcd.frameRect(0, 0, T69_W, T69_H);
-      s_lcd.setFontPos(FPOS_TOP);
-      s_lcd.setFont(FONT_LOGISOSO28);
-      s_lcd.str(20, 4, "GPSDO");
-      s_lcd.setFont(FONT_NCEN10);
-      s_lcd.str(150, 18, PROGRAM_VERSION);
-      s_lcd.setFont(FONT_6x13);
-      s_lcd.str(8, 40, "GPS-Disciplined OCXO");
-      s_lcd.hline(0, 56, T69_W);
-
-      /* hardware checklist */
-      char line[28];
-      uint8_t y = 62;
-      s_lcd.setFont(FONT_6x10);
-      snprintf(line, sizeof(line), "AHT %s  BMP %s",
-               aht_ok ? "ok" : "--", bmp_ok ? "ok" : "--");
-      s_lcd.str(8, y, line); y += 12;
-      snprintf(line, sizeof(line), "INA %s", ina_ok ? "ok" : "--");
-      s_lcd.str(8, y, line); y += 12;
-      s_lcd.str(8, y, "jmnlabs + Claude");
-      s_lcd.setFontPos(FPOS_BASELINE);
-      s_lcd.batchEnd(true);   /* pack + auto-SEND, one transaction */
-  }
-
-  /* One field, with change-cache. Returns true if it (re)drew. */
-  static bool t69_field(uint8_t idx, int16_t x, int16_t y, uint8_t fontId,
-                        const char *s)
-  {
-      if (strncmp(t69_prev[idx], s, sizeof(t69_prev[0]) - 1) == 0)
-          return false;
-      strncpy(t69_prev[idx], s, sizeof(t69_prev[0]) - 1);
-      t69_prev[idx][sizeof(t69_prev[0]) - 1] = '\0';
-      s_lcd.setFont(fontId);
-      s_lcd.str(x, y, s);
-      return true;
-  }
-
-  static void t6963c_update(const GpsData_t *g, const FreqSnap_t *f,
-                            const CtrlData_t *c, const Uptime_t *u,
-                            bool aht_ok, bool bmp_ok, bool ina_ok)
-  {
-      (void)u;
-      char s[40];
-
-      /* Decide the operating state (mirrors the TFT status bar). */
-      uint8_t st;
-      if      (c->holdover_mode && c->holdover_auto) st = 3;
-      else if (c->holdover_mode)                     st = 2;
-      else if (g->pos_valid)                         st = 1;
-      else                                           st = 0;
-
-      bool busy = (g_svin_active || g_warmup_active || g_calib_active);
-
-      /* Build everything into one batched transaction. */
-      s_lcd.batchBegin();
-      s_lcd.setFontPos(FPOS_TOP);
-
-      /* First update after the splash wipes the panel so the splash content
-       * doesn't linger. In addition, force a periodic full repaint: if the
-       * bridge is ever reset while the master keeps running (its autotest
-       * pattern reappears and our per-field cache would otherwise suppress
-       * redraws), this clears it and repaints everything within ~20 s, so
-       * the screen self-heals without needing a master restart. */
-      static bool     first_paint = true;
-      static uint16_t repaint_ctr = 0;
-      bool full_repaint = first_paint || (++repaint_ctr >= 20);
-      if (full_repaint) {
-          first_paint = false;
-          repaint_ctr = 0;
-          s_lcd.clear();
-          for (uint8_t i = 0; i < 6; i++) t69_prev[i][0] = '\0';
-          t69_prev_state = 0xFF;
-      }
-
-      /* ---- header: static title + live time (right) ---- */
-      static bool hdr_drawn = false;
-      if (full_repaint) hdr_drawn = false;   /* clear() wiped it — redraw */
-      if (!hdr_drawn) {
-          hdr_drawn = true;
-          s_lcd.setFont(FONT_NCEN10);
-          s_lcd.str(2, 1, PROGRAM_NAME);
-          s_lcd.hline(0, 17, T69_W);
-      }
-      if (g->valid) snprintf(s, sizeof(s), "%02d:%02d:%02d", g->hours, g->mins, g->secs);
-      else          snprintf(s, sizeof(s), "--:--:--");
-      t69_field(1, 150, 1, FONT_NCEN10, s);
-
-      /* ---- frequency (big) ---- */
-      if (busy) {
-          if (g_svin_active)
-              snprintf(s, sizeof(s), "SVIN %us %um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
-          else if (g_warmup_active)
-              snprintf(s, sizeof(s), "WARMUP %us", (unsigned)g_warmup_remaining);
-          else
-              snprintf(s, sizeof(s), "CAL %us", (unsigned)g_calib_remaining);
-          if (strncmp(t69_prev[0], s, sizeof(t69_prev[0]) - 1) != 0) {
-              strncpy(t69_prev[0], s, sizeof(t69_prev[0]) - 1);
-              s_lcd.setColor(0); s_lcd.box(0, T69_FREQ_Y, T69_W, 30); s_lcd.setColor(1);
-              s_lcd.setFont(FONT_10x20);
-              s_lcd.str(4, T69_FREQ_Y + 4, s);
-          }
-      } else {
-          if      (f->full10000) { static char ff[20]; dtostrf(f->avg10000,12,3,ff); snprintf(s,sizeof(s),"%sHz",ff); }
-          else if (f->full1000)  { static char ff[20]; dtostrf(f->avg1000, 12,3,ff); snprintf(s,sizeof(s),"%sHz",ff); }
-          else if (f->full100)   { static char ff[20]; dtostrf(f->avg100,  12,2,ff); snprintf(s,sizeof(s),"%sHz",ff); }
-          else if (f->full10)    { static char ff[20]; dtostrf(f->avg10,   12,1,ff); snprintf(s,sizeof(s),"%sHz",ff); }
-          else if (f->calcfreqint > 0) { snprintf(s,sizeof(s),"%lu Hz",(unsigned long)f->calcfreqint); }
-          else snprintf(s,sizeof(s),"no signal");
-          if (strncmp(t69_prev[0], s, sizeof(t69_prev[0]) - 1) != 0) {
-              strncpy(t69_prev[0], s, sizeof(t69_prev[0]) - 1);
-              s_lcd.setColor(0); s_lcd.box(0, T69_FREQ_Y, T69_W, 30); s_lcd.setColor(1);
-              s_lcd.setFont(FONT_LOGISOSO16);
-              s_lcd.str(2, T69_FREQ_Y + 4, s);
-          }
-      }
-
-      /* ---- status row: [STATE]  algo+trend   sats ---- */
-      if (st != t69_prev_state) {
-          t69_prev_state = st;
-          const char *txt;
-          switch (st) {
-              case 1:  txt = "LOCK"; break;
-              case 2:  txt = "HOLD"; break;
-              case 3:  txt = "H-LOST"; break;
-              default: txt = "NOFIX"; break;
-          }
-          /* inverted (filled) box behind the state word = colour substitute */
-          s_lcd.setColor(0); s_lcd.box(0, T69_STAT_Y - 1, 64, 16); s_lcd.setColor(1);
-          s_lcd.box(0, T69_STAT_Y - 1, 64, 16);          /* white block */
-          s_lcd.setColor(0);                             /* black text on white */
-          s_lcd.setFont(FONT_8x13B);
-          s_lcd.str(4, T69_STAT_Y, txt);
-          s_lcd.setColor(1);
-      }
-      snprintf(s, sizeof(s), "A%u %s", c->active_algo, c->trendstr);
-      t69_field(2, 70, T69_STAT_Y, FONT_6x13, s);
-      { char sat[16]; snprintf(sat, sizeof(sat), "%2d sat", g->sats);
-        /* sats reuse cache slot 2's neighbour — draw unconditionally, cheap */
-        s_lcd.setFont(FONT_6x13); s_lcd.str(168, T69_STAT_Y, sat); }
-
-      /* ---- value rows ---- */
-      { static char fv[10]; double vctl = ((double)c->avg_vctl_adc/4096.0)*3.3;
-        dtostrf(vctl,5,3,fv);
-        snprintf(s,sizeof(s),"PWM%5u %sV", c->pwm_output, fv); }
-      t69_field(3, 4, T69_VAL_Y + 0*T69_VROW, FONT_6x13, s);
-
-      if (ina_ok) { static char fv[10],fi[10];
-          dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
-          snprintf(s,sizeof(s),"%sV %smA",fv,fi); }
-      else snprintf(s,sizeof(s),"INA ---");
-      t69_field(4, 4, T69_VAL_Y + 1*T69_VROW, FONT_6x13, s);
-
-      if (bmp_ok || aht_ok) {
-          double t = bmp_ok ? g_bmp_temp : g_aht_temp;
-          static char ft[8]; dtostrf(t,4,1,ft);
-          if (bmp_ok) { static char fp[8]; dtostrf(g_bmp_pres,6,1,fp);
-                        snprintf(s,sizeof(s),"%sC %shPa",ft,fp); }
-          else        { static char fh[8]; dtostrf(g_aht_humi,4,1,fh);
-                        snprintf(s,sizeof(s),"%sC %s%%rH",ft,fh); }
-      } else snprintf(s,sizeof(s),"sensors ---");
-      t69_field(5, 4, T69_VAL_Y + 2*T69_VROW, FONT_6x13, s);
-
-      /* ---- survey-in progress bar (only while surveying) ---- */
-      if (g_svin_active) {
-          /* acc shrinks toward the limit; show inverse as % toward done.
-           * Rough: 0..(2*limit) maps to 100..0%. */
-          uint32_t lim = GPSDO_SVIN_ACC_LIMIT / 1000u; if (!lim) lim = 1;
-          uint32_t am = g_svin_acc_m;
-          uint8_t pct;
-          if (am >= 2*lim) pct = 0;
-          else if (am <= lim) pct = 100;
-          else pct = (uint8_t)(100u - (100u * (am - lim)) / lim);
-          s_lcd.progress(4, T69_BAR_Y, T69_W - 8, 6, pct);
-      }
-
-      s_lcd.setFontPos(FPOS_BASELINE);
-      s_lcd.batchEnd(true);   /* pack + send everything, then SEND to panel */
-  }
-#endif /* GPSDO_T6963C */
 
 /* ======================================================================
  * TM1637
@@ -1659,10 +1710,6 @@ void vDisplayTask(void *pvParameters)
     tft_init();
 #endif
 
-#ifdef GPSDO_T6963C
-    /* SPI→T6963C bridge on exclusive SPI1 — init directly */
-    t6963c_init();
-#endif
 
 #ifdef GPSDO_HT16K33
     /* HT16K33 shares I2C — init under Wire mutex.
@@ -1712,38 +1759,6 @@ void vDisplayTask(void *pvParameters)
     }
 #endif
 
-#ifdef GPSDO_T6963C
-    /* Same checklist splash on the T6963C bridge. */
-    if (s_t6963c_ok) {
-        for (int w = 0; w < 100 && !s_sensors_probed; w++)
-            vTaskDelay(pdMS_TO_TICKS(10));
-
-        bool oled_ok = false, lcd_ok = false, ht_ok = false;
-        bool aht_ok = false, bmp_ok = false, ina_ok = false;
-#ifdef GPSDO_OLED
-        oled_ok = s_oled_ok;
-#endif
-#ifdef GPSDO_LCD_20x4
-        lcd_ok = s_lcd_ok;
-#endif
-#ifdef GPSDO_HT16K33
-        ht_ok = s_ht_ok;
-#endif
-#ifdef GPSDO_AHT10
-        aht_ok = s_aht_ok;
-#endif
-#ifdef GPSDO_BMP280_I2C
-        bmp_ok = s_bmp_ok;
-#endif
-#ifdef GPSDO_INA219
-        ina_ok = s_ina_ok;
-#endif
-        /* Send the splash once the bridge has had time to finish its own
-         * power-on init. Kept simple — one batch, like the proven reference. */
-        t6963c_splash(oled_ok, lcd_ok, ht_ok, aht_ok, bmp_ok, ina_ok);
-        vTaskDelay(pdMS_TO_TICKS(1500));   /* let the splash be readable */
-    }
-#endif
 
     /* ---- State for alternating displays ---- */
 #ifdef GPSDO_OLED
@@ -1834,13 +1849,32 @@ void vDisplayTask(void *pvParameters)
             }
         }
 
-        /* ---- Serial report (skipped when paused via RP command) ---- */
-        if (!g_report_paused) {
-            EventBits_t bits = xEventGroupGetBits(xSysEvents);
-            if (bits & EVT_REPORT_TAB)
-                print_tab_report  (&snap_g, &snap_f, &snap_c, &snap_u);
-            else
-                print_human_report(&snap_g, &snap_f, &snap_c, &snap_u);
+        /* ---- Serial report (skipped when paused via RP command, and —
+         * without Bluetooth — muted during GPS tunnel so telemetry never
+         * pollutes the NMEA/UBX stream on the shared USB port; with BT the
+         * report lives on Serial2 and does not clash with the USB bridge) */
+        EventBits_t bits = xEventGroupGetBits(xSysEvents);
+#ifndef GPSDO_BLUETOOTH
+        bool tunnel_mute = (bits & EVT_TUNNEL_MODE) != 0;
+#else
+        bool tunnel_mute = false;
+#endif
+        if (!g_report_paused && !tunnel_mute) {
+            /* Emit the serial report ONCE PER PPS. vDisplayTask is notified
+             * from two ~1 Hz sources — the frequency relay (per PPS) and the
+             * GPS parser (per time sentence) — so with a fix it wakes twice a
+             * second and used to print two report lines per second (spotted by
+             * Dan Wiering in RD mode). The display refresh below still runs on
+             * every wake for smoothness; only the serial line is gated, on a
+             * change of the PPS counter. */
+            static uint32_t s_last_report_pps = 0xFFFFFFFFu;
+            if (snap_f.ppscount != s_last_report_pps) {
+                s_last_report_pps = snap_f.ppscount;
+                if (bits & EVT_REPORT_TAB)
+                    print_tab_report  (&snap_g, &snap_f, &snap_c, &snap_u);
+                else
+                    print_human_report(&snap_g, &snap_f, &snap_c, &snap_u);
+            }
         }
 
         /* ==============================================================
@@ -2221,11 +2255,6 @@ void vDisplayTask(void *pvParameters)
                        s_aht_ok, s_bmp_ok, s_ina_ok);
 #endif
 
-#ifdef GPSDO_T6963C
-        if (s_t6963c_ok)
-            t6963c_update(&snap_g, &snap_f, &snap_c, &snap_u,
-                          s_aht_ok, s_bmp_ok, s_ina_ok);
-#endif
 
         /* ==============================================================
          * TM1637 clock update
@@ -2256,10 +2285,33 @@ void vDisplayTask(void *pvParameters)
          * pos_valid (not valid) is the true "GPS locked" indicator:
          * valid turns true on the first NMEA time sentence, before any
          * position lock, so it would show a stale 00:00:00. */
-        if (g_svin_active || g_warmup_active) {
-            s_tm.setSegments(mid_dashes, TM1637_MAX_DIGITS);  /* ------ svin/warmup */
+        if (g_warmup_active) {
+            /* warmup: lowercase-'o' spinner on EVERY digit, phase-shifted per
+             * digit so the chase travels across the display like a wave */
+            static const uint8_t spin_o[4] = { SEG_G, SEG_C, SEG_D, SEG_E };
+            uint8_t w[TM1637_MAX_DIGITS];
+            uint8_t f = (uint8_t)((millis() / 200u) % 4u);
+            for (uint8_t i = 0; i < TM1637_MAX_DIGITS; i++)
+                w[i] = spin_o[(f + i) % 4u];
+            s_tm.setSegments(w, TM1637_MAX_DIGITS);
+        } else if (g_svin_active) {
+            /* survey-in: UPPER-'o' spinner (A→B→G→F chase around the top
+             * loop of the digit), phase-shifted per digit — distinct from
+             * the warmup's lower-'o' wave */
+            static const uint8_t spin_top[4] = { SEG_A, SEG_B, SEG_G, SEG_F };
+            uint8_t w2[TM1637_MAX_DIGITS];
+            uint8_t f2 = (uint8_t)((millis() / 200u) % 4u);
+            for (uint8_t i = 0; i < TM1637_MAX_DIGITS; i++)
+                w2[i] = spin_top[(f2 + i) % 4u];
+            s_tm.setSegments(w2, TM1637_MAX_DIGITS);
         } else if (g_calib_active) {
-            s_tm.setSegments(seg_cal, TM1637_MAX_DIGITS);
+            /* "CAL" + a spinner on digit 4: segments G→C→D→E chase in a loop,
+             * tracing the outline of a lowercase 'o' — visual "working" cue */
+            static const uint8_t spin_o[4] = { SEG_G, SEG_C, SEG_D, SEG_E };
+            uint8_t seg_cal_anim[TM1637_MAX_DIGITS];
+            memcpy(seg_cal_anim, seg_cal, sizeof(seg_cal_anim));
+            seg_cal_anim[3] = spin_o[(millis() / 200u) % 4u];
+            s_tm.setSegments(seg_cal_anim, TM1637_MAX_DIGITS);
         } else if (!snap_g.pos_valid) {
             s_tm.setSegments(low_oooo_s, TM1637_MAX_DIGITS);
         } else {
@@ -2310,14 +2362,22 @@ void vDisplayTask(void *pvParameters)
         if (s_ht_ok &&
             xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(20)) == pdTRUE)
         {
-            if (g_svin_active || g_warmup_active) {
-                /* survey-in / warmup → four dashes (segment G) */
-                ht_write(0x40, 0x40, 0x40, 0x40, false);
+            if (g_warmup_active) {
+                /* warmup: 'o' spinner on every digit, phase-shifted (wave) */
+                static const uint8_t sp[4] = { 0x40, 0x04, 0x08, 0x10 };  /* g,c,d,e */
+                uint8_t f = (uint8_t)((millis() / 200u) % 4u);
+                ht_write(sp[f], sp[(f+1)%4], sp[(f+2)%4], sp[(f+3)%4], false);
+            } else if (g_svin_active) {
+                /* survey-in: upper-'o' spinner (a→b→g→f), wave across digits */
+                static const uint8_t st7[4] = { 0x01, 0x02, 0x40, 0x20 };  /* a,b,g,f */
+                uint8_t f2 = (uint8_t)((millis() / 200u) % 4u);
+                ht_write(st7[f2], st7[(f2+1)%4], st7[(f2+2)%4], st7[(f2+3)%4], false);
             } else if (g_calib_active) {
-                /* "CAL" + tens-of-seconds digit, colon off.
-                 * 7-seg: C=A,D,E,F ; A=A,B,C,E,F,G ; L=D,E,F */
+                /* "CAL" + lowercase-'o' spinner on digit 4 (G→C→D→E chase),
+                 * colon off. 7-seg: C=A,D,E,F ; A=A,B,C,E,F,G ; L=D,E,F */
                 const uint8_t SEG_C7 = 0x39, SEG_A7 = 0x77, SEG_L7 = 0x38;
-                uint8_t d = ht_digit[(g_calib_remaining / 10) % 10];
+                static const uint8_t spin_o7[4] = { 0x40, 0x04, 0x08, 0x10 };  /* g,c,d,e */
+                uint8_t d = spin_o7[(millis() / 200u) % 4u];
                 ht_write(SEG_C7, SEG_A7, SEG_L7, d, false);
             } else if (!snap_g.pos_valid) {
                 ht_write(HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);

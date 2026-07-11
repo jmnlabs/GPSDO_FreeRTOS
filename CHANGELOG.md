@@ -12,6 +12,876 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.91-rtos] — 2026-07-11
+
+### Added
+- **LC calibration — anchored operating point + local-slope ns/V (Option D).**
+  The ramp phase detector is exponential (1k/1n, τ≈1 µs), so ns/V is not
+  constant along the ramp and a whole-transit average (range/span) drifted
+  ~15–20 % between runs depending on where the picDIV arm parked the phase.
+  ns/V is now taken from the LOCAL slope dV/dt in a window around a fixed
+  operating point (LTIC_ZERO_ANCHOR_V = 1.85 V). zero_offset is anchored to
+  that point — the repeatable middle of the ramp, clear of the detector dead
+  zones Dan Wiering measured (the Schottky drop + pull-down below ~0.05 V, and
+  the ADC rail/wraparound near 3.3 V). If a sweep never crosses the anchor band
+  the code falls back to the previous range/span average and says so.
+
+  Bench findings across several 1 s-resolved LC runs:
+  * The anchor is exact — back-to-back runs land zero_offset on 1.8500 V every
+    time.
+  * Run-to-run ns/V spread fell from ~15–20 % (old range/span average) to a few
+    percent. With both runs swept at the SAME rate it is ~2.8 %; the residual is
+    dominated by the sweep-rate quantisation, not the slope fit — avg100 resolves
+    the rate to 1 ns/s, so a "−5" vs "−6" label carries ±0.5 ns/s and the two
+    ns/V confidence bands overlap. This does not hurt LOCK: the loop uses the
+    exact ns/V it measured, at the voltage where it actually works.
+  * The fit window was widened to ±0.20 V (LTIC_ANCHOR_WIN_V): more points in
+    the band (~70 vs ~35) average down the ADC noise, taking the same-rate
+    spread from ~5.9 % at ±0.10 V to ~2.8 %.
+- **LC per-second diagnostic log.** During the sampling sweep LC now prints one
+  `t=/V=/n=` line per second, making the whole ramp visible in a capture (used
+  to derive Option D).
+
+### Fixed
+- **Serial report printed twice per second in RD/RH when GPS had a fix.**
+  vDisplayTask is notified by two ~1 Hz sources — the frequency relay (per PPS)
+  and the GPS parser (per time sentence) — so with a fix it woke twice a second
+  and emitted two report lines. The serial line is now gated on a change of the
+  PPS counter, so exactly one line prints per second; the on-screen display
+  still refreshes on every notification. Reported by Dan Wiering.
+- **Credit spelling.** "Wieringa" → "Wiering" in the acknowledgements.
+
+---
+
+## [v0.90-rtos]
+
+### Added
+- **Wear-levelled flash ring buffer for "live" data.** Learned drift/damping,
+  LC calibration and last PWM are now auto-saved to a dedicated flash sector
+  (sector 6, 0x08040000, 128 KB) as a ring of 32-byte slots. Each save
+  programs the next empty slot; the sector is erased only when the ring wraps
+  (once per 4095 saves), so at 100 saves/day the flash lasts on the order of a
+  thousand years. Each slot carries a CRC and a sequence number; a half-written
+  slot (power loss) fails CRC and the previous good slot is used. A signature +
+  format-version header makes the firmware robust to full-chip-erase,
+  sector-only programming, first boot and leftover flash junk alike (a foreign
+  or blank sector is detected and re-initialised).
+- **Auto-save with hysteresis.** Live data is written only when it has settled
+  on a new level: drift changed by > 8 LSB or damping by > 0.03, AND at least
+  20 min since the last save. A successful `LC` calibration saves immediately.
+- **`FR 0|1` command** (saved with `ES`, default on) toggles the ring buffer at
+  runtime — no compile flag, so no build-cache surprises. `FR 0` stops all
+  flash-ring activity.
+- **`EW` command** shows flash-wear diagnostics: erase cycles and slots used.
+- **Sawtooth (qErr) correction for LTIC (`SAW 0|1`).** u-blox timing receivers
+  generate 1PPS by dividing an internal clock, so each pulse lands up to one
+  clock period off true GPS time — a per-pulse quantization error the receiver
+  reports as `qErr` in UBX-TIM-TP. A passive sniffer parses that message
+  (qErr is a signed 32-bit picosecond field at the same offset on LEA-6T,
+  LEA/NEO-M8T and ZED-F9T, so one parser serves all) and the TIC phase path
+  subtracts it, removing the receiver's granularity sawtooth and leaving the
+  OCXO's own error. On a LEA-6T (21 ns granularity) this is the dominant
+  short-term phase term. TIM-TP is enabled automatically at GPS init; `SAW`
+  toggles the correction (saved with `ES`, default off) and shows live qErr.
+
+### Changed
+- **`ES` no longer overwrites learned/calibration values when the ring is on.**
+  With `FR 1`, calibration (ns_per_volt, zero_offset, range_ns, centre_v) and
+  learned drift/damp are owned solely by the ring; `ES` writes only genuine
+  settings (PID gains, thresholds, flags). With `FR 0`, `ES` still saves those
+  live values to EEPROM as a fallback, and `eeprom_recall()` seeds them at boot
+  so migrating an older EEPROM keeps its calibration.
+
+### Fixed
+- **`LC` no longer fights the discipline loop.** Running `LC` while algorithm
+  10 was actively disciplining let the loop move PWM at the same time as the
+  calibration sweep, so the two corrupted each other — the measured sweep rate
+  came out at ±1 ns/s and the range as absurd values (1502 / 3518 ns), which
+  the physics gate correctly rejected. The control loop is now suppressed
+  whenever a calibration is active (`g_calib_active`), so `LC` can be run at
+  any time, including under `LA 10`.
+- **Calibration-safe PWM paths.** The same guard now also covers the algorithm
+  9 thermal-holdover steering and the manual PWM commands (`up1`/`up10`/`dp1`/
+  `dp10`/`SP`), which are refused with a clear message while `LC`/`CT` runs, so
+  no path can perturb a sweep in progress.
+- **`LC` no wrap is no longer flagged as a failure.** A detector that does not
+  wrap within the sweep now passes with a good slope/centre/span and is
+  auto-saved; only a genuinely weak result (tiny span or off-band centre) is
+  called out, with the specific reason. Messages no longer tell the user to run
+  `ES` after `LC` — a passing `LC` auto-saves to the flash ring (this is live
+  data). `CT` still prompts for `ES`, since it tunes PID settings.
+
+### Credits
+- Attribution refined: André Balsa credited as author of v0.06c, the
+  inspiration for the RTOS port. Repository link corrected.
+
+---
+
+## [v0.89-rtos]
+
+### Added
+- **Self-learning loop aid (`LRN`), shared by algorithm 7 and LTIC.** Two slow,
+  passive learners — informed by Dan Wiering's overnight Rb-referenced traces
+  (a ~9000 s ±80 ns phase sawtooth, an ADEV bump at the loop time constant, and
+  8E-12/day drift): (1) a **drift feed-forward** that estimates the OCXO's mean
+  phase slope over 30 s windows and adds a PWM term to cancel it, so the loop
+  stops chasing a moving target and the phase goes flat; (2) a **damping
+  adaption** that watches phase-error zero-crossings and eases the correction
+  gain down on overshoot, up when sluggish — flattening the ADEV bump at the
+  loop time constant. Both run ONLY when locked, update at most every 30 s, and
+  are hard-clamped (feed-forward ±400 LSB, damping 0.5–1.5) so a bad estimate
+  cannot destabilise the loop; neither injects any excitation. `LRN 1|0` enables
+  /disables (default on), `LRN R` resets to theory, `LRN` alone prints live
+  state; learned values are saved by `ES` (EEPROM 222–230) and recalled at
+  boot. The serial report shows a live `Learn:` line (drift, slope, damping,
+  observed limit-cycle period/amplitude).
+- **Learning now covers every disciplining algorithm (3–10), not just 7/8.**
+  A single `lrn_apply()` wrapper feeds each loop's own phase accumulator and
+  frequency error to the learners; the NN (algo 9), having no explicit phase
+  accumulator, uses damping only. `LRN` state is shared across algorithms.
+
+### UI / Display
+- **Colour TFT reworked for clarity and a little life.** Consistent single-space
+  label formatting throughout (`Alt: 144m`, `PWM:...`, `Uptime: ...`); the value
+  fields align optically in the proportional font. A navy frame (matching the
+  header) now boxes the data area, with the three separators joined by side
+  rails. The frequency turns green on lock. `DATE:` label added.
+- **Boot splash refined**: title at the frequency's height, two oscillator waves
+  that fade in out of phase, drift into agreement and merge into one green wave
+  with a swelling-then-fading halo, followed by a scrolling hardware-detection
+  list (fixed-height window, credits stay put).
+- **`SPL 0|1` command** (saved with `ES`, default 1) toggles the boot animation.
+  `SPL 0` shows just the title and credits for two seconds — for the
+  art-indifferent.
+
+---
+
+## [v0.88-rtos]
+
+### Fixed
+- **TFT frequency field no longer keeps digit slivers after CAL/WARMUP/SVIN
+  messages.** The busy messages and the big frequency use different text
+  heights, so text padding wiped only the current font's band; the whole
+  field is now cleared on every busy↔normal transition.
+
+### Removed
+- **SPI→T6963C bridge support removed** (an experiment): `T6963C_Bridge.h`,
+  its display task section, config block and cross-references are gone.
+
+### Docs
+- READMEs (EN/PL/ES) updated with the LTIC v0.5x–v0.88 feature set (LC
+  auto-calibration, autotuned gains, ADC median path, runaway guard, WU,
+  LED animations, trustworthy lock colour) and a new section on colour TFT
+  support: any TFT_eSPI panel at 320×240 or 480×320 with setup steps.
+
+---
+
+## [v0.87-rtos]
+
+### Fixed
+- **Zero dead time before sampling — the prep was eating the whole band.**
+  The ADC keeps up fine (1 sample/s ≈ 8 mV/step at 9 ns/s); what failed was
+  the ~60 s of settling and d1/d2 reads between commanding the ramp and the
+  first sample. A fixed offset lands on top of whatever df the saved PWM
+  already has (measured +9 ns/s on air), so the phase flew 0.061→2.62 V
+  through the entire band BEFORE sampling began and the fit saw only
+  saturation. LC now re-arms picDIV (deterministic bottom start), commands
+  the offset and starts sampling within ~3 s; the exact rate is read AFTER
+  the pass from clean avg100. If saturation still arrives before 10 fit
+  points, the offset is halved, picDIV re-armed and the pass retried once.
+  The pre-sweep d1/d2 measurement and the adaptive reduce/increase machinery
+  are removed — the physics gate and the post-pass precise rate make them
+  redundant.
+
+---
+
+## [v0.86-rtos]
+
+### Changed
+- **LC redesigned as a single bottom-to-top pass — no direction probing, no
+  flipping, no wraps needed.** Field logs proved the picDIV arm parks the
+  phase DETERMINISTICALLY ~60 ns above the sync point (Vphase ≈0.061 V after
+  every re-arm), that the negative side below that point is DEAD (edge order
+  inverts, the pulse vanishes — avg100 showed a real −3 ns/s drift while the
+  voltage stood still), and that the positive side runs the whole band up
+  into soft saturation. LC now exploits this: after arming it COMMANDS a
+  positive ~+4 ns/s sweep (offset from the measured K), samples the entire
+  band in one pass, and treats sustained upper saturation as the natural END
+  of the measurement rather than a fault. The precise avg100 read-back
+  (v0.85) scales ns/V exactly. The in-sweep direction flip and its restart
+  machinery are removed.
+
+---
+
+## [v0.85-rtos]
+
+### Fixed
+- **The direction flip now COMMANDS a sweep rate instead of trusting a blind
+  read — and the phase no longer parks at the band's edge.** On air the flip
+  iteration stopped at a nominal "−1 ns/s" that was really ≈0: avg10
+  quantises at 0.1 Hz (d1=0.1000, d2=0.0000 in the log), so below 0.1 Hz the
+  read is noise. With df≈0 the phase sat wherever the picDIV re-arm dropped
+  it (Vphase 0.061 V — the band's lower edge, where too-narrow pulses barely
+  charge the RC), the sweep covered 5 mV, and the physics gate had to abort.
+  Now, when the sign flips between iterations, LC interpolates the 10 MHz
+  point P0 from the last two offsets and sets the ramp to P0 − 0.06 Hz·(LSB/Hz)
+  — a COMMANDED −6 ns/s derived from the measured K, independent of the
+  quantised read. At the end of the sweep (PWM constant throughout, so avg100
+  is clean at 0.01 Hz resolution) the true rate is read back and replaces the
+  commanded one before ns/V is computed, so the fit scale is exact.
+
+---
+
+## [v0.84-rtos]
+
+### Fixed
+- **The in-sweep direction flip now re-measures the rate and FORCES the sign
+  to change.** v0.83's defences all fired correctly on air (soft-saturation →
+  flip → clean restart → bad result rejected), but the flip itself had two
+  defects: (1) the fit's ns/V divides by phase_rate, and the pre-flip rate was
+  reused after the flip — a guaranteed wrong scale (ns/V=9.09e6 rejected by
+  the guard); (2) mirroring the offset around saved_pwm does not change the
+  drift sign when saved_pwm sits far from the true 10 MHz point (+70 gave
+  +0.100 Hz, −70 still +0.054 Hz — the railing side, just slower). After the
+  flip LC now re-measures df, and if the sign has not flipped it pushes the
+  offset further by −2·df·(LSB/Hz) from the measured K and re-checks (≤3
+  iterations); the glitch-rejection window is rescaled to the new rate.
+  Simulated on the exact on-air numbers: one push lands at −0.054 Hz
+  (−5.4 ns/s), the wrapping side at an ideal sweep speed.
+
+---
+
+## [v0.83-rtos]
+
+### Fixed
+- **`LC` can no longer be fooled by soft RC saturation.** A run with a fast
+  initial offset (10 ns/s) let the phase drift into the RC's soft-saturation
+  region (2.9-3.27 V — below the 3.28 V rail threshold, so "live"): the linear
+  fit ingested flat saturation points (ns/V ×74 too big), the later drop out
+  of saturation (a 2.57 V "jump") was accepted as a wrap, and the result
+  (range=209204 ns, zero_offset=1.34 V — outside the detector band) even
+  PASSED the volt-vs-volt self-consistency. Three band-relative gates close
+  this class: (1) **physics gate** — the committed range cannot exceed what
+  the sweep could physically cover (~rate × window × 1.5), else params
+  unchanged; (2) **wrap-jump endpoints** must lie within the clean fitted
+  band ±50%, so a drop out of saturation is not a wrap; (3) **soft-saturation
+  skip** — once the fit has shape, samples far outside its band are treated
+  like railed ones (skipped; they feed the in-sweep direction-flip logic).
+  All three scale from the run's own observations — full-swing 3.3 V
+  detectors are unaffected.
+
+### Added
+- **Survey-in animation on the LED displays.** An upper-'o' spinner (segments
+  A→B→G→F chasing around the digit's top loop), phase-shifted per digit into a
+  wave — visually distinct from the warmup's lower-'o' wave.
+
+---
+
+## [v0.82-rtos]
+
+### Fixed
+- **ACQ parked the phase half a range away from the handover point — permanent
+  ACQ (1401 cycles on air with Δf≈0).** The ACQ pull target was computed as
+  `zero_offset + span/2`, a relic from before v0.66 when zero_offset was the
+  band's floor; since then zero_offset IS the band middle, so the loop held the
+  phase at its own "centre" while the ACQ→DPLL threshold (measured against
+  zero_offset) could never be satisfied. One point of truth now: ACQ pulls
+  exactly to zero_offset. A fresh `LC` also clears any old `LCV` override
+  (which could silently re-introduce the same stalemate from EEPROM).
+
+### Added
+- **Warmup animation on the LED displays.** During OCXO warmup every digit of
+  the TM1637/HT16K33 shows the lowercase-'o' chasing-segment spinner,
+  phase-shifted per digit so the pattern travels across the display like a
+  wave (survey-in keeps the dashes).
+
+### Note
+- After upgrading, re-run `LC` once: the previous calibration was taken
+  through the old 10-second-averaged ADC path and its zero_offset/range are
+  blurred; the rebuilt burst-median path (v0.79) gives a sharper measurement.
+
+---
+
+## [v0.81-rtos]
+
+### Fixed
+- **Build fix:** `p_eff` was used by the DPLL/LOCK integrator before its
+  declaration (v0.79/v0.80 did not compile). The deadband/soft-knee block is
+  now computed first, so both the integrator and the phase term see it.
+- **Calibration countdown shows the REAL total time.** The counter used to
+  restart for every internal wait segment (30 s, 20 s…), so the display never
+  reflected the whole procedure. `LC`/`CT` now preload a realistic total and
+  adaptive phases (ramp increase, rail-backoff, direction flip, sweep restart)
+  top it up as they occur; every exit path clears it.
+- **OCXO warmup restored and made a saved setting.** Warmup was silently
+  skipped whenever the EEPROM was valid — so it "disappeared" once a
+  configuration was saved, and a cold-started OCXO was disciplined while still
+  drifting thermally. Warmup now runs by default on every boot and can be
+  disabled with the new `WU 0` command (`WU 1` re-enables; state saved by `ES`
+  in EEPROM byte 221, fresh-flash default: on).
+
+### Added
+- **LED "CAL" + spinner during every calibration.** TM1637 and HT16K33 show
+  CAL on the first three digits and, on the fourth, a chasing-segment
+  animation (G→C→D→E) tracing a lowercase 'o' — a clear "working" cue.
+
+---
+
+## [v0.80-rtos]
+
+### Fixed
+- **The green frequency colour now means a trustworthy, CURRENT lock.** After
+  LTIC dropped from LOCK to ACQ, the display stayed green because the 1000-s
+  average still read ~10 MHz — an echo of the past, not the present. Rules now:
+  for algorithm 10 green comes ONLY from the loop's live LOCK state (no
+  average fallback); for algorithms 0-9 the long-window criterion remains but
+  must be backed by the fast 10-s average still within ±50 mHz of 10 MHz, so a
+  loss of discipline kills the green in ~10 s instead of minutes.
+
+---
+
+## [v0.79-rtos]
+
+### Fixed
+- **LTIC ADC path rebuilt — the 10-second moving average was poisoning the
+  loop.** The old path took ONE raw ADC read per PPS through a 10-sample
+  (=10 s) moving average: ~5 s group delay (the loop corrected on stale data)
+  and, worse, pre- and post-wrap voltages blended into phantom mid-levels — the
+  loop saw a smooth ~30 ns/s drift that did not physically exist and kicked the
+  real phase (LOCK steps up to 152 LSB, LOCK↔DPLL bouncing). Now each PPS slot
+  takes a 16-read burst (~1 ms) and its MEDIAN — no cross-second memory, no
+  lag, no wrap blending, single-read glitches fall out — plus an outlier gate:
+  a jump >25% of the calibrated span must repeat in the next read to be
+  believed (real wraps persist; glitches don't). Note: reading the ADC more
+  often would add nothing — the detector charges the capacitor once per PPS,
+  so phase information is inherently 1 Hz; the burst maximises the quality of
+  that one sample.
+- **LOCK is gentle by design: deadband + soft knee + step cap.** Inside a
+  deadband (range/40, ≥6 ns — the ADC noise floor) the phase error counts as
+  zero and the integrator holds; outside, the error ramps from zero (soft
+  knee); the final LOCK step is hard-capped at ≈4 mHz (from measured K). Small
+  offsets now get proportionally small pushes instead of full-gain kicks.
+
+---
+
+## [v0.78-rtos]
+
+### Fixed
+- **First confirmed on-air LOCK with the LTIC three-stage loop.** Two follow-ups:
+  (1) the TFT frequency readout now turns green on LTIC LOCK — it only
+  recognised the legacy "hit" trend, so the colour would have waited for the
+  1000/10000-s averages to reach mHz; (2) the EEPROM recall guard rejected
+  algorithm 10 (`algo > 9 → 0`), so a saved LTIC configuration silently
+  reverted to algorithm 0 on reboot — now `> 10`. With this, `ES` fully
+  preserves the LTIC setup: algorithm 10, the LC calibration and polarity are
+  stored, and the loop gains are re-derived by autotune from the stored
+  measurements on every entry, so a reboot comes back locked-capable with no
+  manual steps.
+
+---
+
+## [v0.77-rtos]
+
+### Fixed
+- **State transitions no longer bounce on the stepped detector read.** With the
+  frequency finally held (−0.02 Hz), the loop still ping-ponged ACQ↔DPLL: the
+  ADC updates the phase voltage in steps, and each step produced a phantom
+  50-100 ns/s "slope" that tripped the V-derived slope gates (entry to DPLL
+  blocked for 183 cycles; DPLL demoted after 6). All frequency-quality gates in
+  the transitions now use TIM2's Δf (immune to the stepping) — ACQ→DPLL at
+  |Δf|≤0.05 Hz, DPLL→LOCK at ≤0.03 Hz, demotions at Δf>0.30 / 0.10 Hz — while
+  the voltage is used only for phase POSITION. DPLL demotion also gained the
+  same 3-strike persistence LOCK already had, so a single stepped read cannot
+  demote. Simulated with stepped reads: no false demotions, clean promotion to
+  LOCK.
+
+---
+
+## [v0.76-rtos]
+
+### Added
+- **Full LTIC auto-tuning — no hand-set coefficients.** `ltic_autotune()`
+  derives EVERY loop gain from the two measured hardware constants: K (Hz/LSB
+  from CT) and ns/V + range (from LC). Freq loop cancels ~50% of Δf per step;
+  phase loop pulls with τ≈20 s; LOCK is 4× gentler; the ACQ threshold becomes a
+  quarter of the measured detector range. Runs automatically after each
+  successful LC and on entry to algorithm 10, and prints the derived values.
+
+### Fixed
+- **ACQ now drives the TIM2 frequency error, not the voltage-derived drift.**
+  The stepped detector read goes flat at a band edge (on air: phase parked at
+  0.336 V while a real −0.3 Hz offset persisted, with ACQ↔DPLL bouncing) — a
+  V-derived slope is blind there; TIM2 is not.
+- **Board polarity no longer inverts the frequency path.** K is positive on
+  every board (+PWM → +f), so frequency terms take no `pol`; only the phase
+  (Vphase) path does. Routing e_freq through pol=−1 had been inverting a
+  correct frequency correction in DPLL — a co-cause of the state bouncing.
+
+---
+
+## [v0.75-rtos]
+
+### Fixed
+- **ACQ oscillated (±1 Hz swings, twice frozen by the runaway guard) once the
+  calibration was finally CORRECT.** The drift gain used a guessed fixed
+  multiplier (×60) that had been implicitly tuned against the old, wrongly
+  scaled calibration; with the true ns/V the numeric drift grew ~2.3× and the
+  loop over-corrected ~1.8× per step — a textbook overshoot oscillation. The
+  gain is now derived from the MEASURED OCXO sensitivity (CT stores 0.40/K in
+  g_pid[7].Kp, so LSB-per-Hz is recovered as Kp7/0.40) with a 0.5 damping
+  factor: ~60% of the error cancelled per step, unconditionally stable on any
+  unit, no per-board tuning. The DPLL frequency term (fixed ×1000, ~6× too weak
+  on this unit) is scaled from measured K the same way.
+
+---
+
+## [v0.74-rtos]
+
+### Fixed
+- **Wrap-jump quality gate — closes the last known way LC could go wrong.** The
+  stepped ADC can report a wrap mid-step, yielding a PARTIAL jump; one was
+  accepted as the full span (0.122 V on a ~0.33 V detector), which parked
+  zero_offset near the floor (0.09 V) and sent the loop chasing a false centre
+  until the frequency ran 3 Hz away. A jump now counts only if it starts from a
+  live (un-railed) sample AND is ≥80% of the min–max band actually observed;
+  partial jumps are named in the log and the observed band (or time
+  cross-check) is used instead. `zero_offset` is now ALWAYS the middle of the
+  observed band, never derived from the jump position.
+- **Operator verdict line.** LC ends with an explicit "PASSED checks — review
+  LL, then 'ES'" or "MARGINAL result — prefer re-running LC before 'ES'", so a
+  weak calibration is hard to save by accident.
+
+---
+
+## [v0.73-rtos]
+
+### Fixed
+- **Runaway guard rebuilt after a real 3 Hz escape reached PWM 63500 — the old
+  guard had three false assumptions.** (1) Its baseline re-anchored on every
+  un-railed sample, but during a runaway the phase periodically WRAPS (briefly
+  un-railed), so the baseline chased the escape and the 6000-LSB trip never
+  fired. It now re-baselines only when genuinely healthy (un-railed AND
+  |Δf| < 0.25 Hz). (2) An LSB threshold silently assumes the OCXO's Hz/LSB
+  sensitivity; the primary criterion is now the measured frequency error
+  itself: phase railed AND |Δf| > 0.5 Hz → freeze (a 2000-LSB backstop
+  remains). (3) Freezing the step left the DPLL/LOCK integrator winding up,
+  ready to slam PWM on recovery — it is re-seeded to the held PWM while
+  frozen. Behavioural test: old guard let the simulated escape reach 6.15 Hz;
+  the new one freezes at 0.51 Hz.
+
+---
+
+## [v0.72-rtos]
+
+### Fixed
+- **Direction flip now happens IN the sweep, where the rail actually shows.**
+  v0.71's 8 s pre-check could not catch the wrong direction: in the rail-prone
+  direction the phase exits the sync window only after ~a full range of drift —
+  tens of seconds into the sweep (the pre-check passed, then 137 samples
+  railed). LC now counts consecutive railed samples during the sweep itself;
+  a sustained run (≥15 s) is the direction verdict: it flips the offset sign
+  (mirrored around the saved PWM), re-arms picDIV, wipes every accumulator and
+  restarts the sweep once. Verified in simulation: wrong side rails at 40 s →
+  flip at ~54 s → clean sweep from the good side with the full-span wrap jump
+  captured. If both directions rail, the existing mostly-railed abort still
+  reports it.
+
+---
+
+## [v0.71-rtos]
+
+### Fixed
+- **`LC` auto-detects the ramp DIRECTION — the root cause of every railed
+  calibration.** Comparing all field runs revealed the pattern: every failed
+  cal had a positive df (ramp pushing the frequency above 10 MHz) and the single
+  clean one (range=318) had a negative df. On this detector family the phase
+  wraps sawtooth-style only when drifting one way; the other way the pulse just
+  widens until the RC pins at the 3.3 V rail and stays. The good direction is
+  board-dependent, so LC now probes it: after settling it watches the phase for
+  ~8 s and, if pinned to a rail, flips the offset sign, re-arms picDIV and
+  settles again (aborting cleanly only if BOTH directions rail). The adaptive
+  ramp keeps the detected direction. Also verified: algorithm 7 does NOT run
+  during LC (the calibration blocks the control task), so loop interference is
+  ruled out.
+
+---
+
+## [v0.70-rtos]
+
+### Changed
+- **`LC` is fully self-contained: it ignores the previous calibration.** Per a
+  good operator principle — you recalibrate precisely because the stored values
+  may be wrong — LC no longer inherits anything from EEPROM/g_ltic: the ramp
+  target, wrap threshold, glitch window and prep criterion all start from
+  neutral assumptions and everything is measured fresh. This ends the poisoning
+  cascade where one bad cal (range=6035) mis-steered the next three runs.
+- **Single-wrap range measurement.** The voltage JUMP at a wrap (sawtooth top →
+  bottom in one sample) IS the full detector span, so one wrap suffices:
+  range = |jump| × ns/V. The ramp target drops to one wrap in the window, i.e. a
+  much gentler sweep that no longer pushes the phase out of the picDIV sync
+  window onto a rail (the failure seen at 9-22 ns/s). Two wraps, when they occur
+  naturally, still enable the independent time cross-check.
+- **Prep criterion is universal:** waits for a valid, un-railed, steady phase —
+  no assumed centre voltage (detector bands legitimately differ between builds).
+
+---
+
+## [v0.69-rtos]
+
+### Fixed
+- **`LC` adaptive ramp is now hardware-agnostic and self-limiting.** The v0.68
+  log showed a cascade: a poisoned prior cal (range_ns=6035 from a noise fit)
+  set an absurd ramp-speed target, the adaptive increase chased it (offset up to
+  1120, 15 ns/s), and the fast ramp pushed the phase out of the picDIV sync
+  window entirely — the detector pulse went wide and the voltage pinned at the
+  rail for the whole sweep ("180 railed samples"). Three hardware-agnostic
+  defences (no detector band is assumed; different builds range from ~0.3 V to
+  full 3.3 V swings): (1) the stored range only *guides* the ramp target through
+  a wide anti-garbage clamp (20..5000 ns); (2) **rail-backoff** — after each
+  ramp increase LC watches ~8 s and, if the phase pins to a rail, halves the
+  offset back, re-arms picDIV to regain sync, and proceeds at the speed the
+  hardware allows; (3) **self-consistency gate** — results are committed only if
+  range ÷ slope implies a physically possible voltage span (≤3.3 V), otherwise
+  the previous calibration is left untouched (a bad LC can no longer poison the
+  next one).
+
+---
+
+## [v0.68-rtos]
+
+### Fixed
+- **`LC` no longer produces garbage when the ramp lands near the OCXO's 10 MHz
+  point.** A +70 LSB offset can barely detune the OCXO (df=0.01 Hz → 1 ns/s), so
+  no real wrap could occur in the window — yet read glitches (the phase voltage
+  updates in steps) exceeded the wrap threshold and produced fake "2 wraps", a
+  noise-only fit, and absurd results (ns_per_volt=38615, range_ns=6035). Three
+  defences added: (1) **adaptive ramp increase** — if the drift is too slow for
+  two wraps in the window, the offset is doubled (capped ±4000) and re-settled;
+  (2) **time-validated wraps** — a jump sooner than ~half the expected crossing
+  time after the previous wrap is a glitch and is ignored; (3) **volt/time
+  range cross-check** — the time between two wraps × phase rate gives an
+  independent range measure; if it disagrees >2× with the voltage-span measure,
+  the slope is suspect and the TIME range wins (ns/V rescaled to match).
+
+---
+
+## [v0.67-rtos]
+
+### Added
+- **`LC` now auto-preps before ramping (operator convenience).** Running `LC`
+  used to require a manual `LA 7` / `AP` / "wait for the phase to reach centre"
+  sequence first; starting with the phase against a rail was the main cause of
+  poor calibrations. `LC` now, on its own: (1) arms picDIV to sync to 1PPS if a
+  GPS fix is present, then (2) waits up to ~60 s for the phase voltage to settle
+  inside the central band of the detector (centre ± ¼ range, held a few seconds)
+  before starting the ramp. It prints each step and proceeds with a clear note
+  if the phase can't be centred in time. Just run `LC` — no manual prep needed.
+
+---
+
+## [v0.66-rtos]
+
+### Fixed
+- **`LC` now measures the FULL detector range (was a fraction, e.g. <75 ns).**
+  Two bugs collapsed `range_ns` on a narrow detector: (1) the wrap threshold was
+  a fixed 0.5 V — larger than the whole ~0.33 V detector range — so wraps were
+  never detected; (2) `range_ns` was taken from the small slice the phase
+  happened to sweep during the ramp, not the detector's full unambiguous span.
+  `LC` now sweeps until it has seen **two wraps** (one full cycle), tracks the
+  true min/max across wraps for the range, and still fits the slope (ns/V) on
+  the clean pre-wrap segment. The wrap threshold is now relative to the detector
+  span. Ramp/window retuned (offset 70 LSB, 180 s) so both a long clean slope
+  segment and two wraps fit. `LC` reports whether it saw 0/1/2 wraps so you know
+  if the range is exact, approximate, or a lower bound.
+
+---
+
+## [v0.65-rtos]
+
+### Fixed
+- **DPLL corrected too infrequently for a narrow detector (looked "frozen").**
+  DPLL only adjusted PWM every 10 s and LOCK every `lock_interval_s`; on a
+  narrow detector the phase sweeps its whole range in ~10-15 s of residual
+  drift, so between corrections the phase wandered and wrapped while PWM sat
+  still (seen as PWM pinned at one value for 114 samples). DPLL now corrects
+  every 2 s. This is *not* a schematic error: in every state PWM (via the RC
+  filter → EFC) drives the OCXO — Vphase is only the ADC feedback measurement,
+  so there is correctly no analog Vphase→EFC path.
+- **LOCK interval clamped to a sane range (1..30 s).** A corrupted
+  `lock_interval_s` (e.g. the 50373 seen in a log) would have made LOCK correct
+  roughly once every 14 hours; it is now bounded at runtime and in the `LIV`
+  command so LOCK keeps tracking.
+
+---
+
+## [v0.64-rtos]
+
+### Changed
+- **Removed the unreliable polarity auto-probe; polarity is now set manually.**
+  The single-cycle probe could not separate the PWM effect from the phase's own
+  drift on a narrow, drifting detector, so it repeatedly detected the wrong sign
+  (+1 where the board is −1). ACQ now holds and prints a reminder to run
+  `LPOL -1` (or `+1`) then `ES` when polarity is unset, and DPLL/LOCK already
+  hold when polarity is unknown. Once `LPOL` is set and saved, all three stages
+  use it consistently — this is reliable where the probe was not.
+
+---
+
+## [v0.63-rtos]
+
+### Fixed
+- **Detected polarity is now shared by all three stages.** The auto-detected
+  sign lived in a static local inside ACQ, invisible to DPLL/LOCK, which then
+  fell back to +1 and — on a reversed board with polarity unsaved — drove the
+  phase to the ceiling rail with PWM climbing and frequency walking away from
+  10 MHz. ACQ now writes the detected sign into `g_ltic.polarity`, so every
+  stage uses it (and it prints a reminder to `ES`).
+- **DPLL/LOCK hold instead of guessing when polarity is unknown.** With no
+  established sign they now output zero correction and let the machine fall back
+  to ACQ (which probes), rather than assuming +1 and running away.
+- **Runaway guard.** If the phase is pinned to a rail while PWM is pushed more
+  than ~6000 LSB from where the loop started, the loop freezes and warns once
+  ("check LPOL / re-centre") instead of sliding PWM to an extreme and
+  undisciplining the OCXO.
+
+### Note
+- Save your polarity: after the loop prints "detected …polarity -1", run `ES`
+  so it survives a reboot (this was the root cause of the last runaway — the
+  sign was set but never saved, so it reverted to auto/one).
+
+---
+
+## [v0.62-rtos]
+
+### Fixed
+- **DPLL and LOCK now apply the board polarity (was ACQ-only).** ACQ used the
+  detected/forced `LPOL` sign, but DPLL and LOCK did not — so on a reversed
+  board they drove the phase the wrong way, shoving Vphase onto the floor rail
+  and dropping straight back to ACQ (the phase would centre in ACQ, hand over to
+  DPLL, then get pushed to ~0 V and fall back). All three stages now share the
+  same polarity, so DPLL/LOCK pull the phase toward centre instead of into a
+  rail. With ACQ handover already working (v0.61), this is what lets DPLL hold
+  and progress to LOCK.
+
+---
+
+## [v0.61-rtos]
+
+### Fixed
+- **ACQ now nulls the phase drift instead of chasing phase position.** With the
+  polarity correct (`LPOL -1`) PWM stopped running away, but the phase still
+  swept the whole detector and wrapped, so ACQ never met the "in-window + low
+  slope" exit. The residual frequency offset (~-0.26 Hz) drove the phase at
+  ~26 ns/s across a 318 ns detector — far too fast. ACQ's dominant term now acts
+  on the phase DRIFT (dPhase/dt), driving the frequency offset to zero so the
+  phase stops moving; a weak centring term parks it mid-range only once the
+  drift is already small. Wrap-induced drift spikes (phase jumping >½ range in a
+  step) are rejected so they don't corrupt the drift estimate or the
+  slope-gated transitions.
+
+---
+
+## [v0.60-rtos]
+
+### Fixed
+- **ACQ ran PWM away when the board polarity was reversed.** ACQ walked PWM in a
+  fixed direction toward `zero_offset`; on hardware where increasing PWM lowers
+  the phase voltage (opposite sign), that drove PWM ever downward while the
+  phase wrapped chaotically, so ACQ never settled (observed as a long ACQ hang
+  with PWM sliding from ~41000 to ~17000). ACQ now **auto-detects the PWM→phase
+  polarity** with a small probe step, then drives toward the target with the
+  correct sign. A new `LPOL -1/0/1` command forces the sign (0 = auto).
+- **ACQ now centres on the middle of the detector range, not `zero_offset`.**
+  On a narrow low-band detector `zero_offset` can sit near the floor (e.g.
+  0.097 V), so targeting it kept the phase against the rail (risking latch-up /
+  wrap, per Dan's note about choosing mid-scale). ACQ now aims at the range
+  middle, overridable with `LCV <volts>`.
+
+### Added
+- `LPOL` (PWM→phase polarity) and `LCV` (ACQ centring target) CLI commands,
+  both persisted to EEPROM and shown by `LL`.
+
+---
+
+## [v0.59-rtos]
+
+### Changed
+- **Phase-slope gating on state transitions (algorithm 10).** On advice from
+  Dan (time-nuts), both LTIC state transitions now check the phase SLOPE
+  (dPhase/dt), not just the phase magnitude. Since frequency is the first
+  derivative of phase, a small slope means the frequency is already close to
+  10 MHz — so ACQ→DPLL now requires a wide slope window and DPLL→LOCK a ~5×
+  tighter one, preventing a handover while the phase is merely sweeping through
+  centre at speed (which would lock the wrong frequency). LOCK also drops back
+  to DPLL if the slope grows. This is what makes the frequency land very close
+  to nominal at each handover.
+
+---
+
+## [v0.58-rtos]
+
+### Fixed
+- **`LC` ramp far too fast for a narrow detector.** On hardware whose detector
+  spans only a fraction of the ADC (e.g. ~0.33 V per unambiguous period), the
+  old +2000 LSB ramp drove the phase across the whole detector every ~1-2 s, so
+  every sample railed or wrapped and `LC` aborted with "mostly railed". The
+  default ramp offset is now a gentle 60 LSB (≈4-5 ns/s on a typical OCXO), and
+  `LC` adaptively steps the offset down further if the measured drift would
+  cross the detector in under ~15 s. The frequency-measurement fix from v0.56
+  is confirmed working (real df now reported, e.g. 1.4-2.0 Hz, not the old
+  hard-coded 0.6).
+
+---
+
+## [v0.57-rtos]
+
+### Fixed
+- **ACQ now actively centres the phase (was frequency-only).** The ACQ stage
+  previously corrected only the TIM2 frequency error; once the OCXO was already
+  near 10 MHz nothing drove the phase, so it could sit stuck against a detector
+  rail forever and never satisfy the ACQ→DPLL exit test (observed as an
+  overnight hang with Vphase parked low). ACQ now walks PWM toward the detector
+  centre when the reading is railed, and drives proportionally to the phase
+  error once it is in-window.
+- **Phase centre taken from calibration, not a hard-coded 1.65 V.** Real
+  hardware can have a narrow detector band far from mid-ADC (e.g. 0..0.45 V), so
+  the loop now centres on the calibrated `zero_offset` (with a coarse 0.22 V
+  fallback) instead of assuming 1.65 V. Run `LC` so `zero_offset`/`ns_per_volt`
+  reflect the real band.
+
+---
+
+## [v0.56-rtos]
+
+### Fixed
+- **`LC` frequency measurement.** The calibration read the 10 s frequency
+  average once, immediately after a 10 s settle — on real hardware that window
+  had not yet caught up to the forced ramp, so the ramp rate (and therefore
+  `ns_per_volt`) came out wrong. `LC` now settles 30 s, then samples the 100 s
+  average (steadier, with a 10 s fallback) twice ~5 s apart and averages them.
+- **`LC` rail handling.** Samples where the TIC voltage sits at the ADC ceiling
+  or floor (phase outside the detector window) are now skipped rather than
+  flattening the least-squares fit, and `LC` aborts with a clear message if the
+  ramp is mostly railed (telling you to centre Vphase near mid-rail first).
+- **Build fix:** removed a duplicate `g_ltic_voltage` extern in
+  GPSDO_algorithms.cpp that conflicted with the `gpsdo_state.h` declaration.
+
+---
+
+## [v0.55-rtos]
+
+### Added
+- **Algorithm 10 (LTIC three-stage PLL) — the loop is now implemented.**
+  `LA 10` disciplines the OCXO from the hardware TIC phase (PA1) through a
+  hybrid ACQ → DPLL → LOCK state machine. ACQ is frequency-led (TIM2) to pull
+  the OCXO close to 10 MHz so the phase ramps slowly enough to catch; DPLL adds
+  the LTIC phase term for fast centring; LOCK is phase-led with slow updates
+  every `lock_interval_s` and a hysteresis band for dropping back to DPLL. The
+  picDIV is armed automatically on entering ACQ. The loop works in nanoseconds
+  when the TIC is calibrated (`LC`), and falls back to a nominal volt-based
+  phase with a one-time warning when it is not. The state persists in
+  `g_ltic.state`, so a warm reboot (`RB`) resumes mid-sequence rather than
+  restarting from ACQ. The trend field shows `ACQ` / `DPLL` / `LOCK`.
+- **Third PID set (ACQ).** `LticParams_t` gained an `acq` PID alongside `dpll`
+  and `lock`, with its own CLI verbs `AQP` / `AQI` / `AQD` / `AQL` and EEPROM
+  storage. `LL` now lists all three sets.
+
+### Changed
+- **EEPROM layout extended to 216 bytes (reserved to 224).** The ACQ PID block
+  [200..215] was appended under the same `GPSD2` signature with the usual
+  NaN/`0xFF` guards, so older saves still load with the ACQ gains defaulting.
+
+---
+
+## [v0.54-rtos]
+
+### Added
+- **`LC` — LTIC self-calibration.** Automatically measures the TIC's
+  voltage→time slope without any external reference. `LC` forces a small PWM
+  offset so the phase ramps linearly, derives the ramp rate from the TIM2
+  frequency error (`phase_rate = df / BASE_FREQ × 1e9` ns/s), least-squares
+  fits the TIC voltage against time to get `dV/dt`, and computes
+  `ns_per_volt = phase_rate / (dV/dt)`. It also records the swept voltage span
+  as `range_ns` and a mid-scale `zero_offset`, detecting one wrap to keep a
+  single clean ramp segment. Runs in the control task like `CT`, with the same
+  safety pattern (PWM saved and restored, range-guarded results, abort on
+  no-GPS / too-few-points / singular or flat fit — params left unchanged on
+  any failure). Results go to the live LTIC params; review with `LL`, then
+  `ES` to save. New config constants `LTIC_CAL_PWM_OFFSET`, `LTIC_CAL_SECS`,
+  `LTIC_CAL_MIN_POINTS`. This fills the calibration fields that the phase-A
+  loop will need; the loop itself is still not implemented.
+
+---
+
+## [v0.53-rtos]
+
+### Added
+- **Warm/cold restart commands `RB` and `CR`.** `RB` does a warm reboot
+  (`NVIC_SystemReset()`) keeping the EEPROM, so the still-warm OCXO recalls its
+  disciplined state. `CR YES` does a cold restart: erases the EEPROM (back to
+  factory defaults — PWM, model, calibration, LTIC params all reset) then
+  reboots; the `YES` confirmation is required because it discards the learned
+  OCXO model.
+- **Algorithm 10 (LTIC) infrastructure — parameters, CLI and EEPROM.** Full
+  parameter set, CLI editing and EEPROM persistence for the planned LTIC
+  three-stage PLL (ACQ→DPLL→LOCK), so the configuration is ready before the
+  loop itself is written ("phase A"). New `LticParams_t` holds TIC calibration
+  (ns/V, zero offset, range), two PID sets (wide-band DPLL + narrow-band LOCK),
+  state-transition thresholds, the LOCK interval, and the resumable state.
+  Fifteen CLI commands set/show these (`LL`, `LNV/LZO/LRN`, `DPP/DPI/DPD/DPL`,
+  `LKP/LKI/LKD/LKL`, `LAT/LDT/LIV`). `LA 10` is accepted by the parser but
+  reports "not implemented yet" and refuses to select, so the OCXO is never
+  left undisciplined. The loop itself is not implemented — that is phase A,
+  pending the LTIC hardware.
+
+### Changed
+- **EEPROM layout extended to 200 bytes (reserved to 208).** The LTIC block
+  [144..207] was added under the **same `GPSD2` signature**; every new field is
+  NaN/`0xFF`-guarded, so EEPROM images saved by older firmware load cleanly with
+  the LTIC parameters defaulting until set. No migration or re-init needed.
+
+---
+
+## [v0.52-rtos]
+
+### Added
+- **LTIC (Lars' TIC) phase-voltage preview.** The TIC voltage on PA1 was
+  already sampled and sent over serial telemetry, but had no on-screen
+  presence. Added (all gated by `GPSDO_LTIC`, so zero effect on builds without
+  the TIC):
+  - a **TFT row** showing `Vph:x.xxxV` (and `… NNNns` once calibrated);
+  - an **LTIC entry in the boot-splash hardware checklist** (`[x] LTIC phase
+    (PA1)` — shown when compiled in, like the TM1637/TFT, since the TIC is
+    read-only and cannot be probed);
+  - a **`LTIC_NS_PER_VOLT` calibration constant** in the config (0 =
+    uncalibrated → volts only). When set to the measured ramp slope, the
+    display and the planned phase-discipline algorithm convert volts to ns.
+  This is a **preview/telemetry layer only** — the control loop does not yet
+  discipline the OCXO from the TIC (planned as a separate phase, a new
+  LTIC-based algorithm). OLED/LCD were intentionally left unchanged (their
+  layouts are full); Vphase remains available there via serial logging, which
+  is what characterising the TIC needs at this stage.
+
+---
+
+## [v0.52-rtos]
+
+### Added
+- **LTIC (Lars' TIC) phase-voltage preview layer.** When `GPSDO_LTIC` is
+  compiled in, the latched TIC voltage (`g_ltic_voltage`, already sampled on
+  PA1 and discharged each PPS) is now surfaced as a preview: a dedicated
+  `Vph:` row on the TFT (below the sensor row, shown only with LTIC built in),
+  and an `LTIC phase (PA1)` entry in the boot checklist. Serial telemetry
+  already carried Vphase. A new `LTIC_NS_PER_VOLT` calibration constant lets a
+  future build convert the voltage to a phase in nanoseconds: while it is 0
+  (default, uncalibrated) the displays show volts only; once set, the TFT row
+  also shows `<n>ns`. This is preview/telemetry only — the control loop does
+  not yet discipline on LTIC; that is a planned separate algorithm. OLED/LCD
+  layouts are unchanged (both are full); Vphase will be added there when LTIC
+  becomes an operational loop input.
+
+---
+
 ## [v0.51-rtos]
 
 ### Added

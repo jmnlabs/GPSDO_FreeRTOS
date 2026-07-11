@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.51
+ * Part of GPSDO FreeRTOS v0.91
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.51-rtos"
+#define PROGRAM_VERSION  "v0.91-rtos"
 
 /* ---- Serial output macro ----
  * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
@@ -39,7 +39,7 @@ extern "C" {
  * AFTER all feature switches — otherwise GPSDO_BLUETOOTH would not yet be
  * visible here and OUT_SERIAL would always resolve to USB. See the
  * "Derived macros" section below. */
-#define AUTHOR_NAME      "André Balsa"
+#define AUTHOR_NAME      "Andre Balsa"   /* v0.06c author — inspiration for the RTOS port (ASCII for serial) */
 
 /* ── Feature switches ────────────────────────────────────────────────── */
 
@@ -53,7 +53,7 @@ extern "C" {
 
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
 //#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
-#define GPSDO_TM1637             /* 4-digit TM1637: HH:MM                  */
+//#define GPSDO_TM1637             /* 4-digit TM1637: HH:MM                  */
 
 /* ── HT16K33 clock display — 4-digit 7-seg with colon, I2C ────────────
  * Common AliExpress/Adafruit-style 0.56" clock modules (addr 0x70).
@@ -125,49 +125,6 @@ extern "C" {
 #define PIN_TFT_DC    PB12
 #define PIN_TFT_CS    PB13
 
-/* ── SPI→T6963C bridge (PowerTip PG240128 240x128 mono LCD) ──────────────
- * *** EXPERIMENTAL / UNTESTED — DO NOT RELY ON THIS YET ***
- * The firmware-side backend compiles and the protocol is correct, but the
- * link has NOT been validated on good hardware. Bring-up on long jumper
- * wires / a breadboard showed heavy ringing on the oscilloscope (SCK/MOSI/CS
- * reflections), producing spurious CS edges that desync the bridge parser
- * (bridge stats: nssResets > framesOk, rising unknownCmd). The SAME glitches
- * appear with the proven bare-Arduino reference master, so this is a SIGNAL-
- * INTEGRITY (wiring) problem, not a firmware bug. To be retested on properly
- * built hardware: short point-to-point links (ideally soldered), a solid
- * common ground, optional series resistors (~100–330 Ω) on SCK/MOSI/CS, and
- * the SPI clock raised from 250 kHz toward 1 MHz only once the bus is clean.
- * Until then, leave GPSDO_T6963C disabled.
- *
- * Alternative graphical display to the TFT, driven through the external
- * "T6963C_SPI_bridge" (BluePill) over SPI1 using high-level drawing commands
- * (see T6963C_Bridge.h). Reuses the TFT's SPI1 pins; needs only CS + READY.
- *
- * IMPORTANT — the bridge (BluePill) listens on its own SPI2 pins, which have
- * DIFFERENT names than the master's SPI1. Wire by SIGNAL, not pin name:
- *
- *   GPSDO master (this MCU)        →  Bridge (BluePill, SPI2 slave)
- *   --------------------------------------------------------------
- *   PA5  (SPI1 SCK)                →  PB13 (bridge SPI2 SCK)
- *   PA7  (SPI1 MOSI)               →  PB15 (bridge SPI2 MOSI)
- *   PB13 (CS output, below)        →  PB12 (bridge NSS / EXTI)
- *   PB12 (READY input, below)      ←  PB1  (bridge READY/BUSY output)
- *   GND                            ⟷  GND  (common ground — required!)
- *
- * Note: bridge MISO (PB14) is unused (master only writes). PB15 on the
- * master (was TFT_RST) is freed. Mutually exclusive with GPSDO_TFT. */
-/* #define GPSDO_T6963C */         /* SPI→T6963C bridge, 240x128 mono — EXPERIMENTAL/UNTESTED (see banner above) */
-#define PIN_T6963C_CS    PB13      /* master output → bridge PB12 (NSS)  */
-#define PIN_T6963C_READY PB12      /* master input  ← bridge PB1 (READY) */
-#define T6963C_SPI_HZ    250000UL   /* 250 kHz — robust on long/breadboard
-                                     * wiring. The bridge handles 1 MHz on
-                                     * short links, but >20 cm jumpers or a
-                                     * breadboard cause reflections/crosstalk
-                                     * on SCK/MOSI/CS (spurious CS edges →
-                                     * parser desync → unknownCmd). Slower
-                                     * edges fix that. Raise toward 1 MHz only
-                                     * with short, point-to-point wiring. */
-
 /* ── OLED page alternation: seconds per page ─────────────────────────── */
 #define OLED_PAGE_SWITCH_SECS   10u   /* flip between page A and B every N seconds */
 
@@ -179,7 +136,7 @@ extern "C" {
 #define GPSDO_AHT10
 #define GPSDO_BMP280_I2C
 #define GPSDO_INA219
-#define GPSDO_BLUETOOTH
+//#define GPSDO_BLUETOOTH
 #define GPSDO_VCC
 #define GPSDO_VDD
 #define GPSDO_UBX_CONFIG
@@ -210,13 +167,13 @@ extern "C" {
  * NAK on an F9T; that is tolerated (the survey-in path is independent).
  *
  * Survey-in ends when EITHER limit is met (whichever comes first):       */
-#define GPSDO_GPS_TIMING              /* u-blox timing rx: LEA-6T / LEA/NEO-M8T / ZED-F9T */
-#define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]   */
+#define GPSDO_GPS_TIMING     /* u-blox timing rx: LEA-6T / LEA/NEO-M8T / ZED-F9T */
+#define GPSDO_SVIN_MIN_SECS   300u    /* minimum survey-in duration [s]     */
 #define GPSDO_SVIN_ACC_LIMIT  5000u   /* position accuracy limit [mm] (5 m) */
 
 
 #define GPSDO_PICDIV
-/* #define GPSDO_LTIC */          /* Lars' TIC: read Vphase on PA1, discharge 1nF capacitor */
+#define GPSDO_LTIC           /* Lars' TIC: read Vphase on PA1, discharge 1nF capacitor */
 #define GPSDO_EEPROM
 #define GPSDO_GEN_2kHz_PB5
 
@@ -240,9 +197,6 @@ extern "C" {
 /* exactly one TFT driver */
 #if (defined(GPSDO_TFT_ILI9341) + defined(GPSDO_TFT_ST7789) + defined(GPSDO_TFT_ILI9488)) > 1
   #error "Select only one TFT type: GPSDO_TFT_ILI9341, GPSDO_TFT_ST7789 or GPSDO_TFT_ILI9488"
-#endif
-#if (defined(GPSDO_TFT_ILI9341) || defined(GPSDO_TFT_ST7789) || defined(GPSDO_TFT_ILI9488)) && defined(GPSDO_T6963C)
-  #error "GPSDO_T6963C and TFT cannot be used together (shared SPI1 pins / display slot). Disable one."
 #endif
 
 /* ── Convenience alias: any TFT defined ─────────────────────────────── */
@@ -322,7 +276,56 @@ extern "C" {
 #ifdef GPSDO_LTIC
   #define PIN_LTIC_VPHASE   PA1   /* ADC input + open-drain output to discharge 1nF cap */
   #define LTIC_DISCHARGE_MS   1   /* ms to discharge 1nF capacitor via open-drain low   */
-  #define LTIC_AVG_SAMPLES   10   /* moving average window                               */
+  #define LTIC_OVERSAMPLE    16   /* fast ADC reads per PPS, median taken (glitch-proof) */
+  /* Voltage→time calibration for the TIC ramp. The TIC charges a 1 nF cap with
+   * a constant current during the GPS-1PPS → OCXO-1PPS interval, so the latched
+   * voltage is proportional to that phase difference: t[ns] = Vphase * LTIC_NS_PER_VOLT.
+   * The slope depends on the charge current and capacitor and MUST be calibrated
+   * per board (e.g. inject a known delay, read the volts). 0 = uncalibrated:
+   * displays/telemetry then show volts only, no ns. Used by the future LTIC
+   * phase-discipline algorithm (planned), not by the current loop. */
+  #define LTIC_NS_PER_VOLT    0.0f /* 0 = not yet calibrated → show volts only */
+  /* Self-calibration (LC command) parameters. LC forces a small PWM offset so
+   * the phase ramps linearly across the detector, measures the ramp rate from
+   * the TIM2 frequency error, and regresses the TIC voltage vs time to get the
+   * slope. LTIC_CAL_PWM_OFFSET sets how hard to push (bigger = faster ramp,
+   * but must stay inside the OCXO's pull range); LTIC_CAL_SECS is how long to
+   * log. A narrow detector (small ns range) needs a SLOW ramp or the phase
+   * wraps every second and every sample rails — LC scales this offset down
+   * automatically when it measures a fast drift, but the starting value is kept
+   * small (60 LSB) so it is gentle by default. */
+  #define LTIC_CAL_PWM_OFFSET   70   /* LSB added to centre PWM during LC      */
+  #define LTIC_CAL_SECS        300u  /* seconds of ramp logging. Sized for a
+                                      * wide detector window: LVC74 @ 3.3 V
+                                      * spans ~700+ ns, so at ~4 ns/s the sweep
+                                      * needs ≥ ~180 s of clean ramp plus margin
+                                      * for a railed start. 300 s covers ~1200
+                                      * ns with room to spare. (HC74 @ 5 V was
+                                      * narrower and fit in 180 s.)            */
+  #define LTIC_DET_PERIOD_NS  100.0  /* unambiguous range of the phase detector
+                                      * = one period of its clock. The xx74
+                                      * flip-flop is clocked at 10 MHz here, so
+                                      * 100 ns BY CONSTRUCTION — a physical
+                                      * constant, not something to estimate.
+                                      * (Lars' HC4046 at 1 MHz would be 1000.) */
+  /* Operating-point anchor for the calibration (Option D).
+   *
+   * The ramp detector is exponential, so ns/V is NOT constant along it, and a
+   * whole-transit average (range/span) depends on where the picDIV arm happened
+   * to park the phase — back-to-back runs disagreed ~20 %. Two full 1 s-resolved
+   * runs showed the local slope dV/dt is REPEATABLE to ~0.3 % in a narrow band
+   * near ~1.85 V and diverges above and below it. That voltage is the physical
+   * sweet spot of THIS detector (Vsat·(1−1/e) ≈ 0.63·Vsat, near the middle of
+   * its usable range and clear of Dan Wiering's measured dead zones: the diode
+   * drop + pull-down below ~0.05 V, and the ADC rail/wraparound near 3.3 V).
+   * We anchor the loop's zero_offset here and read ns/V from the local slope in
+   * a ±window around it, instead of averaging the whole ramp.
+   *
+   * NOTE: this is board-specific (LVC74 @ 3.3 V, 1k/1n ramp). If the ramp
+   * amplitude changes, re-measure the sweet spot from a 1 s LC log. */
+  #define LTIC_ZERO_ANCHOR_V  1.85f  /* repeatable operating point [V]        */
+  #define LTIC_ANCHOR_WIN_V   0.20f  /* half-width for the local-slope fit [V] */
+#define LTIC_CAL_MIN_POINTS   12   /* reject fit with fewer samples          */
 #endif
 
 /* ── OCXO / frequency ────────────────────────────────────────────────── */

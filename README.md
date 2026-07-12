@@ -225,13 +225,20 @@ requires only changing the driver define and the width/height. The
 ST7789 modules and are harmless on the others. Independent of the I2C
 displays — OLED, LCD and TFT can all run simultaneously.
 
-> **ILI9488 is untested** — there is no panel on hand yet. The 320×240
-> operating screen and splash are auto-scaled to 480×320 at compile time
-> (width ×1.5, height ×1.33, with fonts mapped up one size). The code
-> compiles and the geometry is verified to fit the panel, but it has not been
-> run on real hardware. Treat as experimental until confirmed. Note ILI9488
-> over SPI is appreciably slower (480×320, 18-bit colour), so repaints are
-> more visible than on the small panels.
+> **ILI9488 support is provisional — tuned from user photos, not verified on a
+> panel here.** The 320×240 operating screen and splash are auto-scaled to
+> 480×320 at compile time (width ×1.5, height ×1.33). Early adopters (Dan
+> Wiering and lucido) sent photos of their 480×320 builds, and several
+> adjustments were made from those images without a panel on hand: the body
+> font is no longer over-scaled (it was mapped 2→4, growing 1.63× while rows
+> grow only 1.33×, so lines overran and the status bar was pushed off-screen —
+> now kept at font 2), the sensor rows were trimmed to fit the wider glyphs,
+> and the `User_Setup.h` font list was corrected (FONT8 is required for the
+> frequency readout and was missing from the instructions). These are
+> best-effort fixes from photographs; **the final geometry pass will happen
+> once I have an ILI9488 in hand.** Treat as experimental until then. Note
+> ILI9488 over SPI is appreciably slower (480×320, 18-bit colour), so repaints
+> are more visible than on the small panels.
 
 **Wiring (hardware SPI1):**
 
@@ -259,8 +266,8 @@ displays — OLED, LCD and TFT can all run simultaneously.
 │ Algo: 5 hit          │ Alt:  175m          │
 │ PWM:44653 Vct:1.970V │ INA: 12.050V 250mA  │
 ├──────────────────────┼─────────────────────┤
-│ BMP: 23.40C 1013hPa  │ AHT: 22.10C 45.3%rH │
-│ Vph: 2.615V 652ns    │ Vdd: 3.30V          │
+│ BMP: 23.40C 1013.2hPa│ AHT: 22.10C 45.3%rH │
+│ Vph: 2.615V +830ns   │ Vdd: 3.30V          │
 ├────────────────────────────────────────────┤
 │          DISCIPLINED  FIX OK               │ ← status bar (colour-coded)
 └────────────────────────────────────────────┘
@@ -305,7 +312,10 @@ TFT_eSPI is configured in the *library*, not the sketch. Edit
 ```
 
 For the **ILI9488 (480×320)** panel, change the driver and dimensions, and
-add `LOAD_FONT6` (the larger frequency font the scaled layout uses):
+enable the larger fonts the scaled layout maps up to — the body text uses
+FONT2, the status bar FONT6, and the big frequency readout **FONT8**. All four
+`LOAD_FONT` lines below are required; a missing FONT8 in particular leaves the
+frequency line (or status bar) blank even though the rest of the screen draws:
 
 ```c
 #define ILI9488_DRIVER
@@ -315,7 +325,8 @@ add `LOAD_FONT6` (the larger frequency font the scaled layout uses):
 #define LOAD_GLCD
 #define LOAD_FONT2
 #define LOAD_FONT4
-#define LOAD_FONT6              // large frequency font on the scaled layout
+#define LOAD_FONT6              // status bar on the scaled layout
+#define LOAD_FONT8              // large frequency readout on the scaled layout
 #define SPI_FREQUENCY 27000000
 ```
 

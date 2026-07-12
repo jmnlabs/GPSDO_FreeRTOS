@@ -235,11 +235,18 @@ extern "C" {
 #define TFT_S(v)   TFT_SX(v)
 
 /* TFT_eSPI GLCD fonts are discrete sizes (1,2,4,6,7,8), so they can't scale by
- * an arbitrary factor. TFT_F() maps a base font to the next size up on the
- * larger panel, keeping text proportional to the layout. Identity on the
- * small panels. Mapping: 1→2, 2→4, 4→6, 6→8 (others pass through). */
+ * an arbitrary factor. TFT_F() maps a base font up on the larger panel, but
+ * the jump must not outrun the ROW height, which only scales by TFT_SY (4/3 ≈
+ * 1.33). The naive mapping 2→4 grows the main data font 16→26 px (1.63×) while
+ * rows grow only 1.33× — so lines overran each other and pushed the status bar
+ * off the bottom (seen on lucido's and Dan's ILI9488). The body font (2) is
+ * therefore kept at 2: 16 px on a 480×320 panel is still clearly legible and
+ * now sits comfortably inside a 1.33×-scaled row, leaving room for the status
+ * bar. Only font 1 (fine print) is bumped to 2, and the big display/splash
+ * fonts (4,6) still step up where the vertical space genuinely exists.
+ * Mapping: 1→2, 2→2, 4→6, 6→8 (others pass through). */
 #if defined(GPSDO_TFT_ILI9488)
-  #define TFT_F(f)   ((f)==1?2 : (f)==2?4 : (f)==4?6 : (f)==6?8 : (f))
+  #define TFT_F(f)   ((f)==1?2 : (f)==2?2 : (f)==4?6 : (f)==6?8 : (f))
 #else
   #define TFT_F(f)   (f)
 #endif

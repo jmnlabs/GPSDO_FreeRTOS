@@ -538,6 +538,16 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                          p=sd(buf,p,g_ina_curr,0); p=sa(buf,p,"mA");
 #ifdef GPSDO_LTIC
     p=sa(buf,p,"  Vphase:"); p=sd(buf,p,(double)g_ltic_voltage,3); p=sa(buf,p,"V");
+    /* Derived phase in ns, once LC has calibrated the detector. Measured
+     * relative to zero_offset (mid-band), using the measured ns_per_volt —
+     * same convention as the loop's ltic_phase_error_ns() and the TFT row. */
+    if (g_ltic.ns_per_volt > 1.0f) {
+        double centre = (g_ltic.zero_offset > 0.001f)
+                        ? (double)g_ltic.zero_offset : 0.22;
+        double ph_ns = ((double)g_ltic_voltage - centre)
+                       * (double)g_ltic.ns_per_volt;
+        p=sa(buf,p," "); p=sd(buf,p,ph_ns,1); p=sa(buf,p,"ns");
+    }
 #endif
     buf[p++]='\r'; buf[p++]='\n';
     buf[p++]='\r'; buf[p++]='\n';
@@ -1311,7 +1321,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
       /* ---- sensor row ---- */
       if (bmp_ok) { static char ft[8],fp[10];
-          dtostrf(g_bmp_temp,4,2,ft); dtostrf(g_bmp_pres,6,2,fp);
+          dtostrf(g_bmp_temp,4,1,ft); dtostrf(g_bmp_pres,5,1,fp);
           snprintf(s,sizeof(s),"BMP: %sC %shPa",ft,fp); }
       else snprintf(s,sizeof(s),"BMP: ---");
       tft_val(11, TFT_COL_L, TFT_SENS_Y, TFT_S(156), TFT_COL_VALUE, s);
@@ -1324,14 +1334,22 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
 #ifdef GPSDO_LTIC
       /* ---- LTIC phase row (only when the TIC hardware is built in) ----
-       * Preview/telemetry only — the loop does not yet discipline on this.
-       * Shows the latched TIC voltage; if LTIC_NS_PER_VOLT is calibrated
-       * (non-zero) it also shows the derived phase in ns. */
+       * Shows the latched TIC voltage, and — once LC has calibrated the
+       * detector — the derived phase in ns. Phase is measured RELATIVE to the
+       * calibrated zero_offset (the mid-point of the swept band), not from
+       * 0 V, and uses the MEASURED ns_per_volt from LC, mirroring the loop's
+       * own ltic_phase_error_ns(). The old code multiplied the raw voltage by
+       * the compile-time LTIC_NS_PER_VOLT constant (default 0), so it showed
+       * nothing once calibrated and would have been wrong (no zero_offset) if
+       * the constant were set. */
       {
           static char fv[8]; dtostrf((double)g_ltic_voltage, 5, 3, fv);
-          if (LTIC_NS_PER_VOLT != 0.0f) {
-              double ns = (double)g_ltic_voltage * (double)LTIC_NS_PER_VOLT;
-              snprintf(s, sizeof(s), "Vph: %sV %ldns", fv, (long)ns);
+          if (g_ltic.ns_per_volt > 1.0f) {
+              double centre = (g_ltic.zero_offset > 0.001f)
+                              ? (double)g_ltic.zero_offset : 0.22;
+              double ns = ((double)g_ltic_voltage - centre)
+                          * (double)g_ltic.ns_per_volt;
+              snprintf(s, sizeof(s), "Vph: %sV %+ldns", fv, (long)ns);
           } else {
               snprintf(s, sizeof(s), "Vph: %sV", fv);
           }

@@ -377,10 +377,10 @@ static double ltic_phase_error_ns(bool *valid)
     /* Sawtooth correction: the receiver's 1PPS lands on an internal clock
      * edge, off true GPS time by a known qErr (UBX-TIM-TP). Subtracting it
      * removes the receiver granularity sawtooth (LEA-6T: ~±10 ns) and leaves
-     * the OCXO's own phase error. Zero when SAW is off or no fresh qErr. The
-     * TIC filter (51k/1uF, tau~51 ms) fully settles between 1 Hz pulses, so
-     * each phase reading belongs to one pulse and pairs with that pulse's
-     * qErr; the correction is a clean per-pulse subtraction. */
+     * the OCXO's own phase error. Zero when SAW is off or no fresh qErr. Each
+     * phase reading is sampled on the ramp peak right after its PPS pulse, so
+     * it belongs to that one pulse and pairs with that pulse's qErr; the
+     * correction is a clean per-pulse subtraction. */
     phase -= (double)ubx_timtp_correction_ns();
     return phase;
 }

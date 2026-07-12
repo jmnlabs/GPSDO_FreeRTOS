@@ -54,6 +54,43 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
   PPS counter, so exactly one line prints per second; the on-screen display
   still refreshes on every notification. Reported by Dan Wiering.
 - **Credit spelling.** "Wieringa" → "Wiering" in the acknowledgements.
+- **TFT `Vph` phase readout was dead code, and wrong if enabled.** It gated on
+  the compile-time `LTIC_NS_PER_VOLT` (default 0, so the ns figure never showed
+  once the detector was calibrated) and, had the constant been set, computed
+  `V × ns_per_volt` from 0 V instead of relative to `zero_offset`. It now uses
+  the MEASURED `g_ltic.ns_per_volt` and `zero_offset` from LC, showing a signed
+  phase `(V − zero_offset) × ns/V` that matches the loop's own error, or just
+  the volts when uncalibrated.
+- **CT rejected narrow-span (better) OCXOs.** The plant-gain sanity check
+  floored K at 0.1 mHz/LSB, but a narrow EFC span is desirable — smaller Hz/LSB
+  means finer resolution and is one route to E-12. Dan Wiering's build measures
+  0.048 mHz/LSB (~1.05 V EFC span) and was wrongly rejected. Floor lowered to
+  0.02 mHz/LSB; only genuine noise/no-GPS runs are now refused.
+- **ILI9488 (480×320) layout fixes — from user photos, not yet verified on a
+  panel.** Early adopters Dan Wiering and lucido sent photos of their 480×320
+  builds. Several issues were addressed from those images without an ILI9488 on
+  hand: (1) the body font was over-scaled — TFT_F mapped font 2→4 (growing
+  1.63× while rows scale only 1.33×), so lines overran vertically and the
+  status bar was pushed off-screen; the body font is now kept at 2. (2) The
+  BMP sensor row was trimmed (temperature and pressure to 1 decimal) so the
+  wider scaled glyphs don't overrun the AHT column. (3) The `User_Setup.h`
+  font instructions were missing `LOAD_FONT8`, which the frequency readout
+  needs — without it that line stays blank. These are best-effort fixes from
+  photographs; a final geometry pass will follow once an ILI9488 panel is in
+  hand. Small 320×240 panels are unaffected (TFT_F is identity there).
+- **Phase in ns added to the serial report**, after `Vphase:`, once LC has
+  calibrated the detector — `(V − zero_offset) × ns/V`, the same convention as
+  the loop and the TFT row.
+- **LC anchor is now the measured ramp midpoint, not a fixed 1.85 V.** The
+  local-slope anchor was hard-coded to Marek's detector band; a build whose
+  ramp sweeps a different range (Dan's runs lower, ~1.3 V) missed the anchor
+  window entirely and fell back to the coarse range/span average ("weak"
+  result). The anchor is now `vlow + span/2` from the actual sweep, with the
+  config `LTIC_ZERO_ANCHOR_V` used only when it genuinely falls inside the
+  swept band. LC is now self-adapting per board.
+- **TFT pressure could overrun into the AHT column.** BMP pressure was printed
+  with 2 decimals (`1013.25hPa`), which at 4-digit pressures ran past the left
+  column. Reduced to 1 decimal (`1013.2hPa`), matching the serial report.
 - **Warm-boot LOCK bounce (wasted ~1 min of the ~8 min boot-to-lock).** A
   persisted LOCK/DPLL was resumed as long as the phase read was valid (on the
   ramp), even when it sat far from zero_offset — e.g. Vphase ≈2.09 V against a

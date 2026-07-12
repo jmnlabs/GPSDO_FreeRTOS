@@ -232,14 +232,22 @@ líneas `TFT_RGB_ORDER` / `TFT_INVERSION_OFF` son necesarias para colores
 correctos en módulos ST7789 e inofensivas en los demás. Independiente de las
 pantallas I2C — OLED, LCD y TFT pueden funcionar a la vez.
 
-> **ILI9488 está sin probar** — todavía no hay panel disponible. La pantalla
-> de operación 320×240 y el splash se escalan automáticamente a 480×320 en
-> tiempo de compilación (ancho ×1.5, alto ×1.33, con las fuentes mapeadas un
-> tamaño hacia arriba). El código compila y se ha verificado que la geometría
-> cabe en el panel, pero no se ha ejecutado en hardware real. Trátelo como
-> experimental hasta confirmarlo. El ILI9488 por SPI es apreciablemente más
-> lento (480×320, color de 18 bits), así que los redibujados son más visibles
-> que en los paneles pequeños.
+> **El soporte del ILI9488 es provisional — ajustado a partir de fotos de
+> usuarios, no verificado en un panel aquí.** La pantalla de operación 320×240
+> y el splash se escalan automáticamente a 480×320 en tiempo de compilación
+> (ancho ×1.5, alto ×1.33). Los primeros usuarios (Dan Wiering y lucido)
+> enviaron fotos de sus montajes 480×320, y se hicieron varios ajustes a partir
+> de esas imágenes sin un panel a mano: la fuente del cuerpo ya no se
+> sobre-escala (se mapeaba 2→4, creciendo 1.63× mientras las filas crecen solo
+> 1.33×, así que las líneas se solapaban y la barra de estado se salía de la
+> pantalla — ahora se mantiene en fuente 2), las filas de sensores se acortaron
+> para las glifos más anchos, y se corrigió la lista de fuentes de
+> `User_Setup.h` (FONT8 es necesaria para la lectura de frecuencia y faltaba en
+> las instrucciones). Son correcciones «al mejor criterio» a partir de
+> fotografías; **el pase final de geometría se hará cuando tenga un ILI9488 en
+> mano.** Hasta entonces, trátelo como experimental. El ILI9488 por SPI es
+> apreciablemente más lento (480×320, color de 18 bits), así que los
+> redibujados son más visibles que en los paneles pequeños.
 
 **Cableado (SPI1 por hardware):**
 
@@ -267,8 +275,8 @@ pantallas I2C — OLED, LCD y TFT pueden funcionar a la vez.
 │ Algo: 5 hit          │ Alt:  175m          │
 │ PWM:44653 Vct:1.970V │ INA: 12.050V 250mA  │
 ├──────────────────────┼─────────────────────┤
-│ BMP: 23.40C 1013hPa  │ AHT: 22.10C 45.3%rH │
-│ Vph: 2.615V 652ns    │ Vdd: 3.30V          │
+│ BMP: 23.40C 1013.2hPa│ AHT: 22.10C 45.3%rH │
+│ Vph: 2.615V +830ns   │ Vdd: 3.30V          │
 ├────────────────────────────────────────────┤
 │          DISCIPLINED  FIX OK               │ ← status bar (colour-coded)
 └────────────────────────────────────────────┘
@@ -314,8 +322,11 @@ TFT_eSPI se configura en la *biblioteca*, no en el sketch. Edite
 ```
 
 Para el panel **ILI9488 (480×320)**, cambie el driver y las dimensiones y
-añada `LOAD_FONT6` (la fuente de frecuencia más grande que usa el diseño
-escalado):
+habilite las fuentes más grandes a las que el diseño escalado mapea el texto —
+el cuerpo usa FONT2, la barra de estado FONT6 y la lectura grande de frecuencia
+**FONT8**. Las cuatro líneas `LOAD_FONT` de abajo son necesarias; la falta de
+FONT8 en particular deja la línea de frecuencia (o la barra de estado) en blanco
+aunque el resto de la pantalla se dibuje:
 
 ```c
 #define ILI9488_DRIVER
@@ -325,7 +336,8 @@ escalado):
 #define LOAD_GLCD
 #define LOAD_FONT2
 #define LOAD_FONT4
-#define LOAD_FONT6              // fuente grande de frecuencia en el diseño escalado
+#define LOAD_FONT6              // barra de estado en el diseño escalado
+#define LOAD_FONT8              // lectura grande de frecuencia en el diseño escalado
 #define SPI_FREQUENCY 27000000
 ```
 

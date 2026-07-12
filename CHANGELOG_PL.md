@@ -55,6 +55,43 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
   licznika PPS, więc drukuje się dokładnie jedna na sekundę; wyświetlacz nadal
   odświeża się przy każdej notyfikacji. Zgłoszone przez Dana Wiering.
 - **Pisownia nazwiska w podziękowaniach** poprawiona na „Wiering” (na prośbę autora).
+- **Odczyt fazy `Vph` na TFT był martwym kodem, a przy włączeniu — błędnym.**
+  Warunkował się stałą kompilacyjną `LTIC_NS_PER_VOLT` (domyślnie 0, więc wartość
+  ns nigdy się nie pokazywała po kalibracji), a gdyby stała była ustawiona,
+  liczył `V × ns_per_volt` od 0 V zamiast względem `zero_offset`. Teraz używa
+  ZMIERZONYCH `g_ltic.ns_per_volt` i `zero_offset` z LC, pokazując fazę ze znakiem
+  `(V − zero_offset) × ns/V` zgodną z błędem pętli, albo same wolty gdy
+  nieskalibrowane.
+- **CT odrzucał wąskie (lepsze) OCXO.** Sanity check wzmocnienia obiektu miał
+  dolny próg K = 0,1 mHz/LSB, ale wąski span EFC jest pożądany — mniejsze Hz/LSB
+  to lepsza rozdzielczość i jedna z dróg do E-12. Sprzęt Dana Wiering mierzy
+  0,048 mHz/LSB (~1,05 V span EFC) i był błędnie odrzucany. Próg obniżony do
+  0,02 mHz/LSB; odrzucane są teraz tylko przebiegi szum/brak-GPS.
+- **Poprawki układu ILI9488 (480×320) — ze zdjęć użytkowników, jeszcze nie
+  zweryfikowane na panelu.** Pierwsi użytkownicy Dan Wiering i lucido przysłali
+  zdjęcia swoich buildów 480×320. Kilka problemów rozwiązano na ich podstawie
+  bez panelu pod ręką: (1) font głównych danych był nadmiernie skalowany —
+  TFT_F mapował font 2→4 (rosnąc 1.63× gdy wiersze skalują się tylko 1.33×),
+  więc linie nachodziły w pionie, a pasek statusu wypadał poza ekran; font
+  danych zostaje teraz na 2. (2) Wiersz czujnika BMP skrócono (temperatura i
+  ciśnienie do 1 miejsca), by szersze skalowane glify nie nachodziły na kolumnę
+  AHT. (3) W instrukcji `User_Setup.h` brakowało `LOAD_FONT8`, którego wymaga
+  odczyt częstotliwości — bez niego ta linia zostaje pusta. To poprawki „na
+  najlepsze wyczucie” ze zdjęć; finalne przejście po geometrii nastąpi, gdy
+  będzie dostępny panel ILI9488. Małe panele 320×240 są nietknięte (TFT_F jest
+  tam tożsamością).
+- **Faza w ns dodana do raportu szeregowego**, po `Vphase:`, gdy LC skalibruje
+  detektor — `(V − zero_offset) × ns/V`, ta sama konwencja co pętla i wiersz TFT.
+- **Kotwica LC to teraz zmierzony środek rampy, nie stałe 1,85 V.** Kotwica
+  lokalnego nachylenia była zaszyta pod pasmo detektora Marka; sprzęt, którego
+  rampa przemiata inny zakres (Dan pracuje niżej, ~1,3 V), całkiem mijał okno
+  kotwicy i wracał do zgrubnej średniej range/span (wynik „weak”). Kotwica to
+  teraz `vlow + span/2` z rzeczywistego przebiegu, a stała `LTIC_ZERO_ANCHOR_V`
+  jest używana tylko gdy faktycznie mieści się w przemiecionym paśmie. LC
+  samoadaptuje się per płytka.
+- **Ciśnienie na TFT mogło wchodzić na kolumnę AHT.** Ciśnienie BMP drukowane było
+  z 2 miejscami (`1013.25hPa`), co przy 4-cyfrowym ciśnieniu wychodziło poza lewą
+  kolumnę. Zmniejszone do 1 miejsca (`1013.2hPa`), spójnie z raportem szeregowym.
 - **Odbicie LOCK przy ciepłym starcie (marnowało ~1 min z ~8 min boot-to-lock).**
   Zapisany LOCK/DPLL był wznawiany, dopóki odczyt fazy był ważny (na rampie),
   nawet gdy siedział daleko od zero_offset — np. Vphase ≈2,09 V przy kotwicy

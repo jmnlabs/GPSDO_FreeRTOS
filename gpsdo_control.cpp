@@ -300,9 +300,15 @@ static void do_calibrate_tune(void)
     double K = (3.0 * sxy - sx * sy) / denom;        /* Hz/LSB */
     double b = (sy - K * sx) / 3.0;                  /* intercept */
 
-    /* Sanity: K must be positive and within an order of magnitude of the
-     * physical range (0.1–2 mHz/LSB).  Reject noise/no-GPS runs.        */
-    if (K < 1e-4 || K > 2e-3) {
+    /* Sanity: K must be positive and physically plausible. The lower bound
+     * must accommodate NARROW-span EFC oscillators, which are DESIRABLE — a
+     * smaller Hz/LSB means finer tuning resolution and is one route to E-12
+     * stability. Dan Wiering's build measured 0.048 mHz/LSB (K = 4.8e-5) with
+     * a ~1.05 V EFC span, well below the old 0.1 mHz/LSB floor, and was
+     * wrongly rejected. Floor lowered to 2e-5 (0.02 mHz/LSB ≈ 1.3 Hz full
+     * span); upper 2e-3 kept for wide/non-linear parts. Only genuine noise /
+     * no-GPS runs (K≈0 or absurdly large) are now rejected. */
+    if (K < 2e-5 || K > 2e-3) {
         OUT_SERIAL.print("CT: ERROR K out of range (");
         OUT_SERIAL.print(K * 1000.0, 4);
         OUT_SERIAL.println(" mHz/LSB) — check GPS fix. Params unchanged.");
@@ -729,17 +735,28 @@ static void do_ltic_calibrate(void)
     /* --- Option D: anchored zero_offset + LOCAL-slope ns/V --------------
      * ns/V from the whole-transit average (range/span) drifts ~20 % run to
      * run because the exponential ramp has no single slope and the arm parks
-     * the phase at a random height. The local slope in a narrow band near
-     * LTIC_ZERO_ANCHOR_V is repeatable to ~0.3 % (verified on two 1 s LC
-     * logs), so we anchor the operating point there and read ns/V from a
-     * least-squares dV/dt in a ±LTIC_ANCHOR_WIN_V window: nsv = rate /|dV/dt|.
-     * Falls back to the whole-ramp average only if the sweep never crossed
-     * the anchor band (too few samples). */
+     * the phase at a random height. The local slope in a narrow band around a
+     * fixed operating point is repeatable to ~0.3 % (verified on 1 s LC logs),
+     * so we read ns/V from a least-squares dV/dt in a ±LTIC_ANCHOR_WIN_V
+     * window: nsv = rate /|dV/dt|.
+     *
+     * The anchor is the MIDDLE OF THE MEASURED RAMP (vlow + span/2), not a
+     * fixed voltage — different builds sweep different bands (Marek's 1k/1n
+     * detector centres ~1.85 V; Dan Wiering's runs lower, ~1.33 V), and a
+     * hard-coded 1.85 V anchor missed Dan's band entirely, giving too few
+     * points and a "weak" fallback. LTIC_ZERO_ANCHOR_V is used only as a
+     * preferred anchor WHEN it actually falls inside the swept band; otherwise
+     * the measured midpoint wins. This makes LC self-adapting per board. */
     int anchor_n = 0;
     {
+        double mid = (double)vlow + 0.5 * span;
+        double anchor_v = (double)LTIC_ZERO_ANCHOR_V;
+        /* only honour the config anchor if the sweep actually covered it */
+        if (anchor_v < (double)vlow + 0.1 || anchor_v > (double)vhigh - 0.1)
+            anchor_v = mid;
         double sx = 0, sy = 0, sxx = 0, sxy = 0;
         for (uint16_t i = 0; i < cnt; i++) {
-            if (fabsf(s_v[i] - LTIC_ZERO_ANCHOR_V) <= LTIC_ANCHOR_WIN_V) {
+            if (fabs((double)s_v[i] - anchor_v) <= LTIC_ANCHOR_WIN_V) {
                 double tt = (double)s_t[i], vv = (double)s_v[i];
                 sx += tt; sy += vv; sxx += tt * tt; sxy += tt * vv; anchor_n++;
             }
@@ -749,7 +766,7 @@ static void do_ltic_calibrate(void)
             double dvdt = ((double)anchor_n * sxy - sx * sy) / denom;  /* V/s */
             if (fabs(dvdt) > 1e-6) {
                 nsv      = fabs(phase_rate) / fabs(dvdt);
-                zero_off = (double)LTIC_ZERO_ANCHOR_V;                 /* anchored */
+                zero_off = anchor_v;                       /* anchored (measured) */
             }
         }
     }

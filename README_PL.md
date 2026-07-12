@@ -226,13 +226,20 @@ panelu wymaga tylko zmiany definicji drivera oraz szerokości/wysokości. Linie
 modułach ST7789, a na pozostałych są nieszkodliwe. Niezależne od wyświetlaczy
 I2C — OLED, LCD i TFT mogą działać jednocześnie.
 
-> **ILI9488 jest nietestowany** — brak panelu do testów. Ekran roboczy 320×240
-> i splash są automatycznie skalowane do 480×320 podczas kompilacji (szerokość
-> ×1.5, wysokość ×1.33, fonty mapowane o rozmiar w górę). Kod się kompiluje, a
-> geometria została zweryfikowana, że mieści się w panelu, ale nie był
-> uruchomiony na realnym sprzęcie. Traktować jako eksperymentalny do
-> potwierdzenia. ILI9488 po SPI jest zauważalnie wolniejszy (480×320, kolor
-> 18-bit), więc przerysowania są bardziej widoczne niż na małych panelach.
+> **Wsparcie ILI9488 jest wstępne — strojone ze zdjęć użytkowników, nie
+> zweryfikowane na panelu u mnie.** Ekran roboczy 320×240 i splash są
+> automatycznie skalowane do 480×320 podczas kompilacji (szerokość ×1.5,
+> wysokość ×1.33). Pierwsi użytkownicy (Dan Wiering i lucido) przysłali zdjęcia
+> swoich buildów 480×320, i kilka poprawek wprowadzono na ich podstawie bez
+> panelu pod ręką: font głównych danych nie jest już nadmiernie skalowany (był
+> mapowany 2→4, rosnąc 1.63× gdy wiersze rosną tylko 1.33×, więc linie
+> nachodziły, a pasek statusu wypadał poza ekran — teraz zostaje font 2),
+> wiersze czujników skrócono pod szersze glify, a listę fontów w `User_Setup.h`
+> poprawiono (FONT8 jest wymagany dla odczytu częstotliwości i brakowało go w
+> instrukcji). To poprawki „na najlepsze wyczucie" ze zdjęć; **finalne przejście
+> po geometrii nastąpi, gdy dostanę ILI9488 do ręki.** Do tego czasu traktować
+> jako eksperymentalny. ILI9488 po SPI jest zauważalnie wolniejszy (480×320,
+> kolor 18-bit), więc przerysowania są bardziej widoczne niż na małych panelach.
 
 **Okablowanie (sprzętowe SPI1):**
 
@@ -260,8 +267,8 @@ I2C — OLED, LCD i TFT mogą działać jednocześnie.
 │ Algo: 5 hit          │ Alt:  175m          │
 │ PWM:44653 Vct:1.970V │ INA: 12.050V 250mA  │
 ├──────────────────────┼─────────────────────┤
-│ BMP: 23.40C 1013hPa  │ AHT: 22.10C 45.3%rH │
-│ Vph: 2.615V 652ns    │ Vdd: 3.30V          │
+│ BMP: 23.40C 1013.2hPa│ AHT: 22.10C 45.3%rH │
+│ Vph: 2.615V +830ns   │ Vdd: 3.30V          │
 ├────────────────────────────────────────────┤
 │          DISCIPLINED  FIX OK               │ ← status bar (colour-coded)
 └────────────────────────────────────────────┘
@@ -306,8 +313,11 @@ TFT_eSPI konfiguruje się w *bibliotece*, nie w szkicu. Edytuj
 #define SPI_FREQUENCY 27000000
 ```
 
-Dla panelu **ILI9488 (480×320)** zmień driver i wymiary oraz dodaj
-`LOAD_FONT6` (większy font częstotliwości używany przez skalowany układ):
+Dla panelu **ILI9488 (480×320)** zmień driver i wymiary oraz włącz większe
+fonty, na które skalowany układ mapuje tekst — dane używają FONT2, pasek
+statusu FONT6, a duży odczyt częstotliwości **FONT8**. Wszystkie cztery linie
+`LOAD_FONT` poniżej są wymagane; brak FONT8 w szczególności zostawia linię
+częstotliwości (lub pasek statusu) pustą, choć reszta ekranu się rysuje:
 
 ```c
 #define ILI9488_DRIVER
@@ -317,7 +327,8 @@ Dla panelu **ILI9488 (480×320)** zmień driver i wymiary oraz dodaj
 #define LOAD_GLCD
 #define LOAD_FONT2
 #define LOAD_FONT4
-#define LOAD_FONT6              // duży font częstotliwości w skalowanym układzie
+#define LOAD_FONT6              // pasek statusu w skalowanym układzie
+#define LOAD_FONT8              // duży odczyt częstotliwości w skalowanym układzie
 #define SPI_FREQUENCY 27000000
 ```
 

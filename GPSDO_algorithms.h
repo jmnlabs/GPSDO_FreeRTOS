@@ -1,7 +1,7 @@
 /**
  * GPSDO_algorithms.h — Control loop algorithm declarations and tunable parameters
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -76,6 +76,11 @@ void ltic_autotune(void);
 extern bool     g_lrn_enable;
 extern float    g_lrn_drift;
 extern float    g_lrn_damp;
+
+/* Damping multiplier legal band, shared with live_store so a restored value
+ * from older flash can be clamped into range on load. */
+#define LRN_DAMP_LO     0.45f
+#define LRN_DAMP_HI     1.5f
 extern float    g_nn_tempco;
 extern float    g_ltic_acq_centre_gain;  /* algo 10: ACQ centring gain [LSB/V]  */
 extern float    g_ltic_acq_centre_cap;   /* algo 10: ACQ centring cap   [LSB]   */ /* algo 9: learned oscillator tempco [LSB/°C] */

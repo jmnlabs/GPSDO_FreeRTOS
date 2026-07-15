@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.cpp — Shared state instances and EEPROM helpers
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -387,7 +387,7 @@ void eeprom_recall(void)
         { uint8_t le = eeprom_buffered_read_byte(EE_LRN_EN);
           g_lrn_enable = (le == 0u) ? false : true; }       /* 0xFF/1 → on (default) */
         v = ee_read_float(EE_LRN_DRIFT); if (isfinite(v) && v > -400.0f && v < 400.0f) g_lrn_drift = v;
-        v = ee_read_float(EE_LRN_DAMP);  if (isfinite(v) && v >= 0.5f && v <= 1.5f)   g_lrn_damp  = v;
+        v = ee_read_float(EE_LRN_DAMP);  if (isfinite(v) && v >= LRN_DAMP_LO && v <= LRN_DAMP_HI) g_lrn_damp = v;
     }
 
     /* Apply PWM immediately to DAC */

@@ -1,6 +1,6 @@
 /* ======================================================================
  * live_store.cpp  —  live-data persistence over the flash ring buffer
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * See live_store.h for the design and payload layout.
  * ====================================================================== */
 
@@ -66,6 +66,14 @@ static void ls_apply(const uint8_t *buf)
     /* learned values */
     g_lrn_drift = ls_get_f(buf +  0);
     g_lrn_damp  = ls_get_f(buf +  4);
+    /* The damping floor can change between firmware versions (it was raised
+     * 0.30 → 0.45 when a too-hard floor was found to starve the loop and drop
+     * lock). Flash written by an older build can therefore hold a damp below
+     * the current floor, and since damp only adapts on limit-cycle crossings
+     * it would otherwise stay stuck there for a long time. Clamp the restored
+     * value into the current legal band so a reflash takes effect immediately. */
+    if (g_lrn_damp < LRN_DAMP_LO) g_lrn_damp = LRN_DAMP_LO;
+    if (g_lrn_damp > LRN_DAMP_HI) g_lrn_damp = LRN_DAMP_HI;
     /* LC calibration */
     g_ltic.ns_per_volt = ls_get_f(buf +  8);
     g_ltic.zero_offset = ls_get_f(buf + 12);

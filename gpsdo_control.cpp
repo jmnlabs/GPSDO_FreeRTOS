@@ -1,7 +1,7 @@
 /**
  * gpsdo_control.cpp — vControlTask — OCXO control loop
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -34,6 +34,10 @@ bool   g_tz_auto        = false;   /* true = derive g_time_offset from GPS */
 bool   g_svin_enabled   = true;    /* true = run survey-in on timing module */
 
 volatile bool     g_calib_active    = false;
+/* Which calibration is running — the status line names the procedure instead
+ * of a generic "CAL", since C, CT and LC take very different times and a user
+ * watching a long countdown should know which one they started. */
+volatile uint8_t  g_calib_kind      = CALIB_NONE;
 volatile uint16_t g_calib_remaining = 0;
 volatile bool     g_warmup_active    = false;
 volatile bool     g_warmup_enable    = true;   /* WU 0/1, saved in EEPROM */
@@ -41,6 +45,12 @@ volatile bool     g_splash_enable    = true;   /* SPL 0/1, saved in EEPROM */
 volatile bool     g_flash_ring_enable = true;   /* FR 0/1, saved in EEPROM */
 volatile uint16_t g_warmup_remaining = 0;
 volatile bool     g_svin_active = false;
+/* A survey-in that outlived our monitoring window. The receiver keeps
+ * surveying on its own ("continuing anyway"), but g_svin_active is cleared, so
+ * without this the operator would lose all sight of it. Set when the safety
+ * timeout fires on a survey that WAS replying; cleared once the receiver
+ * reports Time Mode (the survey's real completion signal). */
+volatile bool     g_svin_background = false;
 volatile bool     g_svin_pending = false;
 volatile uint16_t g_svin_dur    = 0;
 volatile uint16_t g_svin_acc_m  = 0;
@@ -144,34 +154,31 @@ static MovAvg10_t s_avg_vctl = {0}, s_avg_vcc = {0}, s_avg_vdd = {0};
  * Vctl ADC ourselves each second, keeping the displays live.            */
 static void wait_secs_pwm(uint16_t n, uint16_t cur_pwm)
 {
+    /* vTaskDelayUntil keeps each step a true second apart — the ADC read and
+     * any preemption would otherwise add to a plain vTaskDelay and make the
+     * displayed countdown lag real time over a long calibration. */
+    TickType_t wake = xTaskGetTickCount();
     while (n--) {
         /* countdown of the WHOLE procedure (set by the caller at start,
          * topped up when adaptive phases add time), not of this segment */
-        if (g_calib_remaining > 1) g_calib_remaining--;
+        if (g_calib_remaining > 0) g_calib_remaining--;
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             gCtrl.pwm_output   = cur_pwm;
             gCtrl.avg_vctl_adc = movavg_update(&s_avg_vctl,
                                    (int16_t)analogRead(PIN_VCTL_ADC));
             xSemaphoreGive(xCtrlMutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(1000));
     }
 }
 
-/* Legacy entry point — waits without touching PWM (non-calibration use) */
-static void wait_secs(uint16_t n)
-{
-    while (n--) {
-        if (g_calib_remaining > 1) g_calib_remaining--;
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
 
 /* ---- Calibration routine ---------------------------------------------- */
 static void do_calibration(void)
 {
     OUT_SERIAL.println("Calibration started");
     g_calib_active = true;
+    g_calib_kind   = CALIB_C;
     g_calib_remaining = 2u * OCXO_CALIB_SECS + 5u;   /* real total for displays */
 
     /* Set Vctl=1.5V */
@@ -225,6 +232,7 @@ static void do_calibration(void)
 
     xEventGroupClearBits(xSysEvents, EVT_NEED_CALIBRATION);
     g_calib_active = false;
+    g_calib_kind   = CALIB_NONE;
     g_calib_remaining = 0;
 
     /* Do NOT auto-arm the picDIV here: the discipline loop has not yet
@@ -263,6 +271,7 @@ static void do_calibrate_tune(void)
 
     OUT_SERIAL.println("CT: calibrate + auto-tune started (3 points)");
     g_calib_active = true;
+    g_calib_kind   = CALIB_CT;
 
     double f[3]; const uint16_t pwm[3] = { PWM_A, PWM_B, PWM_C };
     for (int i = 0; i < 3; i++) {
@@ -294,6 +303,7 @@ static void do_calibrate_tune(void)
         analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
         xEventGroupClearBits(xSysEvents, EVT_NEED_TUNE);
         g_calib_active = false;
+        g_calib_kind   = CALIB_NONE;
         g_calib_remaining = 0;
         return;
     }
@@ -315,6 +325,7 @@ static void do_calibrate_tune(void)
         analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
         xEventGroupClearBits(xSysEvents, EVT_NEED_TUNE);
         g_calib_active = false;
+        g_calib_kind   = CALIB_NONE;
         g_calib_remaining = 0;
         return;
     }
@@ -374,6 +385,7 @@ static void do_calibrate_tune(void)
 
     xEventGroupClearBits(xSysEvents, EVT_NEED_TUNE);
     g_calib_active = false;
+    g_calib_kind   = CALIB_NONE;
     g_calib_remaining = 0;
     OUT_SERIAL.println("CT: done. Review values, then 'ES' to save to EEPROM.");
 }
@@ -399,13 +411,15 @@ static void do_calibrate_tune(void)
  * the loop can refine). Every result is range-guarded; on any failure the PWM
  * is restored and the LTIC params are left unchanged.
  *
- * Runs in the control task (like CT) so PWM manipulation is safe. The loop
- * itself (algo 10) is still phase A — this only fills the calibration fields.
+ * Runs in the control task (like CT) so PWM manipulation is safe. This only
+ * fills the calibration fields (ns_per_volt, zero_offset, range_ns); the
+ * phase-discipline loop (algo 10) then uses them.
  * ====================================================================== */
 static void do_ltic_calibrate(void)
 {
     OUT_SERIAL.println("LC: LTIC self-calibration started");
     g_calib_active = true;
+    g_calib_kind   = CALIB_LC;
 
     /* Real total for the display countdown: prep(≤64)+arm(4)+settle(30)
      * +dir-check(8)+df(~10)+sweep+finish(~5); adaptive phases top it up. */
@@ -607,7 +621,7 @@ static void do_ltic_calibrate(void)
                 OUT_SERIAL.println("LC: ERROR could not land on the ramp after 6 arms — check picARM / pulse path; aborting.");
                 analogWrite(PIN_VCTL_PWM, saved_pwm);
                 xEventGroupClearBits(xSysEvents, EVT_NEED_LTIC_CAL);
-                g_calib_active = false; g_calib_remaining = 0;
+                g_calib_active = false; g_calib_kind = CALIB_NONE; g_calib_remaining = 0;
                 return;
             }
             OUT_SERIAL.println("LC: on the ramp — collecting transit.");
@@ -696,7 +710,7 @@ static void do_ltic_calibrate(void)
         OUT_SERIAL.println("LC: ERROR too few points — aborting, params unchanged");
         analogWrite(PIN_VCTL_PWM, saved_pwm);
         xEventGroupClearBits(xSysEvents, EVT_NEED_LTIC_CAL);
-        g_calib_active = false; g_calib_remaining = 0;
+        g_calib_active = false; g_calib_kind = CALIB_NONE; g_calib_remaining = 0;
         return;
     }
 
@@ -732,28 +746,58 @@ static void do_ltic_calibrate(void)
     if (transit_ok && fabs(phase_rate) > 0.1)
         range_ns = fabs(phase_rate) * (double)(t90 - t10) / 0.8;
 
-    /* --- Option D: anchored zero_offset + LOCAL-slope ns/V --------------
+    /* --- Option D (universal): anchor at 0.632·Vsat + LOCAL-slope ns/V ----
      * ns/V from the whole-transit average (range/span) drifts ~20 % run to
      * run because the exponential ramp has no single slope and the arm parks
-     * the phase at a random height. The local slope in a narrow band around a
-     * fixed operating point is repeatable to ~0.3 % (verified on 1 s LC logs),
-     * so we read ns/V from a least-squares dV/dt in a ±LTIC_ANCHOR_WIN_V
-     * window: nsv = rate /|dV/dt|.
+     * the phase at a random height. We instead read ns/V from the LOCAL slope
+     * dV/dt in a narrow window around a fixed OPERATING POINT.
      *
-     * The anchor is the MIDDLE OF THE MEASURED RAMP (vlow + span/2), not a
-     * fixed voltage — different builds sweep different bands (Marek's 1k/1n
-     * detector centres ~1.85 V; Dan Wiering's runs lower, ~1.33 V), and a
-     * hard-coded 1.85 V anchor missed Dan's band entirely, giving too few
-     * points and a "weak" fallback. LTIC_ZERO_ANCHOR_V is used only as a
-     * preferred anchor WHEN it actually falls inside the swept band; otherwise
-     * the measured midpoint wins. This makes LC self-adapting per board. */
+     * That operating point is derived from the physics, not hard-coded. The
+     * detector is an RC charge ramp, V(φ) = Vsat·(1 − e^(−φ/τ)), so the point
+     * φ = τ — where V = Vsat·(1 − 1/e) = 0.632·Vsat — is a universal, per-board
+     * anchor: the same fractional height on every exponential detector,
+     * whatever its Vsat. (An earlier build hard-coded 1.85 V, which only worked
+     * because Marek's and Dan Wiering's detectors both happen to have
+     * Vsat ≈ 2.93 V → 0.632·Vsat ≈ 1.85 V. A detector with Vsat = 2.0 V would
+     * anchor at 1.26 V and the fixed 1.85 V would miss its ramp entirely.)
+     * We recover Vsat with a 1-D scan: for each candidate Vsat, linearise
+     * y = −ln(1 − V/Vsat) against t and pick the Vsat with the lowest
+     * regression residual; anchor = 0.632·Vsat. This makes LC fully
+     * self-adapting per board with no configuration. Physics/derivation
+     * credit: GML-5.2. Falls back to the ramp midpoint if the fit fails. */
     int anchor_n = 0;
     {
-        double mid = (double)vlow + 0.5 * span;
-        double anchor_v = (double)LTIC_ZERO_ANCHOR_V;
-        /* only honour the config anchor if the sweep actually covered it */
-        if (anchor_v < (double)vlow + 0.1 || anchor_v > (double)vhigh - 0.1)
-            anchor_v = mid;
+        /* 1-D Vsat fit: minimise the residual of the linearised charge curve */
+        double best_res = 1e300, best_vsat = 0.0;
+        for (double vs = (double)vhigh + 0.01; vs <= 3.30; vs += 0.01) {
+            double sx = 0, sy = 0, sxx = 0, sxy = 0; int m = 0; bool ok = true;
+            for (uint16_t i = 0; i < cnt; i++) {
+                double v = (double)s_v[i];
+                if (v >= vs) { ok = false; break; }
+                double y = -log(1.0 - v / vs), x = (double)s_t[i];
+                sx += x; sy += y; sxx += x * x; sxy += x * y; m++;
+            }
+            if (!ok || m < 5) continue;
+            double den = (double)m * sxx - sx * sx;
+            if (fabs(den) < 1e-9) continue;
+            double B = ((double)m * sxy - sx * sy) / den;
+            double A = (sy - B * sx) / (double)m;
+            double res = 0.0;
+            for (uint16_t i = 0; i < cnt; i++) {
+                double v = (double)s_v[i];
+                if (v >= vs) continue;
+                double y = -log(1.0 - v / vs), x = (double)s_t[i];
+                double e = y - (A + B * x); res += e * e;
+            }
+            if (res < best_res) { best_res = res; best_vsat = vs; }
+        }
+        /* anchor = 0.632·Vsat if the fit succeeded and it lies in the swept
+         * band; otherwise the measured ramp midpoint */
+        double anchor_v = (double)vlow + 0.5 * span;   /* fallback */
+        if (best_vsat > 0.0) {
+            double a = 0.63212 * best_vsat;
+            if (a >= (double)vlow + 0.05 && a <= (double)vhigh - 0.05) anchor_v = a;
+        }
         double sx = 0, sy = 0, sxx = 0, sxy = 0;
         for (uint16_t i = 0; i < cnt; i++) {
             if (fabs((double)s_v[i] - anchor_v) <= LTIC_ANCHOR_WIN_V) {
@@ -768,6 +812,11 @@ static void do_ltic_calibrate(void)
                 nsv      = fabs(phase_rate) / fabs(dvdt);
                 zero_off = anchor_v;                       /* anchored (measured) */
             }
+        }
+        if (best_vsat > 0.0) {
+            OUT_SERIAL.print("LC: Vsat=");   OUT_SERIAL.print(best_vsat, 3);
+            OUT_SERIAL.print("V  anchor=");  OUT_SERIAL.print(anchor_v, 3);
+            OUT_SERIAL.println("V (0.632xVsat)");
         }
     }
     if (nsv <= 0.0 && span > 0.05) {              /* fallback: whole-ramp avg */
@@ -801,7 +850,7 @@ static void do_ltic_calibrate(void)
         xSemaphoreGive(xFreqMutex);
     }
     xEventGroupClearBits(xSysEvents, EVT_NEED_LTIC_CAL);
-    g_calib_active = false; g_calib_remaining = 0;
+    g_calib_active = false; g_calib_kind = CALIB_NONE; g_calib_remaining = 0;
 
     {
         bool span_sane = span > 0.30 && span <= 3.4;   /* ramp: expect ~1.5-3 V */
@@ -826,9 +875,32 @@ static void do_warmup(void)
 {
     OUT_SERIAL.print("OCXO warming up, "); OUT_SERIAL.print(OCXO_WARMUP_SECS); OUT_SERIAL.println("s");
     g_warmup_active = true;
+    /* vTaskDelayUntil (not vTaskDelay) so each tick is a true 1 s apart: the
+     * ADC sampling below plus any preemption would otherwise be ADDED to the
+     * delay, and the countdown would run slower than the clock — 300 displayed
+     * seconds taking noticeably longer than 300 real ones. */
+    TickType_t wake = xTaskGetTickCount();
     for (uint16_t i = OCXO_WARMUP_SECS; i > 0; i--) {
         g_warmup_remaining = i;
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        /* Keep the analogue readings live while we wait. Warmup runs BEFORE the
+         * control task's main loop, which is where Vctl/Vcc/Vdd are normally
+         * sampled — so without this the displays showed 0.000 V for the whole
+         * warmup (the ADC averages had never been filled). Same pattern as
+         * wait_secs_pwm() uses during calibration. */
+        if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            gCtrl.avg_vctl_adc = movavg_update(&s_avg_vctl,
+                                   (int16_t)analogRead(PIN_VCTL_ADC));
+#ifdef GPSDO_VCC
+            gCtrl.avg_vcc_adc  = movavg_update(&s_avg_vcc,
+                                   (int16_t)analogRead(PIN_VCC_DIV2));
+#endif
+#ifdef GPSDO_VDD
+            gCtrl.avg_vdd_adc  = movavg_update(&s_avg_vdd,
+                                   (int16_t)analogRead(AVREF));
+#endif
+            xSemaphoreGive(xCtrlMutex);
+        }
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(1000));
         if ((i % 30) == 0) {
             OUT_SERIAL.print(i); OUT_SERIAL.println("s remaining");
         }

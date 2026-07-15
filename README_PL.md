@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v0.91
+# GPSDO FreeRTOS v0.94
 
 [English](README.md) | **Polski** | [Español](README_ES.md)
 
@@ -226,20 +226,28 @@ panelu wymaga tylko zmiany definicji drivera oraz szerokości/wysokości. Linie
 modułach ST7789, a na pozostałych są nieszkodliwe. Niezależne od wyświetlaczy
 I2C — OLED, LCD i TFT mogą działać jednocześnie.
 
-> **Wsparcie ILI9488 jest wstępne — strojone ze zdjęć użytkowników, nie
-> zweryfikowane na panelu u mnie.** Ekran roboczy 320×240 i splash są
-> automatycznie skalowane do 480×320 podczas kompilacji (szerokość ×1.5,
-> wysokość ×1.33). Pierwsi użytkownicy (Dan Wiering i lucido) przysłali zdjęcia
-> swoich buildów 480×320, i kilka poprawek wprowadzono na ich podstawie bez
-> panelu pod ręką: font głównych danych nie jest już nadmiernie skalowany (był
-> mapowany 2→4, rosnąc 1.63× gdy wiersze rosną tylko 1.33×, więc linie
-> nachodziły, a pasek statusu wypadał poza ekran — teraz zostaje font 2),
-> wiersze czujników skrócono pod szersze glify, a listę fontów w `User_Setup.h`
-> poprawiono (FONT8 jest wymagany dla odczytu częstotliwości i brakowało go w
-> instrukcji). To poprawki „na najlepsze wyczucie" ze zdjęć; **finalne przejście
-> po geometrii nastąpi, gdy dostanę ILI9488 do ręki.** Do tego czasu traktować
-> jako eksperymentalny. ILI9488 po SPI jest zauważalnie wolniejszy (480×320,
-> kolor 18-bit), więc przerysowania są bardziej widoczne niż na małych panelach.
+> **Wsparcie ILI9488 / ILI9486 480×320 zweryfikowane na panelu (v0.93).** Ekran
+> roboczy 320×240 i splash są automatycznie skalowane do 480×320 podczas
+> kompilacji (szerokość ×1.5, wysokość ×1.33). Duży panel rysuje cały swój tekst
+> fontami Adafruit GFX, co naprawiło objawy widoczne na zdjęciach pierwszych
+> użytkowników (Dan Wiering, lucido) — podtytuł splashu zwijający się do samego
+> „p" i pusty pasek statusu wynikały z braku liter w numerycznych fontach GLCD,
+> nie z problemu ze skalowaniem. Geometria pasów (częstotliwość, siatka,
+> sensory, status) została przeliczona pod wyższe wiersze fontów
+> proporcjonalnych i sprawdzona na żywym panelu ILI9488, tak aby żaden wiersz
+> nie przecinał separatora na obu rozmiarach.
+>
+> ILI9488/ILI9486 po SPI przenosi 2,4× więcej pikseli niż panel 320×240 przy
+> kolorze 18-bit, co dawniej sprawiało, że każde przerysowanie było widoczne. Od
+> v0.93 żywe obszary są podwójnie buforowane jako sprity i wypychane po jednym
+> transferze każdy, więc przerysowanie już nie migocze — patrz [Sprity: dlaczego
+> wyświetlacz przestał migotać](#sprity-dlaczego-wyświetlacz-przestał-migotać).
+> Na tym panelu ustaw SPI na 40 MHz.
+>
+> Panele 320×240 zostają przy klasycznych fontach numerycznych na ekranie
+> roboczym — kroje GFX są za szerokie dla tego layoutu. Patrz [Dlaczego mały
+> panel zostaje przy klasycznych
+> fontach](#dlaczego-mały-panel-zostaje-przy-klasycznych-fontach).
 
 **Okablowanie (sprzętowe SPI1):**
 
@@ -255,7 +263,7 @@ I2C — OLED, LCD i TFT mogą działać jednocześnie.
 
 ```
 ┌────────────────────────────────────────────┐
-│ GPSDO v0.91-rtos        LMT 14:32:45 Thu   │ ← header bar (navy)
+│ v0.94-rt      GPSDO      LMT 14:32:45 Thu   │ ← header bar (navy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frequency (large, colour-coded)
@@ -307,30 +315,42 @@ TFT_eSPI konfiguruje się w *bibliotece*, nie w szkicu. Edytuj
 #define TFT_RST  PB15
 #define TFT_RGB_ORDER TFT_BGR   // kolejność kolorów Blue-Green-Red
 #define TFT_INVERSION_OFF       // naprawia odwrócone kolory w części modułów ST7789
-#define LOAD_GLCD
-#define LOAD_FONT2
-#define LOAD_FONT4
-#define SPI_FREQUENCY 27000000
+#define LOAD_GLCD               // klasyczny font 1 — częstotliwość + napisy autorskie splashu
+#define LOAD_FONT2              // klasyczny font 2 — nagłówek + siatka danych
+#define LOAD_FONT4              // klasyczny font 4 — pasek statusu, komunikaty, podtytuł splashu
+#define SPI_FREQUENCY 40000000  // SPI1 w F411 kończy się na 50 MHz; 40 zostawia zapas
 ```
 
-Dla panelu **ILI9488 (480×320)** zmień driver i wymiary oraz włącz większe
-fonty, na które skalowany układ mapuje tekst — dane używają FONT2, pasek
-statusu FONT6, a duży odczyt częstotliwości **FONT8**. Wszystkie cztery linie
-`LOAD_FONT` poniżej są wymagane; brak FONT8 w szczególności zostawia linię
-częstotliwości (lub pasek statusu) pustą, choć reszta ekranu się rysuje:
+> **Wersja 320×240 nie potrzebuje `LOAD_GFXFF`.** Wszystko na tym panelu — ze
+> splashem włącznie — rysowane jest klasycznymi fontami numerycznymi, więc
+> powyższe trzy linie `LOAD_` to komplet. To celowe: patrz [Dlaczego mały panel
+> zostaje przy klasycznych
+> fontach](#dlaczego-mały-panel-zostaje-przy-klasycznych-fontach). Jeśli
+> przechodzisz ze starszej wersji, Twój `User_Setup.h` niemal na pewno już je
+> ma.
+
+Dla panelu **ILI9488 / ILI9486 (480×320)** zmień driver i wymiary oraz dodaj
+`LOAD_GFXFF` — duży panel rysuje nagłówek, siatkę, pasek statusu i
+częstotliwość fontami Adafruit GFX. Firmware sam dobiera rozmiary punktowe w
+czasie kompilacji (patrz makra `GF_*` w `gpsdo_config.h`):
 
 ```c
-#define ILI9488_DRIVER
+#define ILI9488_DRIVER          // działa dla paneli ILI9488 i ILI9486
 #define TFT_WIDTH  320
 #define TFT_HEIGHT 480
 // ...te same linie TFT_MISO/MOSI/SCLK/CS/DC/RST/RGB_ORDER co wyżej...
-#define LOAD_GLCD
-#define LOAD_FONT2
-#define LOAD_FONT4
-#define LOAD_FONT6              // pasek statusu w skalowanym układzie
-#define LOAD_FONT8              // duży odczyt częstotliwości w skalowanym układzie
-#define SPI_FREQUENCY 27000000
+#define LOAD_GLCD               // font 1 — napisy autorskie splashu
+#define LOAD_FONT4              // font 4 — zostaje dla ścieżki podtytułu splashu
+#define LOAD_GFXFF              // WYMAGANE na tym panelu — fonty GFX
+#define SPI_FREQUENCY 40000000  // 480×320 przepycha 2,4× więcej pikseli — nie oszczędzaj
 ```
+
+> **Zegar SPI.** 40 MHz to przetestowane ustawienie na F411 (SPI1 szczytuje na
+> 50 MHz, więc zostaje zapas na okablowanie, które nie jest idealne). Ma to
+> największe znaczenie na panelu 480×320: pełne przerysowanie przenosi 2,4×
+> więcej pikseli niż na małym panelu, a pushe sprite'ów (niżej) to pojedyncze
+> ciągłe transfery, których czas skaluje się wprost z zegarem. Jeśli panel
+> pokazuje artefakty, zejdź do 27 MHz — długie przewody mogą nie znieść 40.
 
 **Rozwiązywanie problemów:** jeśli po włączeniu TFT firmware zawiesza się na
 splashu wersji na OLED, sprawdź wyjście serial. Komunikat `TFT: init start ...`
@@ -341,6 +361,70 @@ DisplayTask jest automatycznie zwiększany do 768 słów gdy `GPSDO_TFT` jest
 włączone — jeśli modyfikowałeś rozmiary stosów ręcznie, przywróć tę wartość.
 
 Następnie włącz `GPSDO_TFT_ST7789`, `GPSDO_TFT_ILI9341` lub `GPSDO_TFT_ILI9488` w `gpsdo_config.h`.
+
+### Dlaczego mały panel zostaje przy klasycznych fontach
+
+v0.92 przeniosło każdy ekran na fonty Adafruit GFX. Na panelu 480×320 to była
+wyraźna wygrana: litery są porządnie ukształtowane, layout ma czym oddychać, a
+`FreeMonoBold` trzyma cyfry częstotliwości w stałych kolumnach.
+
+Na 320×240 tę samą zmianę wypróbowano i **cofnięto w v0.93**. Kroje GFX są
+proporcjonalne i zauważalnie szersze niż fonty numeryczne, wokół których ułożono
+layout, a 320 px po prostu nie ma miejsca na tę różnicę: wartości uciekały poza
+swoje kolumny do sąsiedniej (`Uptime: 000d 00:01:03n: ---`,
+`PWM:44778 Vct:1.9INA: 4.888V 224.5`), a środkowy separator przecinał to, co
+wystawało. Zmniejszenie fontu też nie wchodziło w grę — 9 pt to *najmniejszy*
+FreeSans dostarczany z TFT_eSPI, a jedyne co jest niżej to TomThumb (3×5 px),
+nieczytelny z odległości ręki.
+
+Mały panel zostaje więc przy tym, co się mieści: klasyczny font 2 na nagłówek i
+siatkę, font 4 na pasek statusu, font 1 ×3 (18×24, stała szerokość) na
+częstotliwość. Splash idzie tym samym tropem — podtytuł używa fontu 4, który ma
+pełny alfabet (to fonty 6/8 są bez liter i to one zamieniały kiedyś „GPS
+Disciplined OCXO" w samo „p"), a kredyty fontu 1. To był ostatni bastion GFX, a
+jego usunięcie oznacza, że **wersja 320×240 nie potrzebuje `LOAD_GFXFF` w
+ogóle** — przechodząc ze starszej wersji można zostawić `User_Setup.h` w
+spokoju. Makra `TFT_FONT_*` w `gpsdo_config.h` dokonują wyboru w czasie
+kompilacji; jest jeden layout, nie dwa.
+
+**Środkowy separator kolumn** jest podobnie tylko na 480: przy 320 px kolumny
+dochodzą do samego środka i linia nie miała gdzie pójść, żeby nie przeciąć
+tekstu.
+
+### Sprity: dlaczego wyświetlacz przestał migotać
+
+Panel jest zapisywany przez SPI, więc wszystko rysowane wprost na niego jest
+*widziane* w trakcie rysowania. Stary kod kasował, zanim zapisał:
+`setTextPadding` wypełniał około 480×34 px tła, a potem nowy tekst lądował na
+wierzchu. Przy jednej aktualizacji na sekundę ten cykl kasuj-potem-rysuj był
+wyraźnie widoczny jako migotanie w pasmie częstotliwości — gorzej na panelu
+480×320, gdzie kasowanie obejmuje 2,4× więcej pikseli.
+
+v0.93 buforuje zamiast tego trzy żywe obszary w RAM — nagłówek, pasmo
+częstotliwości i obszar danych — jako obiekty `TFT_eSprite`. Każde przerysowanie
+czyści i maluje swój sprite niewidocznie w RAM, a potem wypycha gotowe pasmo na
+panel **jednym ciągłym transferem SPI**. Nie ma stanu pośredniego na szkle, więc
+nie ma czemu migotać. Ramka i separatory leżą poza granicami sprite'ów (albo,
+gdy separator przecina pasmo, są rysowane w sprite i wypychane razem z nim),
+więc nic ich nie tyka.
+
+Pamięć jest skromna dzięki paletom — 4-bit na pasmo nagłówka i częstotliwości,
+1-bit na obszar danych, ~25 KB łącznie na panelu 480, spokojnie w 128 KB F411.
+Ramka jedzie w środku sprite'ów, zamiast być rysowana na panelu — i dlatego jest
+biała na obu rozmiarach. Sprite danych jest 1-bitowy, więc ma tylko dwa kolory:
+biel i tło. Granatowej ramki nie dałoby się w nim narysować, trzeba by ją
+domalowywać na panelu po każdym pushu, co niweczyłoby cały sens. Biel trzyma
+ramkę i tekst w tym samym atomowym transferze.
+
+Jeśli `createSprite()` kiedyś zawiedzie (pofragmentowana sterta), każde pasmo
+wraca do rysowania bezpośrednio na panel: dostajesz stare migotanie, ale nic się
+nie psuje. Log startowy mówi, która ścieżka działa:
+
+```
+TFT: freq-band sprite (4-bit) created
+TFT: header sprite (4-bit) created
+TFT: data sprite (1-bit) created
+```
 
 ---
 
@@ -819,7 +903,7 @@ Brakujące urządzenie zgłasza `not found`, a firmware działa dalej bez niego.
 
 ---
 
-## Wejście fazy LTIC (Lars' TIC) — podgląd
+## Wejście fazy LTIC (Lars' TIC)
 
 Przy włączonym `GPSDO_LTIC` firmware odczytuje sprzętowy licznik interwału
 czasu (TIC Larsa Waleniusa): kondensator 1 nF jest ładowany stałym prądem w
@@ -828,17 +912,18 @@ na szczycie rampy ~50 µs po zboczu PPS; aktywne rozładowanie nie jest potrzebn
 — dioda odcina, a upływ ~25 ms czyści kondensator przed kolejnym impulsem 1 Hz.
 Napięcie to bezpośrednia,
 wysokorozdzielcza miara różnicy faz między oboma impulsami — znacznie
-dokładniejsza niż licznik cykli TIM2, którego pętla używa dziś.
+dokładniejsza niż licznik cykli TIM2 używany przez algorytmy częstotliwościowe
+(3–9).
 
-Obecnie to **tylko podgląd / telemetria**: wartość pojawia się w raporcie
-serial (`Vphase:`), jako wiersz `Vph:` na TFT oraz jako pozycja `LTIC phase
-(PA1)` w checkliście startowej. Pętla sterowania jeszcze **nie** dyscyplinuje
-OCXO na jej podstawie. Stała `LTIC_NS_PER_VOLT` w `gpsdo_config.h` przelicza
-wolty na nanosekundy po skalibrowaniu rampy TIC dla danej płytki (domyślnie 0
-= nieskalibrowane, więc pokazywane są tylko wolty). Dyscyplinowanie pętli
-bezpośrednio z TIC jest planowane jako osobny algorytm; logowanie Vphase
-najpierw pozwala scharakteryzować zakres, szum i liniowość TIC na Twoim
-sprzęcie, zanim zacznie sterować pętlą.
+Pętla sterowania **dyscyplinuje OCXO bezpośrednio z tej fazy** przez algorytm 10
+(`LA 10`) — trójstopniowa pętla ACQ → DPLL → LOCK opisana niżej. Faza pojawia
+się w raporcie serial (`Vphase:` i `dPh:` w ns), jako wiersz `Vph:`/`dPh:` na
+TFT oraz jako pozycja `LTIC phase (PA1)` w checkliście startowej. Po kalibracji
+przez `LC` faza jest raportowana w nanosekundach względem skalibrowanego
+`zero_offset`, przy użyciu zmierzonego `ns_per_volt`; przed kalibracją
+pokazywane są tylko wolty. (Stała kompilacyjna `LTIC_NS_PER_VOLT` w
+`gpsdo_config.h` to przestarzały fallback i normalnie zostaje 0 — `LC` mierzy
+realne nachylenie per płytka i zapisuje je w parametrach żywych.)
 
 ---
 

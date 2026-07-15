@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -28,6 +28,7 @@
 #include "GPSDO_algorithms.h"   /* g_ltic (calibrated span) for the ADC outlier gate */
 #include <Arduino.h>
 #include <string.h>
+#include <math.h>
 #include <Wire.h>
 
 /* ----------------------------------------------------------------------
@@ -58,25 +59,12 @@ int16_t       g_ltic_adc_raw   = 0;
 int16_t       g_ltic_adc_avg   = 0;
 float         g_ltic_voltage   = 0.0f;
 
-/* ltic_read — oversample PA1 within ONE PPS slot, take the median, gate
- * single-sample outliers, then discharge the capacitor.
- *
- * WHY (replaces the old 10-sample / 10-second moving average): averaging
- * ACROSS seconds had a ~5 s group delay (the loop corrected on stale data)
- * and, worse, blended pre- and post-wrap voltages into phantom mid-levels —
- * the loop saw a smooth ~30 ns/s drift that did not physically exist and
- * "corrected" it, kicking the real phase (LOCK steps up to 152 LSB on air).
- * A burst median WITHIN one second has no cross-second memory: no lag, no
- * wrap blending, and single-read ADC/EMI glitches fall out of the median.
- *
- * Outlier gate: a jump larger than ~25%% of the detector span must repeat in
- * the NEXT read to be believed (a real wrap persists; a glitch does not).
- * Until confirmed, the previous accepted value is held. */
-/* Fast Vphase read, called ~300 µs after the PPS edge from vFreqRelayTask —
- * i.e. on the ramp PEAK. Bursts the ADC, medians, applies the single-outlier
+/* ltic_read_fast — read PA1 (the TIC ramp) ~50 µs after the PPS edge, from
+ * vFreqRelayTask (which is woken directly by the GPS-PPS ISR). Oversamples
+ * within the one PPS slot, takes the median, applies an outlier/dead-zone
  * gate, and publishes g_ltic_voltage. Crucially it does NOT discharge and
  * NEVER switches the pin to open-drain: the Kaashoek detector self-clears
- * through leakage (~25 ms ≪ 1 s pulse spacing), and driving the pin low was
+ * through leakage (~25 ms << 1 s pulse spacing), and driving the pin low was
  * both unnecessary and a way to corrupt the very charge we want to measure.
  * The pin stays INPUT_ANALOG for the whole life of the program. */
 void ltic_read_fast(void)
@@ -117,49 +105,6 @@ void ltic_read_fast(void)
     g_ltic_voltage = ((float)accepted / 4096.0f) * 3.3f;
 }
 
-static void ltic_read(void)
-{
-    g_ltic_must_read = false;   /* clear flag before reading so we don't miss next PPS */
-
-    /* burst-oversample + insertion sort (N is small) → median */
-    int16_t s[LTIC_OVERSAMPLE];
-    for (int i = 0; i < LTIC_OVERSAMPLE; i++) {
-        int16_t x = (int16_t)analogRead(PIN_LTIC_VPHASE);
-        int j = i;
-        while (j > 0 && s[j-1] > x) { s[j] = s[j-1]; j--; }
-        s[j] = x;
-    }
-    int16_t med = s[LTIC_OVERSAMPLE / 2];
-    g_ltic_adc_raw = med;
-
-    /* single-outlier gate (threshold from the calibrated span when known) */
-    static int16_t last_ok = -1, pending = -1;
-    int16_t thr = 120;                                   /* ~0.10 V fallback */
-    if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
-        float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
-        thr = (int16_t)(0.25f * span_v * 4096.0f / 3.3f);
-        if (thr < 60)  thr = 60;
-        if (thr > 400) thr = 400;
-    }
-    int16_t accepted;
-    if (last_ok < 0 || abs(med - last_ok) <= thr) {
-        accepted = med;  pending = -1;                   /* normal read      */
-    } else if (pending >= 0 && abs(med - pending) <= thr) {
-        accepted = med;  pending = -1;                   /* jump confirmed   */
-    } else {
-        pending = med;   accepted = last_ok;             /* hold; await confirm */
-    }
-    last_ok = accepted;
-    g_ltic_adc_avg = accepted;
-    g_ltic_voltage = ((float)accepted / 4096.0f) * 3.3f;
-
-    /* Discharge 1 nF TIC capacitor */
-    pinMode(PIN_LTIC_VPHASE, OUTPUT_OPEN_DRAIN);
-    digitalWrite(PIN_LTIC_VPHASE, LOW);
-    vTaskDelay(pdMS_TO_TICKS(LTIC_DISCHARGE_MS));
-    digitalWrite(PIN_LTIC_VPHASE, HIGH);
-    pinMode(PIN_LTIC_VPHASE, INPUT_ANALOG);
-}
 #endif /* GPSDO_LTIC */
 
 /* ---- Sensor objects & safe compile-time fallbacks --------------------- */
@@ -546,7 +491,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                         ? (double)g_ltic.zero_offset : 0.22;
         double ph_ns = ((double)g_ltic_voltage - centre)
                        * (double)g_ltic.ns_per_volt;
-        p=sa(buf,p," "); p=sd(buf,p,ph_ns,1); p=sa(buf,p,"ns");
+        p=sa(buf,p," dPh:"); p=sd(buf,p,ph_ns,1); p=sa(buf,p,"ns");
     }
 #endif
     buf[p++]='\r'; buf[p++]='\n';
@@ -598,14 +543,6 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       lcd.print(padded);
   }
 
-  /* Write a single character at a specific column without dirtying
-   * the full row cache — used for the blinking holdover indicator. */
-  static void lcd_set_char(uint8_t row, uint8_t col, char c)
-  {
-      lcd_prev[row][col] = c;
-      lcd.setCursor(col, row);
-      lcd.print(c);
-  }
 #endif /* GPSDO_LCD_20x4 */
 
 /* ======================================================================
@@ -722,7 +659,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
  * redrawn only on change (setTextPadding clears the old glyphs).
  * ====================================================================== */
 #ifdef GPSDO_TFT
-  #include <TFT_eSPI.h>
+  #include <TFT_eSPI.h>   /* pulls in Extensions/Sprite.h → TFT_eSprite */
 
   /* Forward declarations — implementations are further down this file */
   static const char *day_of_week_str(uint8_t day, uint8_t month, uint16_t year);
@@ -737,8 +674,16 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   /* Colours (RGB565) */
   #define TFT_COL_BG      TFT_BLACK
   #define TFT_COL_HEADER  0x0A33u        /* dark navy           */
-  #define TFT_COL_LABEL   0x0C1Fu        /* brighter navy — frame (header is darker) */
+  #define TFT_COL_LABEL   0x0C1Fu        /* brighter navy — data labels */
   #define TFT_COL_VALUE   TFT_WHITE      /* white — data values          */
+
+  /* Frame/separator colour — white on both panels. Besides matching the big
+   * panel, this is what lets the 1-bit data sprite carry the frame itself:
+   * that sprite has exactly two colours (white and background), so a navy
+   * frame could not be drawn into it and had to be repainted on the panel
+   * after every push. White means frame and text go out together in one
+   * atomic transfer. */
+  #define TFT_COL_FRAME   TFT_WHITE
   #define TFT_COL_LOCK    0x07E0u        /* green                        */
   #define TFT_COL_FREQ    TFT_WHITE      /* white — frequency (green on lock) */
   #define TFT_COL_HOLD    0xFC60u        /* orange              */
@@ -746,23 +691,127 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   #define TFT_COL_SINEL   0x3D7Fu        /* blue  (left wave)   */
   #define TFT_COL_SINER   0xFD80u        /* amber (right wave)  */
 
+  /* ── Freq-band sprite (4-bit double buffer) ──────────────────────────────
+   * The frequency readout and the busy message (SVIN/WARMUP/CAL) share the
+   * band between the header separator (y=TFT_SY(22)) and the freq separator
+   * (y=TFT_SY(58)). The old code drew directly to the panel: setTextPadding
+   * erased ~16 k px (480×34) of background BEFORE each redraw, and that
+   * erase-then-draw on the live panel flickered visibly once per second.
+   *
+   * The 4-bit sprite erases + draws the whole band in RAM (invisible) then
+   * pushes it to the panel in ONE continuous transfer. The separator and the
+   * side rails are never touched, so the frame stays intact. Memory cost:
+   *   480×36 × 0.5 B = 8.6 KB   (ILI9488)
+   *   320×36 × 0.5 B = 5.8 KB   (ILI9341/ST7789)
+   * Both sit well inside the 128 KB RAM of the F411.
+   *
+   * Palette (16 entries; only the ones we use are meaningful, the rest are
+   * black). Indices map 1:1 to the RGB565 colours the band can show. */
+  #define FREQ_SPR_Y       TFT_SY(22)                          /* top = header sep   */
+  #define FREQ_SPR_H       (TFT_SY(58) - TFT_SY(22))           /* band height (px)   */
+
+#if defined(GPSDO_TFT_ILI9488)
+  /* Right-edge anchor for the frequency reading (MR_DATUM). Centring made the
+   * whole readout twitch sideways whenever the string changed length — the
+   * averaging window changes the decimals, and 10000000.0000 → 9999999.9999
+   * drops a character, with centring splitting that difference across both
+   * ends. Anchored right, "Hz" is nailed down and only the digits move.
+   *
+   * The value places the nominal reading dead centre: "10000000.0000 Hz" is
+   * 16 chars, FreeMonoBold24 is fixed-width at 28 px, so 448 px wide, and
+   * (480 + 448) / 2 = 464 — i.e. 16 px in from the panel edge, mirroring the
+   * 16 px of air the nominal string leaves on the left. */
+  #define FREQ_ANCHOR_X    464
+#endif
+  /* palette indices */
+  #define PAL_BG       0    /* black   (band background)                  */
+  #define PAL_WHITE    1    /* freq normal colour                         */
+  #define PAL_LOCK     2    /* green   (LOCK)                             */
+  #define PAL_HOLD     3    /* orange  (holdover / busy)                  */
+  #define PAL_ALERT    4    /* red     (no signal / alert)                */
+  static TFT_eSprite s_freq_sprite(&s_tft);
+  static bool        s_freq_sprite_ok = false;   /* false → direct-draw fallback */
+
+  /* ── Header + data sprites (anti-flicker) ────────────────────────────────
+   * The header band (navy + white text) and the data area (grid rows + sensor
+   * rows, white on black) also flickered: setTextPadding erased the whole
+   * field width on the live panel before each redraw. The header LMT clock
+   * is redrawn unconditionally every wake, and UTC/Uptime/Algo change every
+   * second — so the flicker was constant.
+   *
+   * Two more sprites mirror these regions in RAM:
+   *   s_hdr_sprite  4-bit  (navy bg needs a 2nd palette colour)
+   *   s_data_sprite 1-bit  (all data values are white-on-black → 1 bit is
+   *                         enough; halves the RAM cost vs 4-bit)
+   * 1-bit sprites treat colour 0 as transparent on pushSprite, so the data
+   * sprite only rewrites the glyph pixels, leaving separators untouched.
+   *
+   * Memory (480×320):
+   *   header   480×29 × 0.5 B  =  6.8 KB
+   *   data     480×192 / 8     = 11.2 KB   (1-bit)
+   *   freq     480×48 × 0.5 B  = 11.2 KB   (already counted)
+   *   total all sprites        ≈ 29.3 KB
+   * Remaining for heap/bss: ~87 KB — comfortable. */
+  #define DATA_SPR_Y   (TFT_SY(64) + TFT_YOFF)     /* top = first grid row */
+  #define DATA_SPR_H   (TFT_SY(210) - DATA_SPR_Y)  /* to status separator  */
+  static TFT_eSprite s_hdr_sprite(&s_tft);    /* header band */
+  static TFT_eSprite s_data_sprite(&s_tft);   /* grid + sensor rows */
+  static bool        s_hdr_sprite_ok  = false;
+  static bool        s_data_sprite_ok = false;
+
   /* Grid geometry — authored for 320x240, scaled so the same layout fills a
    * 480x320 ILI9488. X/width via TFT_S (3/2), Y/height via TFT_SY (4/3),
-   * since the panel aspect differs. Identity on the small panels. */
-  #define TFT_ROW_H       TFT_SY(16)     /* font 2 row height   */
-  #define TFT_GRID_Y      TFT_SY(70)
-  #define TFT_COL_L       TFT_S(8)
-  #define TFT_COL_R       TFT_S(168)
-  #define TFT_SENS_Y      TFT_SY(156)
-  #define TFT_STATUS_Y    TFT_SY(204)
+   * since the panel aspect differs. Identity on the small panels.
+   *
+   * TFT_YOFF shifts every TEXT baseline 3 px DOWN, leaving the separator
+   * frame where it is. GFXFF glyphs have no descenders in the all-caps/numeric
+   * strings used here, so they sit optically high inside their band — a 3 px
+   * nudge rebalances them visually. Separators/side rails are drawn at their
+   * authored Y (they are the fixed frame, not content).
+   *
+   * The Y coordinates below are the TEXT BASELINE for each grid row (GFXFF
+   * draws from the baseline; with TL_DATUM drawString offsets to the baseline
+   * for us, so these are the top-of-cell reference points passed to
+   * drawString). Rows are spaced by TFT_ROW_H, sized for GF_DATA:
+   *   320×240  FreeSans 9pt   → ~15 px glyph, row 18 px
+   *   480×320  FreeSans 12pt  → ~17 px glyph, row 24 px (TFT_SY(18)=24) */
+  /* Baseline nudge for the GFX fonts on the big panel — they sit optically
+   * high in their rows without it. The 320×240 build uses the classic fonts
+   * the layout was authored against, which need no nudge. */
+#if defined(GPSDO_TFT_ILI9488)
+  #define TFT_YOFF        3             /* text baseline nudge down (px, authored) */
+#else
+  #define TFT_YOFF        0
+#endif
+  #define TFT_ROW_H       TFT_SY(20)     /* GF_DATA row pitch — wider spacing (authored 320x240) */
+  #define TFT_GRID_Y      (TFT_SY(64) + TFT_YOFF)   /* first grid row top   */
+  #define TFT_COL_L       TFT_S(8)       /* left column x         */
+  #define TFT_COL_R       TFT_S(168)     /* right column label x  */
+  #define TFT_SENS_Y      (TFT_SY(172) + TFT_YOFF)  /* sensor row 1 top      */
+  #define TFT_STATUS_Y    (TFT_SY(212) + TFT_YOFF)  /* status bar top (half-height bar) */
+  /* right-edge anchor for right-column values (pinned to screen edge) */
+  #define TFT_COL_RVAL    (TFT_W - TFT_S(8))
+  /* left-column value anchor: right edge of the left half */
+  #define TFT_COL_LVAL    (TFT_S(158))
 
-  /* Previous-value cache for selective redraw */
-  static char tft_prev[16][28];
+  /* Previous-value cache for selective redraw (16 + 1 extra slot for the
+   * split AHT humidity on the 480×320 panel). */
+  static char tft_prev[17][28];
+
+  /* Dirty flag: set when any tft_val/tft_val_r writes to the data sprite.
+   * The update loop pushes the sprite once at the end of the cycle, so all
+   * cell changes in one frame go out in a single transfer. */
+  static bool s_data_dirty = false;
 
   /* Draw a value string only when it changed.
    * slot: cache index, x/y: position, pad: text padding px, col: colour.
    * x/y/pad are passed already-scaled by callers (via TFT_S/grid constants);
-   * the font is mapped up for the large panel via TFT_F(). */
+   * text is drawn in the GF_DATA free font. Left-datum (TL): x is the left
+   * edge of the field, padding fills rightward to erase the previous glyphs.
+   *
+   * Sprite path: draws to s_data_sprite (Y translated to sprite-local) and
+   * sets s_data_dirty. Fallback: direct draw to the panel (flickers, but
+   * works if heap was too low to create the sprite). */
   static void tft_val(uint8_t slot, int32_t x, int32_t y,
                       uint16_t pad, uint16_t col, const char *s)
   {
@@ -770,9 +819,47 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           return;
       strncpy(tft_prev[slot], s, sizeof(tft_prev[0]) - 1);
       tft_prev[slot][sizeof(tft_prev[0]) - 1] = '\0';
-      s_tft.setTextColor(col, TFT_COL_BG);
-      s_tft.setTextPadding(pad);
-      s_tft.drawString(s, x, y, TFT_F(2));
+      if (s_data_sprite_ok) {
+          TFT_FONT_DATA(s_data_sprite);
+          s_data_sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+          s_data_sprite.setTextPadding(pad);
+          s_data_sprite.setTextDatum(TL_DATUM);
+          s_data_sprite.drawString(s, x, y - DATA_SPR_Y);
+          s_data_dirty = true;
+      } else {
+          TFT_FONT_DATA(s_tft);
+          s_tft.setTextColor(col, TFT_COL_BG);
+          s_tft.setTextPadding(pad);
+          s_tft.setTextDatum(TL_DATUM);
+          s_tft.drawString(s, x, y);
+      }
+  }
+
+  /* Right-anchored value: the string's RIGHT edge sits at x_right (TR_DATUM),
+   * so a field whose width changes (e.g. Vdd 1 vs 2 decimals, or a qErr of
+   * varying width to its left) stays pinned to the screen edge instead of
+   * floating. Padding fills the field width leftward from the anchor. */
+  static void tft_val_r(uint8_t slot, int32_t x_right, int32_t y,
+                        uint16_t pad, uint16_t col, const char *s)
+  {
+      if (strncmp(tft_prev[slot], s, sizeof(tft_prev[0]) - 1) == 0)
+          return;
+      strncpy(tft_prev[slot], s, sizeof(tft_prev[0]) - 1);
+      tft_prev[slot][sizeof(tft_prev[0]) - 1] = '\0';
+      if (s_data_sprite_ok) {
+          TFT_FONT_DATA(s_data_sprite);
+          s_data_sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+          s_data_sprite.setTextPadding(pad);
+          s_data_sprite.setTextDatum(TR_DATUM);
+          s_data_sprite.drawString(s, x_right, y - DATA_SPR_Y);
+          s_data_dirty = true;
+      } else {
+          TFT_FONT_DATA(s_tft);
+          s_tft.setTextColor(col, TFT_COL_BG);
+          s_tft.setTextPadding(pad);
+          s_tft.setTextDatum(TR_DATUM);
+          s_tft.drawString(s, x_right, y);
+      }
   }
 
   /* One-time hardware init only (no layout — splash draws first) */
@@ -787,6 +874,63 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.setRotation(1);              /* landscape (USB right) */
       s_tft.fillScreen(TFT_COL_BG);
       s_tft_ok = true;
+
+      /* Create the freq-band 4-bit sprite (double buffer). If heap is too low
+       * createSprite returns nullptr and we silently fall back to the old
+       * direct-draw path (s_freq_sprite_ok stays false). The palette mirrors
+       * the RGB565 band colours so the sprite shows the same hues as direct. */
+      s_freq_sprite.setColorDepth(4);
+      if (s_freq_sprite.createSprite(TFT_W, FREQ_SPR_H) != nullptr) {
+          /* 16-entry palette mirroring the RGB565 band colours. Index order
+           * matches the PAL_* macros. Unused slots stay 0 (= black = bg). */
+          static const uint16_t freq_pal[16] = {
+              TFT_COL_BG,    /* 0 PAL_BG    black   */
+              TFT_COL_FREQ,  /* 1 PAL_WHITE white   */
+              TFT_COL_LOCK,  /* 2 PAL_LOCK  green   */
+              TFT_COL_HOLD,  /* 3 PAL_HOLD  orange  */
+              TFT_COL_ALERT, /* 4 PAL_ALERT red     */
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+          };
+          s_freq_sprite.createPalette(freq_pal);   /* FLASH const overload */
+          s_freq_sprite_ok = true;
+      }
+      if (s_freq_sprite_ok)
+          OUT_SERIAL.println("TFT: freq-band sprite (4-bit) created");
+      else
+          OUT_SERIAL.println("TFT: freq-band sprite FAILED — direct-draw fallback");
+
+      /* Header-band 4-bit sprite: navy background (PAL_HEADER_BG) + white
+       * text. Two palette entries are enough; the rest are black. */
+      s_hdr_sprite.setColorDepth(4);
+      if (s_hdr_sprite.createSprite(TFT_W, TFT_SY(22)) != nullptr) {
+          static const uint16_t hdr_pal[16] = {
+              TFT_COL_HEADER,  /* 0  navy (band background) */
+              TFT_WHITE,       /* 1  white (header text)    */
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+          };
+          s_hdr_sprite.createPalette(hdr_pal);
+          s_hdr_sprite_ok = true;
+      }
+      if (s_hdr_sprite_ok)
+          OUT_SERIAL.println("TFT: header sprite (4-bit) created");
+      else
+          OUT_SERIAL.println("TFT: header sprite FAILED — direct-draw fallback");
+
+      /* Data-area 1-bit sprite: white-on-black only (all data values share
+       * one colour). 1-bit pushSprite paints bit=1 as bitmap_fg and bit=0 as
+       * bitmap_bg; set fg=white, bg=black so cleared pixels paint black-on-
+       * black (invisible over the data area). Frame segments crossing the
+       * sprite region are redrawn after each push. */
+      s_tft.setBitmapColor(TFT_WHITE, TFT_COL_BG);
+      s_data_sprite.setColorDepth(1);
+      if (s_data_sprite.createSprite(TFT_W, DATA_SPR_H) != nullptr) {
+          s_data_sprite_ok = true;
+      }
+      if (s_data_sprite_ok)
+          OUT_SERIAL.println("TFT: data sprite (1-bit) created");
+      else
+          OUT_SERIAL.println("TFT: data sprite FAILED — direct-draw fallback");
+
 #if defined(GPSDO_TFT_ILI9488)
       OUT_SERIAL.println("HW: TFT 480x320 ILI9488    enabled (SPI1, UNTESTED, write-only)");
 #else
@@ -801,22 +945,43 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.fillScreen(TFT_COL_BG);
       memset(tft_prev, 0, sizeof(tft_prev));
 
-      s_tft.fillRect(0, 0, TFT_W, TFT_SY(24), TFT_COL_HEADER);
-      s_tft.setTextDatum(TL_DATUM);
+      /* Header band — filled navy, product name/version left, LMT right. The
+       * band height (0..22 authored) is sized for GF_HEAD (FreeSans 9/12pt). */
+      s_tft.fillRect(0, 0, TFT_W, TFT_SY(22), TFT_COL_HEADER);
+      TFT_FONT_HEAD(s_tft);
       s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
       s_tft.setTextPadding(0);
-      s_tft.drawString(PROGRAM_NAME " " PROGRAM_VERSION, TFT_S(6), TFT_SY(4), TFT_F(2));
+      s_tft.setTextDatum(TL_DATUM);
+      {
+          char hdr[24];
+          snprintf(hdr, sizeof(hdr), "%s %s", PROGRAM_NAME, PROGRAM_VERSION);
+          s_tft.drawString(hdr, TFT_S(6), TFT_SY(3) + TFT_YOFF);
+      }
 
-      s_tft.drawFastHLine(0, TFT_SY(26),  TFT_W, TFT_COL_LABEL);   /* top of frame, under header */
-      s_tft.drawFastHLine(0, TFT_SY(66),  TFT_W, TFT_COL_LABEL);
-      s_tft.drawFastHLine(0, TFT_SY(152), TFT_W, TFT_COL_LABEL);
-      s_tft.drawFastHLine(0, TFT_SY(200), TFT_W, TFT_COL_LABEL);
-      /* Vertical side rails joining the top and bottom separators at both
-       * screen edges — turns the horizontals into a closed data-area frame.
-       * Run from the header edge (26) to the bottom separator (200) so the
-       * top corners close around the frequency. Same 1px weight/colour. */
-      s_tft.drawFastVLine(0,         TFT_SY(26), TFT_SY(200) - TFT_SY(26), TFT_COL_LABEL);
-      s_tft.drawFastVLine(TFT_W - 1, TFT_SY(26), TFT_SY(200) - TFT_SY(26), TFT_COL_LABEL);
+      /* Frame separators. Authored (320×240) band boundaries, TFT_SY-scaled to
+       * 480×320. Verified so GF_DATA rows never cross a separator on either
+       * panel:
+       *   header  0    .. 22
+       *   freq    22   .. 58      (big FreeMonoBold, centred)
+       *   grid    58   .. 168     (5 data rows, GF_DATA, wider pitch)
+       *   sensors 168  .. 210     (2 sensor rows)
+       *   status  212  .. bottom  (GF_STATUS bar, half height) */
+      s_tft.drawFastHLine(0, TFT_SY(22),  TFT_W, TFT_COL_FRAME);   /* under header */
+      s_tft.drawFastHLine(0, TFT_SY(58),  TFT_W, TFT_COL_FRAME);   /* under freq   */
+      s_tft.drawFastHLine(0, TFT_SY(168), TFT_W, TFT_COL_FRAME);   /* under grid   */
+      s_tft.drawFastHLine(0, TFT_SY(210), TFT_W, TFT_COL_FRAME);   /* over status  */
+      /* Side rails close the data frame from the header edge to the status
+       * separator, so the top corners wrap around the frequency. 1px white. */
+      s_tft.drawFastVLine(0,         TFT_SY(22), TFT_SY(210) - TFT_SY(22), TFT_COL_FRAME);
+      s_tft.drawFastVLine(TFT_W - 1, TFT_SY(22), TFT_SY(210) - TFT_SY(22), TFT_COL_FRAME);
+      /* Vertical divider between the two data columns (grid + sensors), from
+       * the freq separator down to the status separator. Only on the 480×320
+       * panel: at 320×240 the classic-font columns run right up to the middle
+       * and the divider cut through the text, so the small panel goes without.
+       * On the big panel it's also drawn on the data sprite before each push. */
+#if defined(GPSDO_TFT_ILI9488)
+      s_tft.drawFastVLine(TFT_W/2, TFT_SY(58), TFT_SY(210) - TFT_SY(58), TFT_COL_FRAME);
+#endif
   }
 
   /* Animated boot splash: credits first, then two phase-shifted sine waves
@@ -849,13 +1014,29 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
        * Title sits at the frequency field's height so the splash and the live
        * screen share a visual anchor. --- */
       s_tft.setTextDatum(MC_DATUM);
-      s_tft.setTextColor(TFT_COL_LOCK, TFT_COL_BG);
-      s_tft.drawString("GPSDO", TFT_W/2, TFT_SY(22), TFT_F(6));
+      s_tft.setTextPadding(0);
+      /* Subtitle only — the big green "GPSDO" title was dropped in v0.93; the
+       * splash leads with "GPS Disciplined OCXO" raised to the top.
+       *
+       * Font 4, not GFXFF. The splash was the last GFX holdout, which meant a
+       * user upgrading from v0.92 still had to add LOAD_GFXFF to User_Setup.h
+       * or watch this line collapse to a lone "p" — an obscure failure for a
+       * cosmetic gain. Font 4 carries the full alphabet, so the splash now
+       * needs nothing beyond the fonts the operating screen already loads.
+       * (Fonts 6/8 are the ones that hold only 0-9 . : - a p m; 1/2/4 are
+       * complete.) */
+      TFT_FONT_STATUS(s_tft);                   /* font 4 / GF_STATUS */
       s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
-      s_tft.drawString("GPS-Disciplined OCXO", TFT_W/2, TFT_SY(50), TFT_F(4));
+      s_tft.drawString("GPS Disciplined OCXO", TFT_W/2, TFT_SY(28));
+      /* Credits as fine print: classic font 1 (6×8) on both panels. The long
+       * "inspired by…" line is ~270 px in font 1 — it fits 320 px, and on the
+       * 480 panel it simply reads as fine print, which is what it is. */
+      s_tft.setTextFont(1);
+      s_tft.setTextSize(1);
       s_tft.setTextColor(0x8410, TFT_COL_BG);
-      s_tft.drawString("jmnlabs with Claude (Anthropic)", TFT_W/2, TFT_SY(206), TFT_F(1));
-      s_tft.drawString("inspired by STM32-GPSDO v0.06c by Andre Balsa", TFT_W/2, TFT_SY(218), TFT_F(1));
+      s_tft.drawString("jmnlabs with Claude (Anthropic)", TFT_W/2, TFT_SY(206));
+      s_tft.drawString("inspired by STM32-GPSDO v0.06c by Andre Balsa",
+                       TFT_W/2, TFT_SY(218));
 
       /* The animated boot sequence below — two oscillators fading in out of
        * phase, drifting into agreement, and merging into one green wave with a
@@ -1090,9 +1271,13 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
        * content scrolls up one line — the oldest row drops off the top and the
        * new row appears at the bottom, like a terminal. */
       const int LIST_TOP = TFT_SY(80);
-      const int ROW_H    = TFT_SY(14);
+      const int ROW_H    = TFT_SY(18);            /* GF_DATA row pitch (taller than the old font2) */
       const int WIN_ROWS = 6;                     /* visible rows; window ends ~192, credits at 214 */
       const int WIN_H    = WIN_ROWS * ROW_H;
+
+      TFT_FONT_DATA(s_tft);                 /* checklist uses the data font */
+      s_tft.setTextDatum(TL_DATUM);
+      s_tft.setTextPadding(0);
 
       /* collect the rows that are actually shown */
       int shown_idx[16]; int n_shown = 0;
@@ -1111,9 +1296,9 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                   int yy  = LIST_TOP + (k - first_visible) * ROW_H;
                   uint16_t col = rows[idx].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
                   s_tft.setTextColor(col, TFT_COL_BG);
-                  s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy, TFT_F(2));
+                  s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy);
                   s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
-                  s_tft.drawString(rows[idx].label, TFT_S(72), yy, TFT_F(2));
+                  s_tft.drawString(rows[idx].label, TFT_S(72), yy);
               }
           } else {
               /* still filling the window: just draw the new row at its slot */
@@ -1121,9 +1306,9 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
               int yy  = LIST_TOP + (r - first_visible) * ROW_H;
               uint16_t col = rows[idx].ok ? TFT_COL_LOCK : TFT_COL_HOLD;
               s_tft.setTextColor(col, TFT_COL_BG);
-              s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy, TFT_F(2));
+              s_tft.drawString(rows[idx].ok ? "[x]" : "[ ]", TFT_S(36), yy);
               s_tft.setTextColor(TFT_COL_VALUE, TFT_COL_BG);
-              s_tft.drawString(rows[idx].label, TFT_S(72), yy, TFT_F(2));
+              s_tft.drawString(rows[idx].label, TFT_S(72), yy);
           }
           vTaskDelay(pdMS_TO_TICKS(650));   /* sequential reveal / scroll cadence */
       }
@@ -1149,10 +1334,57 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       } else {
           snprintf(s, sizeof(s), "LMT --:--:-- ---");
       }
-      s_tft.setTextDatum(TR_DATUM);
-      s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
-      s_tft.setTextPadding(TFT_S(150));
-      s_tft.drawString(s, TFT_W - TFT_S(6), TFT_SY(4), TFT_F(2));
+      /* Centre slot: a survey-in that outlived our monitor window is still
+       * running inside the receiver, but nothing else on screen would say so
+       * (the freq band has gone back to showing the frequency). Pulse a quiet
+       * "SURVEY" between the product name and the clock until Time Mode
+       * arrives. The period is 4 s (2 s on, 2 s off): the header only redraws
+       * when the display task wakes, which is once per PPS outside animations,
+       * so a period that isn't a whole multiple of 1 s would alias into an
+       * uneven blink. Slow on purpose — it's a background notice, not an
+       * alarm. There is room for ~6 characters at 320 px, which sizes the
+       * label. */
+      const bool svin_bg_show = g_svin_background &&
+                                (((millis() / 2000u) & 1u) == 0u);
+
+      if (s_hdr_sprite_ok) {
+          /* ── sprite path: erase band in RAM, redraw both fields, one push ──
+           * The whole header band is rebuilt each wake (product name is static
+           * but cheap to redraw) so the LMT erase happens invisibly in RAM. */
+          s_hdr_sprite.fillSprite(0);          /* 0 = navy (palette idx 0)    */
+          TFT_FONT_HEAD(s_hdr_sprite);
+          s_hdr_sprite.setTextColor(1, 0);     /* 1=white, 0=navy              */
+          /* product name left */
+          {
+              char hdr[24];
+              snprintf(hdr, sizeof(hdr), "%s %s", PROGRAM_NAME, PROGRAM_VERSION);
+              s_hdr_sprite.setTextDatum(TL_DATUM);
+              s_hdr_sprite.setTextPadding(0);
+              s_hdr_sprite.drawString(hdr, TFT_S(6), TFT_SY(3) + TFT_YOFF);
+          }
+          if (svin_bg_show) {
+              s_hdr_sprite.setTextDatum(TC_DATUM);
+              s_hdr_sprite.setTextPadding(0);
+              s_hdr_sprite.drawString("SURVEY", TFT_W / 2, TFT_SY(3) + TFT_YOFF);
+          }
+          /* LMT right-anchored */
+          s_hdr_sprite.setTextDatum(TR_DATUM);
+          s_hdr_sprite.setTextPadding(TFT_S(130));
+          s_hdr_sprite.drawString(s, TFT_W - TFT_S(6), TFT_SY(3) + TFT_YOFF);
+          s_hdr_sprite.pushSprite(0, 0);
+      } else {
+          /* ── direct-draw fallback ── */
+          TFT_FONT_HEAD(s_tft);
+          /* Padding covers the label so the "off" half of the pulse erases it. */
+          s_tft.setTextDatum(TC_DATUM);
+          s_tft.setTextColor(TFT_WHITE, TFT_COL_HEADER);
+          s_tft.setTextPadding(TFT_S(52));
+          s_tft.drawString(svin_bg_show ? "SURVEY" : "", TFT_W / 2,
+                           TFT_SY(3) + TFT_YOFF);
+          s_tft.setTextDatum(TR_DATUM);
+          s_tft.setTextPadding(TFT_S(130));
+          s_tft.drawString(s, TFT_W - TFT_S(6), TFT_SY(3) + TFT_YOFF);
+      }
       s_tft.setTextDatum(TL_DATUM);
 
       /* ---- frequency, font 4 size 2, centred, colour-coded ----
@@ -1166,44 +1398,44 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           uint16_t fcol = TFT_COL_FREQ;   /* white by default; green on lock */
           bool locked = false;
           bool busy = (g_svin_active || g_warmup_active || g_calib_active);
-          /* busy messages (F4, centred) and the big frequency use different
-           * text heights, so setTextPadding only wipes the CURRENT font's
-           * band — switching modes left slivers of the taller digits above/
-           * below. On every busy↔normal transition wipe the whole field. */
+          /* busy↔normal mode change: invalidate the cache so the next draw
+           * fires. With the sprite the old band-wipe + separator touch-up are
+           * gone — fillSprite(PAL_BG) erases the whole band in RAM and the
+           * separators/side rails are never inside the sprite, so they stay. */
           static bool tft_prev_busy = false;
           if (tft_prev_busy != busy) {
               tft_prev_busy = busy;
-              s_tft.fillRect(0, TFT_SY(28), TFT_W, TFT_SY(44), TFT_COL_BG);
-              /* that rect reaches y=72 across the full width and wipes the
-               * separator at y=66 and the frame side rails between 28..72 —
-               * redraw them so the frame around the frequency survives */
-              s_tft.drawFastHLine(0, TFT_SY(66), TFT_W, TFT_COL_LABEL);
-              s_tft.drawFastVLine(0,         TFT_SY(28), TFT_SY(72) - TFT_SY(28), TFT_COL_LABEL);
-              s_tft.drawFastVLine(TFT_W - 1, TFT_SY(28), TFT_SY(72) - TFT_SY(28), TFT_COL_LABEL);
               tft_prev[0][0] = '\0';
           }
           if (busy) {
+              /* One phrasing for every long-running procedure: a spelled-out
+               * name, then its progress figure. Short codes like "SVIN"/"CAL"
+               * told the user little, and "CAL" was ambiguous — C, CT and LC
+               * take very different times, so the countdown alone was
+               * confusing.
+               *
+               * Note the two figures differ in kind: warmup and the
+               * calibrations count DOWN (seconds left), while survey-in counts
+               * UP — the receiver reports elapsed time, and completion also
+               * depends on accuracy, so a "remaining" figure would be a guess.
+               * The "+/-" marks the accuracy so the pair reads unambiguously.
+               * The label is "Survey" rather than "Survey-in" so the worst
+               * case (a poor-signal fix: four-digit seconds AND three-digit
+               * metres) still fits the 320-px panel in font 4. */
               if (g_svin_active)
-                  snprintf(s, sizeof(s), "SVIN %us %um", (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
+                  snprintf(s, sizeof(s), "Survey %us +/-%um",
+                           (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
               else if (g_warmup_active)
-                  snprintf(s, sizeof(s), "WARMUP %us", (unsigned)g_warmup_remaining);
-              else
-                  snprintf(s, sizeof(s), "CAL %us", (unsigned)g_calib_remaining);
-              fcol = TFT_COL_HOLD;
-              static uint16_t prev_cf = 0;
-              if (prev_cf != fcol) { tft_prev[0][0] = '\0'; prev_cf = fcol; }
-              s_tft.setTextDatum(TC_DATUM);
-              if (strncmp(tft_prev[0], s, sizeof(tft_prev[0])-1) != 0) {
-                  strncpy(tft_prev[0], s, sizeof(tft_prev[0])-1);
-                  s_tft.setTextColor(fcol, TFT_COL_BG);
-                  s_tft.setTextPadding(TFT_S(316));
-                  s_tft.drawString(s, TFT_W/2, TFT_SY(34), TFT_F(4));
+                  snprintf(s, sizeof(s), "OCXO warmup %us",
+                           (unsigned)g_warmup_remaining);
+              else {
+                  const char *what = (g_calib_kind == CALIB_CT) ? "Tune"
+                                   : (g_calib_kind == CALIB_LC) ? "LTIC cal"
+                                                                : "Calibrate";
+                  snprintf(s, sizeof(s), "%s %us", what,
+                           (unsigned)g_calib_remaining);
               }
-              s_tft.setTextDatum(TL_DATUM);
-              /* Do NOT return — fall through so the PWM/Vctl cell (slot 5)
-               * keeps updating live during calibration. The info grid below
-               * shows current PWM and Vctl, which is exactly what the user
-               * wants to watch while C/CT sweeps the DAC. */
+              fcol = TFT_COL_HOLD;
           } else {
           /* Green must mean a TRUSTWORTHY, CURRENT lock — not the echo of a
            * long averaging window (a 1000-s average keeps showing ~10 MHz for
@@ -1231,38 +1463,107 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           if      (c->holdover_mode) fcol = TFT_COL_HOLD;
           else if (locked)           fcol = TFT_COL_LOCK;
 
-          if      (f->full10000) { static char ff[16]; dtostrf(f->avg10000,14,4,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
-          else if (f->full1000)  { static char ff[16]; dtostrf(f->avg1000, 14,3,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
-          else if (f->full100)   { static char ff[16]; dtostrf(f->avg100,  14,2,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
-          else if (f->full10)    { static char ff[16]; dtostrf(f->avg10,   14,1,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
-          else if (f->calcfreqint > 0) { snprintf(s,sizeof(s),"%14ld Hz",(long)f->calcfreqint); }
-          else { snprintf(s,sizeof(s),"   no signal   "); fcol = TFT_COL_ALERT; }
+          /* No field width here. dtostrf(...,14,...) used to left-pad the value
+           * to 14 characters, but MC_DATUM centres the WHOLE string including
+           * those invisible leading spaces — so the visible text sat well right
+           * of centre (~40 px on the 480 panel), and the offset CHANGED with the
+           * averaging window (1–4 pad spaces), making the readout jump sideways
+           * when precision switched. The padding was there to keep digits in
+           * fixed columns, which GF_FREQ (FreeMonoBold, fixed-width) already
+           * does on its own. Width 1 = "no padding": the number formats to its
+           * natural length and the visible glyphs centre properly. */
+          if      (f->full10000) { static char ff[16]; dtostrf(f->avg10000,1,4,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full1000)  { static char ff[16]; dtostrf(f->avg1000, 1,3,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full100)   { static char ff[16]; dtostrf(f->avg100,  1,2,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->full10)    { static char ff[16]; dtostrf(f->avg10,   1,1,ff); snprintf(s,sizeof(s),"%s Hz",ff); }
+          else if (f->calcfreqint > 0) { snprintf(s,sizeof(s),"%ld Hz",(long)f->calcfreqint); }
+          else { snprintf(s,sizeof(s),"no signal"); fcol = TFT_COL_ALERT; }
+          }
 
-          /* colour participates in cache key: append colour marker */
+          /* colour participates in cache key */
           static uint16_t prev_fcol = 0;
           if (prev_fcol != fcol) { tft_prev[0][0] = '\0'; prev_fcol = fcol; }
 
-          s_tft.setTextDatum(TC_DATUM);
+          /* draw only when the displayed string or colour actually changed */
           if (strncmp(tft_prev[0], s, sizeof(tft_prev[0])-1) != 0) {
               strncpy(tft_prev[0], s, sizeof(tft_prev[0])-1);
-              /* Fixed-width font 1 at size 3 (18x24): the frequency digits
-               * keep a constant column position instead of shifting as the
-               * value changes — much easier to read at a glance. */
-              s_tft.setTextColor(fcol, TFT_COL_BG);
-              s_tft.setTextPadding(TFT_S(316));
-              s_tft.setTextFont(1);
+
+              if (s_freq_sprite_ok) {
+                  /* ── sprite path: erase+draw in RAM, one push to panel ── */
+                  s_freq_sprite.fillSprite(PAL_BG);
+                  /* Font per panel, exactly as the direct path: the sprites are
+                   * created on BOTH panels, so hard-coding GF_* here would have
+                   * kept the 320×240 build on the GFX faces regardless of the
+                   * TFT_FONT_* macros. */
+                  if (busy) TFT_FONT_STATUS(s_freq_sprite);
+                  else      TFT_FONT_FREQ_ON(s_freq_sprite);
+                  /* map RGB565 colour → palette index */
+                  uint8_t pidx = (fcol == TFT_COL_LOCK)  ? PAL_LOCK
+                               : (fcol == TFT_COL_HOLD)  ? PAL_HOLD
+                               : (fcol == TFT_COL_ALERT) ? PAL_ALERT
+                               : PAL_WHITE;
+                  s_freq_sprite.setTextColor(pidx, PAL_BG);
+                  /* text Y in sprite-local coords (screen Y − sprite top).
+                   * On the 480×320 panel the big GF_FREQ glyph sits a touch
+                   * low in the band; nudge it up 4 px for optical centring. */
 #if defined(GPSDO_TFT_ILI9488)
-              s_tft.setTextSize(5);   /* font1 x5 (~30x40) on the big panel */
+                  int sy_local = (TFT_SY(40) + TFT_YOFF - 4) - FREQ_SPR_Y;
 #else
-              s_tft.setTextSize(3);   /* font1 x3 (18x24)                   */
+                  int sy_local = (TFT_SY(40) + TFT_YOFF) - FREQ_SPR_Y;
 #endif
-              /* +4px down: bare digits have no descenders and read
-               * optically high in the band — nudge to sit visually centred */
-              s_tft.drawString(s, TFT_W/2, TFT_SY(37));
-              s_tft.setTextSize(1);
+#if defined(GPSDO_TFT_ILI9488)
+                  /* Right-anchored reading (see FREQ_ANCHOR_X). Busy messages
+                   * keep MC_DATUM: they use the proportional GF_STATUS font,
+                   * where there are no columns to line up. */
+                  if (busy) {
+                      s_freq_sprite.setTextDatum(MC_DATUM);
+                      s_freq_sprite.drawString(s, TFT_W/2, sy_local);
+                  } else {
+                      s_freq_sprite.setTextDatum(MR_DATUM);
+                      s_freq_sprite.drawString(s, FREQ_ANCHOR_X, sy_local);
+                  }
+#else
+                  s_freq_sprite.setTextDatum(MC_DATUM);
+                  s_freq_sprite.drawString(s, TFT_W/2, sy_local);
+#endif
+                  if (!busy) TFT_FONT_FREQ_OFF(s_freq_sprite);
+                  /* FREQ_SPR_Y is TFT_SY(22) — the sprite's first row lands
+                   * exactly on the header separator, so the push would wipe it.
+                   * Draw it into the sprite instead (PAL_WHITE is in the
+                   * palette): line and text then go out in the same transfer,
+                   * with nothing to repaint afterwards. */
+                  s_freq_sprite.drawFastHLine(0, 0, TFT_W, PAL_WHITE);
+                  s_freq_sprite.pushSprite(0, FREQ_SPR_Y);
+              } else {
+                  /* ── direct-draw fallback (no sprite / low heap) ── */
+                  if (busy) TFT_FONT_STATUS(s_tft);
+                  else      TFT_FONT_FREQ_ON(s_tft);
+                  s_tft.setTextColor(fcol, TFT_COL_BG);
+                  s_tft.setTextPadding(TFT_S(316));
+#if defined(GPSDO_TFT_ILI9488)
+                  /* Same right anchor as the sprite path — see the comment
+                   * there. Padding still erases the full band, so a shorter
+                   * reading leaves nothing behind. */
+                  if (busy) {
+                      s_tft.setTextDatum(MC_DATUM);
+                      s_tft.drawString(s, TFT_W/2, TFT_SY(40) + TFT_YOFF);
+                  } else {
+                      s_tft.setTextDatum(MR_DATUM);
+                      s_tft.drawString(s, FREQ_ANCHOR_X, TFT_SY(40) + TFT_YOFF);
+                  }
+#else
+                  s_tft.setTextDatum(MC_DATUM);
+                  s_tft.drawString(s, TFT_W/2, TFT_SY(40) + TFT_YOFF);
+#endif
+                  if (!busy) TFT_FONT_FREQ_OFF(s_tft);
+                  /* the wide padding fill spills past the freq separator and
+                   * the side rails — redraw them after each update */
+                  s_tft.drawFastHLine(0, TFT_SY(58), TFT_W, TFT_COL_FRAME);
+                  s_tft.drawFastVLine(0,         TFT_SY(23), TFT_SY(58) - TFT_SY(23), TFT_COL_FRAME);
+                  s_tft.drawFastVLine(TFT_W - 1, TFT_SY(23), TFT_SY(58) - TFT_SY(23), TFT_COL_FRAME);
+              }
           }
           s_tft.setTextDatum(TL_DATUM);
-          }
       }
 
       /* ---- info grid, left column ---- */
@@ -1285,7 +1586,12 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       { static char fv[8];
         double vctl = ((double)c->avg_vctl_adc / 4096.0) * 3.3;
         dtostrf(vctl, 5, 3, fv);
-        snprintf(s,sizeof(s),"PWM:%5u Vct:%sV", c->pwm_output, fv); }
+#if defined(GPSDO_TFT_ILI9488)
+        snprintf(s,sizeof(s),"PWM: %5u  Vct: %s V", c->pwm_output, fv);
+#else
+        snprintf(s,sizeof(s),"PWM:%5u Vct:%sV", c->pwm_output, fv);
+#endif
+      }
       tft_val(5, TFT_COL_L, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
       /* ---- info grid, right column ---- */
@@ -1311,26 +1617,67 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
       if (g->pos_valid) snprintf(s,sizeof(s),"Alt:  %dm",(int)g->alt);
       else              snprintf(s,sizeof(s),"Alt: ---");
+#if defined(GPSDO_TFT_ILI9488)
+      snprintf(s,sizeof(s), g->pos_valid ? "Alt:  %d m" : "Alt: ---", (int)g->alt);
+#endif
       tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       if (ina_ok) { static char fv[10],fi[10];
           dtostrf(g_ina_volt,5,3,fv); dtostrf(g_ina_curr,6,2,fi);
-          snprintf(s,sizeof(s),"INA: %sV %smA",fv,fi); }
+#if defined(GPSDO_TFT_ILI9488)
+          snprintf(s,sizeof(s),"INA: %s V %s mA",fv,fi);
+#else
+          snprintf(s,sizeof(s),"INA: %sV %smA",fv,fi);
+#endif
+      }
       else snprintf(s,sizeof(s),"INA: ---");
       tft_val(10, TFT_COL_R, TFT_GRID_Y+4*TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
 
       /* ---- sensor row ---- */
       if (bmp_ok) { static char ft[8],fp[10];
+#if defined(GPSDO_TFT_ILI9488)
+          dtostrf(g_bmp_temp,5,2,ft); dtostrf(g_bmp_pres,6,2,fp);
+          snprintf(s,sizeof(s),"BMP: %s C %s hPa",ft,fp);
+#else
           dtostrf(g_bmp_temp,4,1,ft); dtostrf(g_bmp_pres,5,1,fp);
-          snprintf(s,sizeof(s),"BMP: %sC %shPa",ft,fp); }
+          snprintf(s,sizeof(s),"BMP: %sC %shPa",ft,fp);
+#endif
+      }
       else snprintf(s,sizeof(s),"BMP: ---");
       tft_val(11, TFT_COL_L, TFT_SENS_Y, TFT_S(156), TFT_COL_VALUE, s);
 
       if (aht_ok) { static char ft[8],fh[8];
           dtostrf(g_aht_temp,4,2,ft); dtostrf(g_aht_humi,4,2,fh);
-          snprintf(s,sizeof(s),"AHT: %sC %s%%rH",ft,fh); }
-      else snprintf(s,sizeof(s),"AHT: ---");
+#if defined(GPSDO_TFT_ILI9488)
+          /* temp left-anchored in the right column; humidity right-anchored to
+           * the screen edge (like Vdd) so the "% rH" stays pinned. Draw them
+           * as two separate slots so neither floats when the other changes. */
+          snprintf(s,sizeof(s),"AHT: %s C",ft);
+#else
+          snprintf(s,sizeof(s),"AHT: %sC %s%%rH",ft,fh);
+#endif
+      }
+      else {
+#if defined(GPSDO_TFT_ILI9488)
+          snprintf(s,sizeof(s),"AHT: ---");
+#else
+          snprintf(s,sizeof(s),"AHT: ---");
+#endif
+      }
+#if defined(GPSDO_TFT_ILI9488)
+      /* temp left-anchored (pad fits 'AHT: 23.45 C'), humidity right-anchored
+       * (pad fits '45.20 % rH'). Pads are tight so the two fields don't
+       * overlap: temp ends ~353, humidity starts ~381 → ~28 px gap. */
+      tft_val(12, TFT_COL_R, TFT_SENS_Y, TFT_S(67), TFT_COL_VALUE, s);
+      if (aht_ok) { static char fh[8]; dtostrf(g_aht_humi,4,2,fh);
+          snprintf(s,sizeof(s),"%s %% rH",fh);
+          tft_val_r(16, TFT_W - TFT_S(6), TFT_SENS_Y, TFT_S(60), TFT_COL_VALUE, s);
+      } else {
+          tft_val_r(16, TFT_W - TFT_S(6), TFT_SENS_Y, TFT_S(60), TFT_COL_VALUE, "");
+      }
+#else
       tft_val(12, TFT_COL_R, TFT_SENS_Y, TFT_S(148), TFT_COL_VALUE, s);
+#endif
 
 #ifdef GPSDO_LTIC
       /* ---- LTIC phase row (only when the TIC hardware is built in) ----
@@ -1349,24 +1696,112 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                               ? (double)g_ltic.zero_offset : 0.22;
               double ns = ((double)g_ltic_voltage - centre)
                           * (double)g_ltic.ns_per_volt;
-              snprintf(s, sizeof(s), "Vph: %sV %+ldns", fv, (long)ns);
+#if defined(GPSDO_TFT_ILI9488)
+              snprintf(s, sizeof(s), "Vph: %s V  dPh: %+4ldns", fv, (long)ns);
+#else
+              snprintf(s, sizeof(s), "Vph:%sV dPh:%+4ldns", fv, (long)ns);
+#endif
           } else {
-              snprintf(s, sizeof(s), "Vph: %sV", fv);
+#if defined(GPSDO_TFT_ILI9488)
+              snprintf(s, sizeof(s), "Vph: %s V", fv);
+#else
+              snprintf(s, sizeof(s), "Vph:%sV", fv);
+#endif
           }
       }
       tft_val(13, TFT_COL_L, TFT_SENS_Y + TFT_ROW_H, TFT_S(156), TFT_COL_VALUE, s);
 
-      /* Vdd (MCU 3.3 V rail) from the internal reference: VREFINT gives
-       * Vdd = 1.21 V * 4096 / adc. Same formula as the serial telemetry. */
+      /* qErr (receiver sawtooth, ns) leads this row when SAW is active on
+       * algo 10; Vdd (MCU 3.3 V rail, from VREFINT: 1.21 V * 4096 / adc)
+       * follows, shortened to 1 decimal so both fit the column. When SAW is
+       * off, Vdd alone is shown at full precision. */
+      /* qErr (receiver sawtooth) and Vdd share this row but are drawn
+       * SEPARATELY so Vdd doesn't shift as qErr's width changes: qErr is
+       * left-aligned in the R column, Vdd is anchored to the right screen edge
+       * (TR_DATUM), same as the LMT clock. When SAW is off there's no qErr and
+       * Vdd shows at full precision, still right-anchored. */
       {
           static char fv[8];
           float vdd = (c->avg_vdd_adc > 0)
                     ? (float)((1.21 * 4096.0) / (double)c->avg_vdd_adc) : 0.0f;
-          dtostrf(vdd, 4, 2, fv);
-          snprintf(s, sizeof(s), "Vdd: %sV", fv);
-      }
-      tft_val(14, TFT_COL_R, TFT_SENS_Y + TFT_ROW_H, TFT_S(148), TFT_COL_VALUE, s);
+          bool saw = (c->active_algo == 10 && g_qerr_enable);
+
+          /* left: qErr (only under SAW; blank the slot otherwise). Always
+           * print a sign and a fixed-width magnitude so the value doesn't jump
+           * sideways when qErr crosses zero (the '-' would otherwise appear and
+           * disappear, shifting every digit). */
+          if (saw) {
+              if (g_qerr_valid) {
+                  double q = (double)g_qerr_ns;
+                  char sign = (q < 0.0) ? '-' : '+';
+                  static char fq[8]; dtostrf(fabs(q), 4, 1, fq); /* width 4: " 9.9" */
+#if defined(GPSDO_TFT_ILI9488)
+                  snprintf(s, sizeof(s), "qErr: %c%sns", sign, fq);
+#else
+                  snprintf(s, sizeof(s), "qErr:%c%sns", sign, fq);
 #endif
+              } else {
+                  snprintf(s, sizeof(s), "qErr: ---");
+              }
+          } else {
+              s[0] = '\0';
+          }
+#if defined(GPSDO_TFT_ILI9488)
+          /* Padding must cover the WHOLE string, or TFT_eSPI only repaints the
+           * background under the first `pad` pixels and the tail of a previous,
+           * longer value survives (seen on the panel as "qErr: -1.6 nsss").
+           * Widest form "qErr: -21.3ns" is ~104 px in FreeSans 9pt; 112 px
+           * covers it and still stops short of the right-anchored Vdd field,
+           * which starts at x=372 (this field ends at 252+112=364). */
+          tft_val(14, TFT_COL_R, TFT_SENS_Y + TFT_ROW_H, TFT_S(75), TFT_COL_VALUE, s);
+#else
+          tft_val(14, TFT_COL_R, TFT_SENS_Y + TFT_ROW_H, TFT_S(84), TFT_COL_VALUE, s);
+#endif
+
+          /* right: Vdd, anchored to the right edge so it never floats.
+           * 1 decimal alongside qErr, full precision when alone. */
+          dtostrf(vdd, saw ? 3 : 4, saw ? 1 : 2, fv);
+#if defined(GPSDO_TFT_ILI9488)
+          snprintf(s, sizeof(s), "Vdd: %s V", fv);
+#else
+          snprintf(s, sizeof(s), "Vdd: %sV", fv);
+#endif
+          /* Padding 66 px fits the longest form "Vdd: 3.29V" (SAW off). When
+           * SAW is on and qErr occupies the left of the row, Vdd is the short
+           * "Vdd: 3.3V" (1 decimal), so the wider background never reaches the
+           * qErr field — the long Vdd only appears when qErr is blank. */
+          tft_val_r(15, TFT_W - TFT_S(6), TFT_SENS_Y + TFT_ROW_H,
+                    TFT_S(66), TFT_COL_VALUE, s);
+      }
+#endif
+
+      /* ---- push the data sprite if any cell changed this cycle ----
+       * 1-bit pushSprite paints every pixel (bit=1 → bitmap_fg=white, bit=0 →
+       * bitmap_bg=black), so the whole sprite region is rewritten on the panel.
+       * To avoid erase-then-draw flicker on the frame, the frame lines that
+       * pass through the data region are drawn ON the sprite (in white) before
+       * the push, so frame + text go out together in one atomic transfer.
+       * Separators above/below the sprite (freq sep y=58, status sep y=210)
+       * are just outside the sprite top/bottom edges and are never touched. */
+      if (s_data_sprite_ok && s_data_dirty) {
+          /* Draw frame segments on the sprite (sprite-local Y = screen Y − top).
+           * Lines are drawn in white (non-zero → bit 1) so they show as a white
+           * frame on the panel — flicker-free, because frame + text go out in
+           * one atomic push. Side rails run the full sprite height; the sensor
+           * separator crosses horizontally. The freq/status separators are just
+           * outside the sprite top/bottom and are never touched. */
+          s_data_sprite.drawFastVLine(0,         0, DATA_SPR_H, TFT_WHITE); /* left rail  */
+          s_data_sprite.drawFastVLine(TFT_W - 1, 0, DATA_SPR_H, TFT_WHITE); /* right rail */
+#if defined(GPSDO_TFT_ILI9488)
+          /* Centre divider: 480 only — at 320 the columns reach the middle and
+           * the line would cut through the text. */
+          s_data_sprite.drawFastVLine(TFT_W/2,   0, DATA_SPR_H, TFT_WHITE);
+#endif
+          int grid_sep_local = TFT_SY(168) - DATA_SPR_Y;  /* sensor separator */
+          s_data_sprite.drawFastHLine(0, grid_sep_local, TFT_W, TFT_WHITE);
+          s_data_sprite.pushSprite(0, DATA_SPR_Y);
+          s_data_dirty = false;
+      }
 
       /* ---- status bar (full redraw only on state change) ---- */
       {
@@ -1387,13 +1822,29 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                   case 3:  bg = TFT_COL_ALERT; txt = "HOLDOVER (fix lost)";   break;
                   default: bg = TFT_COL_ALERT; txt = "WAITING FOR GPS FIX";   break;
               }
-              s_tft.fillRect(0, TFT_STATUS_Y, TFT_W, TFT_SY(36), bg);
+              /* Fill the whole band from the separator to the screen bottom so
+               * no dead colour strip is left below the text (the old fixed
+               * TFT_SY(36) height left a gap on the taller 480×320 panel). */
+              s_tft.fillRect(0, TFT_STATUS_Y, TFT_W, TFT_H - TFT_STATUS_Y, bg);
+              TFT_FONT_STATUS(s_tft);
               s_tft.setTextDatum(MC_DATUM);
               s_tft.setTextColor(TFT_BLACK, bg);
               s_tft.setTextPadding(0);
-              /* +2px down: all-caps text has no descenders and sits
-               * optically high against the mixed-case elsewhere */
-              s_tft.drawString(txt, TFT_W/2, TFT_STATUS_Y + TFT_SY(20), TFT_F(4));
+              /* Vertical placement in the band. MC_DATUM centres the font's
+               * glyph BOX, but these labels are all-caps — so the ~4 px of
+               * descender space at the bottom of the box is entirely empty
+               * while the caps butt up near the top, and the visible ink ends
+               * up sitting high in the bar. Nudging down 2 px centres what the
+               * eye actually sees. There is room: with no descenders the ink
+               * stops ~3 px short of the screen edge even after the nudge.
+               * 480×320 is left as-is — verified good on-panel. */
+#if defined(GPSDO_TFT_ILI9488)
+              #define STATUS_TEXT_NUDGE 0
+#else
+              #define STATUS_TEXT_NUDGE 2
+#endif
+              s_tft.drawString(txt, TFT_W/2,
+                               (TFT_STATUS_Y + TFT_H) / 2 + STATUS_TEXT_NUDGE);
               s_tft.setTextDatum(TL_DATUM);
           }
       }
@@ -1416,6 +1867,28 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   #else
     static TM1637Display s_tm(TM_CLK, TM_DIO, 4);
   #endif
+
+  /* TM1637 write cache. The TM1637 protocol is software bit-banged (~5–8 ms
+   * for a full 6-digit write at the default bit delay), and the display task
+   * now wakes ~every 150 ms during spinner animations. Without a cache each
+   * wake would re-push identical segments and burn milliseconds for nothing.
+   * tm_set() compares against the last pattern and only bit-bangs on a real
+   * change, so a spinner that only advances every 200 ms costs one transfer
+   * per frame, not one per wake. */
+  static uint8_t s_tm_prev[6] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
+  static bool    s_tm_prev_valid = false;
+  static void tm_set(const uint8_t *seg, uint8_t n)
+  {
+      if (s_tm_prev_valid && n <= sizeof(s_tm_prev) &&
+          memcmp(s_tm_prev, seg, n) == 0)
+          return;                       /* identical — skip the bit-bang */
+      s_tm.setSegments(seg, n);
+      if (n <= sizeof(s_tm_prev)) { memcpy(s_tm_prev, seg, n); s_tm_prev_valid = true; }
+  }
+  /* Any showNumberDec* path writes digits directly (bypassing tm_set), so it
+   * must invalidate the cache or a following identical setSegments would be
+   * wrongly skipped. Call after each showNumberDec*. */
+  static inline void tm_cache_invalidate(void) { s_tm_prev_valid = false; }
 
   /* ---- TM1637 status segment patterns (same as André's original) ------
    *
@@ -1665,7 +2138,7 @@ void vDisplayTask(void *pvParameters)
         /* 4-line boot splash (centred in 20 cols), held ~3 s:
          *   line0:  ====================
          *   line1:       GPSDO  vX.XX
-         *   line2:  GPS-Disciplined OCXO
+         *   line2:  GPS Disciplined OCXO
          *   line3:  jmnlabs  +  Claude
          * lcd_set_line uses I2C → guard with the Wire mutex.            */
         if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1674,7 +2147,7 @@ void vDisplayTask(void *pvParameters)
             /* "  GPSDO vX.XX-rtos" — two leading spaces, suffix not cut */
             snprintf(l, sizeof(l), "  GPSDO %s", PROGRAM_VERSION);
             lcd_set_line(1, l);
-            lcd_set_line(2, "GPS-Disciplined OCXO");
+            lcd_set_line(2, "GPS Disciplined OCXO");
             lcd_set_line(3, " jmnlabs  +  Claude ");
             xSemaphoreGive(xWireMutex);
         }
@@ -1801,8 +2274,18 @@ void vDisplayTask(void *pvParameters)
     for (;;)
     {
         /* Wait for PPS notification from FreqRelayTask, or fall through
-         * after 1100 ms so the display doesn't freeze without GPS. */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1100));
+         * after a timeout so the display doesn't freeze without GPS. The
+         * timeout is SHORT while a LED spinner animation is running
+         * (warmup / survey-in / calibration), because those animations step
+         * their frame every 200 ms (millis()/200) and the task only redraws
+         * when it wakes — at the normal 1100 ms PPS cadence the spinner would
+         * update just once a second and look like it's "skipping" / running
+         * ~5x too slow. During an animation we wake ~every 150 ms so the
+         * spinner is smooth; otherwise we keep the slow 1100 ms cadence (the
+         * clock only changes once a second, so there's nothing to gain from
+         * waking faster, and it keeps the display task cheap). */
+        bool anim_active = g_warmup_active || g_svin_active || g_calib_active;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(anim_active ? 150 : 1100));
 
         /* ---- Snapshot shared state ---- */
         FreqSnap_t snap_f;
@@ -2296,7 +2779,7 @@ void vDisplayTask(void *pvParameters)
                 digitalWrite(TM_DIO, LOW);
                 delayMicroseconds(500);
                 s_tm.clear();
-                s_tm.setSegments(mid_dashes);
+                tm_set(mid_dashes, TM1637_MAX_DIGITS);
             }
         }
         /* No GPS position fix → 'oooo'; fix → time; calibration → CAL.
@@ -2311,7 +2794,7 @@ void vDisplayTask(void *pvParameters)
             uint8_t f = (uint8_t)((millis() / 200u) % 4u);
             for (uint8_t i = 0; i < TM1637_MAX_DIGITS; i++)
                 w[i] = spin_o[(f + i) % 4u];
-            s_tm.setSegments(w, TM1637_MAX_DIGITS);
+            tm_set(w, TM1637_MAX_DIGITS);
         } else if (g_svin_active) {
             /* survey-in: UPPER-'o' spinner (A→B→G→F chase around the top
              * loop of the digit), phase-shifted per digit — distinct from
@@ -2321,7 +2804,7 @@ void vDisplayTask(void *pvParameters)
             uint8_t f2 = (uint8_t)((millis() / 200u) % 4u);
             for (uint8_t i = 0; i < TM1637_MAX_DIGITS; i++)
                 w2[i] = spin_top[(f2 + i) % 4u];
-            s_tm.setSegments(w2, TM1637_MAX_DIGITS);
+            tm_set(w2, TM1637_MAX_DIGITS);
         } else if (g_calib_active) {
             /* "CAL" + a spinner on digit 4: segments G→C→D→E chase in a loop,
              * tracing the outline of a lowercase 'o' — visual "working" cue */
@@ -2329,9 +2812,9 @@ void vDisplayTask(void *pvParameters)
             uint8_t seg_cal_anim[TM1637_MAX_DIGITS];
             memcpy(seg_cal_anim, seg_cal, sizeof(seg_cal_anim));
             seg_cal_anim[3] = spin_o[(millis() / 200u) % 4u];
-            s_tm.setSegments(seg_cal_anim, TM1637_MAX_DIGITS);
+            tm_set(seg_cal_anim, TM1637_MAX_DIGITS);
         } else if (!snap_g.pos_valid) {
-            s_tm.setSegments(low_oooo_s, TM1637_MAX_DIGITS);
+            tm_set(low_oooo_s, TM1637_MAX_DIGITS);
         } else {
             int h = snap_g.hours;
             if (g_show_local_time) {
@@ -2365,6 +2848,7 @@ void vDisplayTask(void *pvParameters)
                 s_tm.showNumberDecEx(t, 0b01000000, true);
             else
                 s_tm.showNumberDec(t, true);
+            tm_cache_invalidate();   /* clock wrote digits directly */
 #endif
         } /* else snap_g.valid */
 #endif /* TM1637 */

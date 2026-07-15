@@ -16,6 +16,248 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ---
 
+## [v0.94-rtos] — 2026-07-15
+
+### Fixed
+- **The 320×240 frequency field was still drawn with the GFX fonts.** v0.93
+  moved the small panel back to the classic fonts, but the fix only reached the
+  direct-draw path — and that path never runs, because the sprites are created
+  on *both* panels, not just the 480×320 one. The sprite branch still had
+  `GF_FREQ`/`GF_STATUS` hard-coded, so the reading (and `no signal`) kept
+  rendering in FreeMono. It now goes through the same `TFT_FONT_*` macros as
+  everything else.
+- **The frequency twitched sideways on the 480×320 panel.** The reading was
+  centred, so any change in string length moved every character: the averaging
+  window changes the decimals, and 10000000.0000 → 9999999.9999 drops a
+  character outright, with centring splitting that difference across both ends.
+  The reading is now anchored by its right edge at x=464, chosen so the nominal
+  `10000000.0000 Hz` (16 chars x 28 px fixed-width = 448 px) still lands dead
+  centre, leaving 16 px of air on each side. "Hz" no longer moves; only the
+  digits do. Busy messages stay centred — they use the proportional status
+  font, where there are no columns to align.
+
+### Changed
+- **The frame is white on both panels.** Besides matching the big panel, this
+  is what lets the 1-bit data sprite carry the frame itself: that sprite has
+  exactly two colours (white and background), so the navy frame could not be
+  drawn *into* it and had to be repainted on the panel after every push. White
+  means frame and text now go out together in one atomic transfer, on both
+  sizes. The header separator moved into the frequency sprite for the same
+  reason (its 4-bit palette already holds white).
+- **The splash no longer uses the GFX fonts.** It was the last GFX holdout on
+  the small panel, which meant anyone upgrading from v0.92 had to add
+  `LOAD_GFXFF` to `User_Setup.h` or watch the subtitle collapse to a lone "p" —
+  an obscure failure for a cosmetic gain. The subtitle now uses classic font 4
+  (which carries the full alphabet — fonts 6/8 are the letterless ones) and the
+  credits use font 1 on both panels. **A 320×240 build now needs only
+  `LOAD_GLCD`, `LOAD_FONT2` and `LOAD_FONT4`**; `LOAD_GFXFF` is required for
+  the 480×320 build alone. The orphaned `GF_TITLE`/`GF_SUB`/`GF_CREDIT` macros
+  and the dead 320 branch of the `GF_*` block are gone with it.
+- Status bar labels sit 2 px lower on the 320×240 panel. They are all-caps, so
+  the descender space at the bottom of the glyph box is empty and geometric
+  centring reads high; the nudge centres what the eye actually sees. The
+  480×320 panel is unchanged.
+- Version bump to v0.94-rtos, including the per-file headers (which still read
+  v0.92).
+
+## [v0.93-rtos] — 2026-07-14
+
+### Fixed
+- **Countdowns ran slower than the clock.** The OCXO warmup and the
+  calibrations timed their seconds with `vTaskDelay(1000)`, which sleeps *for*
+  a second rather than *until* the next one — so the ADC reads, the serial
+  prints and any preemption were all added on top, and the displayed figure
+  drifted behind real time (worse the busier the system). Both now use
+  `vTaskDelayUntil`, which absorbs the work time and keeps each step a true
+  second. The calibration countdown also stopped at 1 instead of reaching 0.
+- **A survey-in that outlives its monitor window is no longer invisible.** When
+  the safety timeout fires, the firmware stops polling but the receiver keeps
+  surveying ("continuing anyway" in the log) — and with the frequency band back
+  to showing the frequency, nothing on screen said so. A slow-pulsing `SURVEY`
+  now sits in the header between the version and the clock, and clears itself
+  when the receiver reports Time Mode (`HDOP: TIME`), which is the survey's real
+  completion signal.
+- **`qErr` left stale characters on the ILI9488 panel** (shown as
+  `qErr: -1.6 nsss`). The field's text padding was 55 authored units (~82 px)
+  while the widest value, `qErr: -21.3ns`, needs ~104 px in FreeSans 9pt —
+  TFT_eSPI only repaints the background under the padding, so the tail of the
+  previous, longer string survived. Padding widened to 75 authored units
+  (~112 px), which covers the text and still clears the right-anchored `Vdd`
+  field.
+- **Vctl / Vcc / Vdd read 0.000 V for the whole OCXO warmup.** Those ADC
+  averages are sampled in the control task's main loop, but `do_warmup()` runs
+  *before* that loop is entered and only slept — so nothing ever filled them.
+  The warmup countdown now samples the same three channels every second, the
+  way `wait_secs_pwm()` already does during calibration.
+- **Frequency readout sat right of centre and jumped sideways.** The value was
+  formatted with `dtostrf(..., 14, ...)`, left-padding it to 14 characters;
+  `MC_DATUM` then centred the string *including* those invisible spaces, so the
+  visible digits sat ~40 px right of centre — and because the pad count varies
+  with the averaging window (1–4 spaces), the readout shifted whenever
+  precision changed. The width is dropped: `GF_FREQ` is FreeMonoBold, which
+  already holds the digits in fixed columns, so the padding bought nothing. The
+  480-panel trailing-space workaround is gone with it.
+
+### Changed
+- **The 320×240 panels go back to the classic fonts for the operating screen.**
+  v0.92 moved every panel to the GFX free fonts; on 480×320 that was a clear
+  win, but at 320×240 the proportional faces are too wide for a layout authored
+  around the numeric ones — values ran past their columns into the neighbour and
+  the centre divider cut through the overflow. There was no smaller face to fall
+  back on either (FreeSans starts at 9 pt; below it is only the unreadable
+  3×5 TomThumb). The small panel now uses font 2 for the header and grid, font 4
+  for the status bar, and font 1 ×3 (fixed-width) for the frequency, while the
+  splash keeps GFX on both panels. The `TFT_FONT_*` macros pick this at compile
+  time — still one layout, not two. The centre column divider is now 480-only
+  (no room for it at 320), and the frame reverts to navy on the small panel.
+- **The live display regions are double-buffered as sprites.** The header, the
+  frequency band and the data area are each rendered into a `TFT_eSprite` in RAM
+  and pushed to the panel in one continuous SPI transfer, instead of erasing the
+  panel with `setTextPadding` and then drawing on top of it. That erase-then-draw
+  was visible as a once-a-second flicker, especially on the 480×320 panel where
+  it wipes 2.4x the pixels. Palettes keep it cheap (4-bit header/freq, 1-bit
+  data; ~25 KB total on the big panel). If `createSprite()` fails on a
+  fragmented heap, each band falls back to direct drawing — the old flicker
+  returns but nothing breaks; the boot log reports which path is live.
+- **Status messages now spell themselves out, and name which calibration is
+  running.** `WARMUP 285s` → `OCXO warmup 285s`, `SVIN 120s 5m` →
+  `Survey 120s +/-5m`, and the ambiguous `CAL 245s` becomes `Calibrate`, `Tune`
+  or `LTIC cal` — C, CT and LC take very different times, so a bare countdown
+  told the operator little. Both panels. Note the two figures differ in kind:
+  warmup and the calibrations count down, while survey-in counts up (the
+  receiver reports elapsed time, and completion also depends on accuracy, so a
+  "remaining" figure would be a guess).
+- **`SPI_FREQUENCY 40000000` is now the documented setting** (was 27 MHz in the
+  README while `gpsdo_config.h` already said 40). The F411's SPI1 tops out at
+  50 MHz, so 40 leaves headroom; it matters most on the 480×320 panel, where a
+  sprite push is a single transfer whose duration scales with the clock. Drop
+  to 27 MHz if long jumper leads misbehave.
+- **Splash credit lines get more leading on the 480×320 panel.** The authored
+  12-unit gap scales to only ~16 px there, and the credits are FreeSans 9pt
+  (~13 px tall), so the two lines merged visually. The large panel now uses a
+  16-unit gap (~21 px, ~1.6x leading); the 320×240 panel keeps 12, which suits
+  its 6x8 font1.
+- `dPh:` and `qErr:` on the ILI9488 drop the space before their `ns` unit.
+- Version bump to v0.93-rtos.
+
+## [v0.92-rtos] — 2026-07-12
+
+
+### Changed
+- **Splash simplified and operating-screen proportions refined.** The large
+  green "GPSDO" title was removed from the boot splash; the "GPS Disciplined
+  OCXO" subtitle now sits raised at the top, matching the original 320×240
+  layout. On the operating screen the header text dropped to the data-font size,
+  the bottom status bar was halved in height with a smaller status font, and the
+  reclaimed space went into wider line spacing between the telemetry rows (row
+  pitch 17→20 authored) so the grid breathes. Data font stays at FreeSans 9pt.
+- **All TFT text migrated to Adafruit GFX free fonts (GFXFF).** The header, big
+  frequency readout, data grid, status bar and splash title/subtitle now render
+  in FreeSans / FreeMono instead of the classic numeric GLCD fonts. This fixes a
+  long-standing bug where lettered strings drawn in the numeric fonts (6/8,
+  which contain only `0-9 . : - a p m`) collapsed to a single glyph — most
+  visibly the splash subtitle "GPS Disciplined OCXO" rendering as a lone "p", and
+  the status-bar label appearing blank on a coloured bar. A per-role, per-panel
+  font layer (`GF_DATA` / `GF_HEAD` / `GF_STATUS` / `GF_TITLE` / `GF_SUB` /
+  `GF_FREQ` in `gpsdo_config.h`) picks FreeSans 9/12 pt, FreeSansBold 12/18/24 pt
+  and FreeMonoBold 18/24 pt automatically for the 320×240 and 480×320 panels, so
+  the same layout code serves both. The big frequency uses FreeMonoBold so its
+  digits stay fixed-width and don't shuffle as the value changes.
+- **Requires `#define LOAD_GFXFF` in `User_Setup.h`** (see README). The old
+  `LOAD_FONT2/4/6/8` lines are no longer needed; `LOAD_GLCD` is retained only
+  for the two fine-print splash credit lines.
+- **Operating-screen layout re-geometried for 480×320.** Band boundaries (freq,
+  grid, sensors, status) recomputed so the taller free-font rows never cross a
+  separator on either panel, the two data columns fill the full width with a
+  faint centre divider, and the status bar fills the whole band to the screen
+  bottom (no dead colour strip below the label). Grid values are right-datum
+  anchored so changing widths stay pinned instead of drifting. Verified on the
+  ILI9486 480×320 panel.
+
+### Fixed
+- **Stale "not yet implemented / phase A" wording removed from CLI and
+  telemetry.** `LA` with a bad value said "0..9 (10=LTIC, not yet available)",
+  `LL` printed "(loop not yet implemented — phase A)", and the help/comments
+  still described algo 10 as an unimplemented preview. Algorithm 10 has
+  disciplined the loop for many releases; all these now describe the live
+  3-stage ACQ→DPLL→LOCK phase loop. (`Vdd:` on the TFT also gained a space
+  before its value to match the other labels.)
+- **LED spinner animations (warmup / survey-in / calibration) ran ~5x too slow
+  and looked choppy.** The display task wakes on the 1 Hz PPS notification, but
+  the spinners step their frame every 200 ms — so at the 1100 ms wake cadence
+  they advanced only once a second. The task now wakes ~every 150 ms while an
+  animation is active (and keeps the slow 1100 ms cadence otherwise, since the
+  clock only changes once a second). To stop the faster wake from re-pushing
+  identical segments over the software-bit-banged TM1637 (~5–8 ms per write), a
+  small write cache (`tm_set`) skips the transfer when the pattern is unchanged.
+  This is a scheduling/caching fix — no DMA involved; DMA remains a separate
+  future step for the TFT SPI path.
+- **A raised damping floor did not take effect after reflash — lock oscillated
+  LOCK↔DPLL.** The damping multiplier is persisted in the flash ring (live
+  data) and restored on boot. Flash written by a build with the old 0.30 floor
+  therefore reloaded damp = 0.30 even after the floor was raised to 0.45, and
+  since damp only adapts on limit-cycle crossings it stayed stuck there — the
+  loop ran at 30 % correction authority, the phase climbed past the lock
+  threshold, and the loop hunted LOCK↔DPLL every ~30 s (seen on air). The
+  restored damp is now clamped into the current legal band on load (both flash
+  ring and EEPROM), so a reflash takes effect immediately. The damp bounds
+  moved to the shared header so storage and the learner agree.
+- **TFT now shows qErr, and phase gets a `dPh:` label.** On algo 10 with SAW
+  active, the right sensor row leads with the receiver sawtooth `qErr:…ns` and
+  `Vdd:` shortened to 1 decimal. The two are drawn separately — qErr
+  left-aligned, Vdd anchored to the right screen edge — so Vdd no longer drifts
+  sideways as qErr changes width. With SAW off, Vdd alone is shown at full
+  precision, still right-anchored. The LTIC phase on the left is labelled
+  `dPh:±…ns` (no space after `Vph:`) for a clearer, consistent readout; the
+  serial report uses the same `dPh:` label after `Vphase:` so the two match.
+  Both
+  qErr and dPh use a fixed-width signed field (sign always shown, magnitude
+  right-justified), so the digits and units stay put instead of jumping
+  sideways when the value crosses zero or changes digit count.
+### Fixed
+- **LOCK could lose lock on a drifting OCXO — now carries a gentle frequency
+  term.** In the normal LOCK branch the frequency path was disabled
+  (freq_term = 0), so the only defence against a real OCXO drift was the slow
+  drift feed-forward. On warm hardware that lagged badly and the phase walked
+  out of the lock window (11 → −425 ns in 51 s, then LOCK→DPLL→ACQ). LOCK now
+  applies a light 0.1×Kp frequency term — enough to cancel the live drift each
+  update, gentle enough not to inject TIM2 noise into a quiet lock. Combines
+  with the faster drift feed-forward (below). Root-cause analysis: GML-5.2.
+- **ACQ limit cycle (±150 LSB PWM hunting) removed.** Algorithm 10 took its
+  frequency error from avg10 (0.1 Hz quantisation); times Kp (~1550 LSB/Hz)
+  that produced ±150 LSB PWM jumps on a ~10 s cycle, which kept the phase from
+  settling under the lock threshold and slowed acquisition. It now uses avg100
+  (0.01 Hz), 10× finer, and acquisition settles cleanly. Analysis: GML-5.2.
+- **Drift feed-forward now bootstraps after lock.** Its first learning window
+  was a slow 30 s, so a fast post-lock drift escaped before it moved. It now
+  runs three fast 8 s windows at a larger step right after lock (absorbing the
+  drift in ~10–20 s) then relaxes to the quiet 30 s regime.
+- **Damping floor raised 0.30 → 0.45.** The learner could damp so hard the
+  loop had only 30 % correction authority and couldn't follow drift; 0.45 still
+  damps a limit cycle but keeps enough authority to track.
+
+### Changed
+- **LC calibration anchor is now universal — 0.632·Vsat, derived per board.**
+  The detector is an RC charge ramp V(φ) = Vsat·(1 − e^(−φ/τ)); the point
+  φ = τ, where V = 0.632·Vsat, is the same fractional height on every
+  exponential detector regardless of Vsat. LC now recovers Vsat with a 1-D fit
+  (linearise −ln(1 − V/Vsat) vs t, pick the lowest-residual Vsat) and anchors
+  there. The previous hard-coded 1.85 V only worked because Marek's and Dan
+  Wiering's detectors both happen to have Vsat ≈ 2.93 V; a detector with a
+  different Vsat would have missed the band. LC is now self-adapting per board
+  with no configuration, and `LTIC_ZERO_ANCHOR_V` is retired. Verified on
+  logged runs: Vsat recovered to ~0.3 %, anchors agree ~0.8 % run to run.
+  Physics and derivation: GML-5.2.
+- **Splash subtitle** now reads `GPS Disciplined OCXO` (space, not hyphen).
+
+### Credits
+- Loop-anomaly diagnosis and the universal-anchor derivation in this release
+  were contributed by **GML-5.2**, cross-checked here against the logged data
+  and hardware behaviour. Field logs and testing: **danieljw** (Rb reference)
+  and **lucido**.
+
+---
+
 ## [v0.91-rtos] — 2026-07-11
 
 ### Added
@@ -78,6 +320,19 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
   needs — without it that line stays blank. These are best-effort fixes from
   photographs; a final geometry pass will follow once an ILI9488 panel is in
   hand. Small 320×240 panels are unaffected (TFT_F is identity there).
+- **LOCK could lose lock on a drifting OCXO (LOCK→DPLL→ACQ bounce).** With a
+  real frequency drift (measured ~8.5 ns/s on warm hardware), the phase walked
+  out of the lock window — 11 → −425 ns in 51 s — while the correction was too
+  weak to follow: the damping learner had floored at 0.30 (correction at 30 %
+  authority) and the drift feed-forward was still gathering its first 30 s
+  window, so it never moved before lock was lost. Two changes: the damping
+  floor was raised 0.30 → 0.45 (keeps enough authority to track drift while
+  still damping a limit cycle), and the feed-forward now BOOTSTRAPS after lock
+  — three fast 8 s windows at a larger step absorb the drift within ~10–20 s,
+  then it relaxes to the slow, quiet 30 s regime. Simulated on the logged
+  drift, phase now holds near −125 ns instead of running away. Stable, low-drift
+  setups (e.g. a Rb-referenced build) are unaffected — the bootstrap converges
+  immediately and the higher floor is still net damping.
 - **Phase in ns added to the serial report**, after `Vphase:`, once LC has
   calibrated the detector — `(V − zero_offset) × ns/V`, the same convention as
   the loop and the TFT row.

@@ -1,7 +1,7 @@
 /**
  * GPSDO_algorithms.cpp — Control loop algorithm implementations
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -109,10 +109,12 @@ float    g_lrn_damp     = 1.0f;          /* damping multiplier, 0.5..1.5      */
 
 #define LRN_TICK        30               /* seconds between learner updates    */
 #define LRN_DRIFT_MAX   400.0f           /* |feed-forward| clamp, LSB          */
-#define LRN_DAMP_LO     0.30f            /* let the learner damp harder if the */
-                                        /* limit cycle refuses to die (>0.5   */
-                                        /* starves a wide-detector HC74 loop) */
-#define LRN_DAMP_HI     1.5f
+/* LRN_DAMP_LO / LRN_DAMP_HI live in GPSDO_algorithms.h (shared with
+ * live_store for clamping restored values). The floor was raised 0.30 → 0.45
+ * when a too-hard floor was found to starve the loop of correction authority
+ * on a wide HC74 detector (phase ran 11→−425 ns in 51 s at damp 0.30 and
+ * dropped LOCK→DPLL→ACQ). 0.45 still damps a limit cycle but keeps enough gain
+ * to track a real OCXO drift. */
 
 /* Live telemetry (printed by the report task when learning is active). */
 float    g_lrn_slope_ns_s = 0.0f;        /* observed mean phase slope, ns/s    */
@@ -128,6 +130,7 @@ static float lrn_update_ef(double e_freq, double phase_ns, double dt, bool locke
     static double last_cross_t = 0.0, run_t = 0.0;
     static double last_ext = 0.0;  static int8_t  last_sign = 0;
     static bool   armed = false;
+    static uint8_t ff_boot = 0;    /* fast feed-forward windows after (re)lock */
 
     if (!g_lrn_enable || !locked) { armed = false; return g_lrn_drift; }
 
@@ -141,18 +144,29 @@ static float lrn_update_ef(double e_freq, double phase_ns, double dt, bool locke
      * the mean e_freq is ~0 and the feed-forward stops moving. A deadband
      * (0.2 mHz) and a small per-tick step prevent wind-up and hunting. */
     ef_win += e_freq; win_t += dt;
-    if (win_t >= (double)LRN_TICK) {
+    /* Feed-forward window and step: normally slow (30 s, 25 % of residual) to
+     * stay quiet in steady state. But right after lock the drift is unknown
+     * and the phase can run away before a 30 s window even closes — on air the
+     * phase reached −425 ns (past the ACQ threshold) in 51 s while the learner
+     * was still gathering its first window, so lock was lost before the
+     * feed-forward ever moved. BOOTSTRAP: for the first few windows after lock,
+     * use a short 8 s window and take a larger 60 % step, so the drift is
+     * absorbed within ~10–20 s; then relax to the slow, quiet regime. */
+    double tick = (ff_boot > 0) ? 8.0  : (double)LRN_TICK;
+    double gain = (ff_boot > 0) ? 0.60 : 0.25;
+    if (win_t >= tick) {
         double mean_ef = ef_win / win_t;          /* Hz, residual after ff  */
         g_lrn_slope_ns_s = (float)(mean_ef * 1.0e9 / (double)BASE_FREQ); /* ns/s */
         if (fabs(mean_ef) > 2.0e-4) {             /* 0.2 mHz deadband       */
             double lsbhz = (g_pid[7].Kp > 100.0) ? ((double)g_pid[7].Kp / 0.40) : 3000.0;
             /* u = -(…): positive e_freq (freq high) must LOWER pwm, so the
-             * feed-forward carries -e_freq. Move a quarter of the residual. */
+             * feed-forward carries -e_freq. Move a fraction of the residual. */
             double corr = -mean_ef * lsbhz;
-            g_lrn_drift += (float)(0.25 * corr);
+            g_lrn_drift += (float)(gain * corr);
             if (g_lrn_drift >  LRN_DRIFT_MAX) g_lrn_drift =  LRN_DRIFT_MAX;
             if (g_lrn_drift < -LRN_DRIFT_MAX) g_lrn_drift = -LRN_DRIFT_MAX;
         }
+        if (ff_boot > 0) ff_boot--;
         ef_win = 0.0; win_t = 0.0;
     }
 
@@ -195,6 +209,7 @@ static float lrn_update_ef(double e_freq, double phase_ns, double dt, bool locke
         if (sgn != 0) last_sign = sgn;
     } else {
         armed = true; last_cross_t = run_t; last_ext = 0.0; last_sign = 0;
+        ff_boot = 3;    /* three fast 8 s windows to absorb drift after lock */
     }
     return g_lrn_drift;
 }
@@ -518,7 +533,13 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
     /* ---- read both sensors ---- */
     FreqSnapshot_t s;
     take_freq_snapshot(&s);
-    double e_freq = s.have10 ? (s.avg10 - (double)BASE_FREQ) : 0.0;
+    /* e_freq from avg100 (0.01 Hz), not avg10 (0.1 Hz). avg10's coarse
+     * quantisation, times Kp (~1550 LSB/Hz), produced ±150 LSB PWM jumps — a
+     * ~10 s limit cycle in ACQ that stopped the phase settling under the lock
+     * threshold (GML-5.2 analysis). avg100 is 10× finer and settles cleanly.
+     * Fall back to avg10 only until the first 100 s window has filled. */
+    double e_freq = s.have100 ? (s.avg100 - (double)BASE_FREQ)
+                  : s.have10  ? (s.avg10  - (double)BASE_FREQ) : 0.0;
 
     bool ph_valid = false;
     double phase_ns = ltic_phase_error_ns(&ph_valid);
@@ -670,8 +691,20 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
             if (integ > 65300.0) integ = 65300.0;
             if (integ < 200.0)   integ = 200.0;
             /* Frequency path: NO pol (K positive on every board); autotuned
-             * Kp is already LSB-per-Hz. Phase path keeps pol. */
-            double freq_term  = (state == LTIC_DPLL) ? (pid->Kp * e_freq) : 0.0;
+             * Kp is already LSB-per-Hz. Phase path keeps pol.
+             *
+             * LOCK now carries a GENTLE frequency term (0.1×Kp), not zero. With
+             * freq_term=0 the only defence against a real OCXO drift was the
+             * slow drift feed-forward, which on warm hardware lagged ~60× too
+             * slow — the phase walked 11→−425 ns in 51 s and lock dropped
+             * (LOCK→DPLL→ACQ). A light 0.1×Kp cancels the live frequency error
+             * every update without injecting the TIM2 quantisation noise a full
+             * DPLL-strength term would (e_freq is the smooth avg100 now). The
+             * feed-forward still absorbs the systematic part; this catches the
+             * rest immediately. Credit: analysis by GML-5.2. */
+            double freq_term  = (state == LTIC_DPLL) ? (pid->Kp * e_freq)
+                              : (state == LTIC_LOCK) ? (pid->Kp * e_freq * 0.1)
+                              : 0.0;
             double phase_term = (double)pol * pid->Kd * p_eff;
             u = integ - (double)pwm - freq_term - phase_term;
             /* self-learning: damp the correction, add drift feed-forward when

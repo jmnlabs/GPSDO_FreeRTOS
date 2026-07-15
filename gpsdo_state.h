@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -144,7 +144,6 @@ typedef struct {
 #define EVT_OCXO_WARM         (1u << 2)
 #define EVT_ARM_PICDIV        (1u << 3)
 #define EVT_REPORT_TAB        (1u << 4)
-#define EVT_HALF_SECOND       (1u << 5)
 #define EVT_NEED_TUNE         (1u << 6)   /* CT: calibrate K + auto-tune PID */
 #define EVT_NEED_LTIC_CAL     (1u << 7)   /* LC: LTIC self-calibration       */
 
@@ -193,7 +192,14 @@ extern bool   g_svin_enabled;         /* true = run survey-in on timing rx */
 /* Calibration progress — shown on displays during C / CT.
  * Simple scalar types: written by vControlTask, read by vDisplayTask;
  * single-word access is atomic on Cortex-M, no mutex needed. */
-extern volatile bool     g_calib_active;     /* true while C/CT running   */
+/* Calibration kinds, for the status line (see g_calib_kind). */
+#define CALIB_NONE   0u
+#define CALIB_C      1u   /* C  — PWM/frequency calibration      */
+#define CALIB_CT     2u   /* CT — calibrate K + auto-tune PID    */
+#define CALIB_LC     3u   /* LC — LTIC detector self-calibration */
+
+extern volatile bool     g_calib_active;     /* true while C/CT/LC running */
+extern volatile uint8_t  g_calib_kind;       /* CALIB_* — which one         */
 extern volatile uint16_t g_calib_remaining;  /* seconds left in this step */
 
 /* Warmup progress — shown on displays during OCXO warmup at boot. */
@@ -207,6 +213,7 @@ extern volatile uint16_t g_warmup_remaining; /* seconds left in warmup     */
  * g_svin_dur counts elapsed seconds; g_svin_acc_m is the current accuracy in
  * metres (sqrt of TIM-SVIN meanV variance), both for the display. */
 extern volatile bool     g_svin_active;      /* true while survey-in running */
+extern volatile bool     g_svin_background;  /* survey outlived our monitor, receiver still at it */
 extern volatile bool     g_svin_pending;     /* true = vGpsTask must poll svin */
 extern volatile uint16_t g_svin_dur;         /* elapsed survey-in seconds    */
 extern volatile uint16_t g_svin_acc_m;       /* current mean 3D accuracy [m] */

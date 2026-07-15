@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.91-rtos"
+#define PROGRAM_VERSION  "v0.94-rtos"
 
 /* ---- Serial output macro ----
  * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
@@ -99,17 +99,17 @@ extern "C" {
  *     #define TFT_RST  PB15
  *     #define TFT_RGB_ORDER TFT_BGR   // colour order Blue-Green-Red
  *     #define TFT_INVERSION_OFF       // some ST7789 modules need this
- *     #define LOAD_GLCD
- *     #define LOAD_FONT2
- *     #define LOAD_FONT4
- *     #define LOAD_FONT6              // ILI9488: large frequency font
- *     #define SPI_FREQUENCY 27000000  // ILI9488 over SPI is slow; 27 MHz ok
+ *     #define LOAD_GLCD               // font 1 — frequency (320) + splash credits
+ *     #define LOAD_FONT2              // 320x240 only: header + data grid
+ *     #define LOAD_FONT4              // status bar + splash subtitle
+ *     #define LOAD_GFXFF              // 480x320 only: GFX free fonts
+ *     #define SPI_FREQUENCY 40000000  // F411 SPI1 max 50 MHz; 40 MHz leaves headroom
  *
  * The defines below only gate the display code in gpsdo_tasks.cpp —
  * driver selection happens in the TFT_eSPI User_Setup.h.              */
 /* #define GPSDO_TFT_ILI9341 */  /* ILI9341 240x320 SPI TFT */
-#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
-/* #define GPSDO_TFT_ILI9488 */  /* ILI9488 320x480 SPI TFT (480x320 landscape)
+//#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
+#define GPSDO_TFT_ILI9488   /* ILI9488 320x480 SPI TFT (480x320 landscape)
                                   * — UNTESTED: no panel on hand yet. Layout is
                                   * the 320x240 design scaled up ~1.5x. Set the
                                   * matching driver + TFT_WIDTH 320 / TFT_HEIGHT
@@ -132,7 +132,6 @@ extern "C" {
 #define LCD_LINE2_SWITCH_SECS   10u   /* rotate line 2 content every N seconds     */
 
 /* ── Remaining feature switches (sensors, comms, GPS timing, etc.) ───── */
-#define GPSDO_PWM_DAC
 #define GPSDO_AHT10
 #define GPSDO_BMP280_I2C
 #define GPSDO_INA219
@@ -234,22 +233,96 @@ extern "C" {
 /* generic scale for sizes/padding not tied to an axis — uses the X factor */
 #define TFT_S(v)   TFT_SX(v)
 
-/* TFT_eSPI GLCD fonts are discrete sizes (1,2,4,6,7,8), so they can't scale by
- * an arbitrary factor. TFT_F() maps a base font up on the larger panel, but
- * the jump must not outrun the ROW height, which only scales by TFT_SY (4/3 ≈
- * 1.33). The naive mapping 2→4 grows the main data font 16→26 px (1.63×) while
- * rows grow only 1.33× — so lines overran each other and pushed the status bar
- * off the bottom (seen on lucido's and Dan's ILI9488). The body font (2) is
- * therefore kept at 2: 16 px on a 480×320 panel is still clearly legible and
- * now sits comfortably inside a 1.33×-scaled row, leaving room for the status
- * bar. Only font 1 (fine print) is bumped to 2, and the big display/splash
- * fonts (4,6) still step up where the vertical space genuinely exists.
- * Mapping: 1→2, 2→2, 4→6, 6→8 (others pass through). */
+/* ── GFX Free Fonts (GFXFF) ──────────────────────────────────────────────
+ * The display text is drawn with the Adafruit GFX free fonts bundled with
+ * TFT_eSPI (proportional FreeSans / monospace FreeMono, 9/12/18/24 pt). This
+ * replaced the old numeric GLCD fonts (1,2,4,6,7,8): fonts 6/7/8 contain ONLY
+ * the glyphs 0-9 . : - a p m, so any lettered string drawn in them collapsed
+ * to whatever numeric-font glyph happened to exist — e.g. "GPS Disciplined
+ * OCXO" in font 6 rendered as a lone "p". GFXFF has the full character set and
+ * looks far cleaner on the big panel.
+ *
+ * `#define LOAD_GFXFF` in User_Setup.h is needed for the 480×320 build only.
+ * The font structs are pulled in automatically by the library — do NOT
+ * #include any Fonts/GFXFF/*.h yourself, that double-defines them. Both builds
+ * need LOAD_GLCD (font 1); the 320×240 build also needs LOAD_FONT2 and
+ * LOAD_FONT4, and nothing else.
+ *
+ * Fonts are chosen per ROLE. The layout is authored once and TFT_SX/TFT_SY
+ * scale the coordinates for both panels — but the two panels do NOT use the
+ * same faces. GFXFF is proportional and too wide for the 320×240 operating
+ * screen: values overran their columns (tried in v0.92, reverted in v0.93),
+ * and there is nothing smaller to fall back on (FreeSans starts at 9pt; below
+ * it is only the unreadable 3×5 TomThumb). So the small panel keeps the
+ * classic numeric fonts it was authored for, while the 480×320 panel — which
+ * has the room — uses GFXFF throughout. The splash is classic on both, so that
+ * upgrading from an older build needs no new User_Setup lines. TFT_FONT_*
+ * (below) apply the choice; GF_* name the GFXFF faces.
+ *
+ *   Role        320×240            480×320            purpose
+ *   ─────────   ────────────────   ────────────────   ────────────────────────
+ *   data grid   classic font2      FreeSans    9pt    grid labels + values
+ *   header      classic font2      FreeSans    9pt    header (name/ver + LMT)
+ *   status bar  classic font4      FreeSansBold 12pt  bottom status bar (half-height)
+ *   frequency   classic font1 ×3   FreeMonoBold 24pt  big frequency (both fixed-width)
+ *   splash sub  classic font4      FreeSansBold 12pt  "GPS Disciplined OCXO"
+ *   credits     classic font1      classic font1      splash credit lines
+ *
+ * FreeMono is used for the frequency on the big panel so the digits are
+ * fixed-width and don't shuffle as the value changes (classic font 1 is
+ * already fixed-width, so the small panel gets this for free). Grid values use
+ * FreeSans but are right-datum anchored (see tft_val_r) so changing widths
+ * stay pinned. */
+
+/* GFX free-font choices — 480×320 only. */
 #if defined(GPSDO_TFT_ILI9488)
-  #define TFT_F(f)   ((f)==1?2 : (f)==2?2 : (f)==4?6 : (f)==6?8 : (f))
-#else
-  #define TFT_F(f)   (f)
+  #define GF_DATA    &FreeSans9pt7b
+  #define GF_HEAD    &FreeSans9pt7b
+  #define GF_STATUS  &FreeSansBold12pt7b
+  #define GF_FREQ    &FreeMonoBold24pt7b
 #endif
+
+/* ── Font application: GFX on the big panel, classic on the small one ─────
+ * The GFX free fonts are proportional and comparatively wide. On the 480×320
+ * panel they look good and there is room for them. On 320×240 the same layout
+ * in FreeSans overflowed its columns — values ran into the neighbouring column
+ * and the centre divider cut through the text — so the small panel goes back
+ * to the classic numeric fonts it was authored for. The splash keeps GFX on
+ * both panels (its layout has the room, and it reads well).
+ *
+ * TFT_FONT_DATA / _HEAD / _STATUS take a TFT_eSPI-ish object (the panel or a
+ * sprite) and select the right font for this build. On the classic path they
+ * set a plain font number; drawString() then needs no font argument because
+ * setTextFont() has already applied it.
+ *
+ * The frequency is special: the classic path uses font 1 scaled ×3 (18×24),
+ * which is fixed-width, so it needs setTextSize() too — see TFT_FONT_FREQ_ON
+ * / TFT_FONT_FREQ_OFF, which must bracket the drawString. */
+#if defined(GPSDO_TFT_ILI9488)
+  #define TFT_FONT_DATA(o)    (o).setFreeFont(GF_DATA)
+  #define TFT_FONT_HEAD(o)    (o).setFreeFont(GF_HEAD)
+  #define TFT_FONT_STATUS(o)  (o).setFreeFont(GF_STATUS)
+  #define TFT_FONT_FREQ_ON(o)  (o).setFreeFont(GF_FREQ)
+  #define TFT_FONT_FREQ_OFF(o) do { } while (0)
+#else
+  #define TFT_FONT_DATA(o)    (o).setTextFont(2)
+  #define TFT_FONT_HEAD(o)    (o).setTextFont(2)
+  #define TFT_FONT_STATUS(o)  (o).setTextFont(4)
+  #define TFT_FONT_FREQ_ON(o)  do { (o).setTextFont(1); (o).setTextSize(3); } while (0)
+  #define TFT_FONT_FREQ_OFF(o) (o).setTextSize(1)
+#endif
+
+/* ── Freq-band sprite RAM budget ─────────────────────────────────────────
+ * The frequency readout is drawn to a 4-bit TFT_eSprite (double buffer) then
+ * pushed to the panel in one transfer — eliminates the per-second flicker
+ * caused by setTextPadding erasing ~16 k px on the live panel before each
+ * redraw. The sprite covers only the freq band (between the header separator
+ * and the freq separator); the rest of the screen stays direct-draw.
+ *   ILI9488 (480x320):  480 × 48 px × 0.5 B = 11.2 KB
+ *   ILI9341/ST7789:     320 × 48 px × 0.5 B =  7.5 KB
+ * Both well within the 128 KB RAM of the F411. If heap is too low at runtime
+ * createSprite() returns nullptr and the code falls back to direct-draw
+ * (flicker returns, but the screen still works). */
 
 /* ── Convenience alias: any OLED defined ────────────────────────────── */
 #if defined(GPSDO_OLED_SH1106) || defined(GPSDO_OLED_SSD1306) || defined(GPSDO_OLED_SSD1309)
@@ -284,14 +357,15 @@ extern "C" {
   #define PIN_LTIC_VPHASE   PA1   /* ADC input + open-drain output to discharge 1nF cap */
   #define LTIC_DISCHARGE_MS   1   /* ms to discharge 1nF capacitor via open-drain low   */
   #define LTIC_OVERSAMPLE    16   /* fast ADC reads per PPS, median taken (glitch-proof) */
-  /* Voltage→time calibration for the TIC ramp. The TIC charges a 1 nF cap with
-   * a constant current during the GPS-1PPS → OCXO-1PPS interval, so the latched
-   * voltage is proportional to that phase difference: t[ns] = Vphase * LTIC_NS_PER_VOLT.
-   * The slope depends on the charge current and capacitor and MUST be calibrated
-   * per board (e.g. inject a known delay, read the volts). 0 = uncalibrated:
-   * displays/telemetry then show volts only, no ns. Used by the future LTIC
-   * phase-discipline algorithm (planned), not by the current loop. */
-  #define LTIC_NS_PER_VOLT    0.0f /* 0 = not yet calibrated → show volts only */
+  /* Legacy voltage→time calibration constant for the TIC ramp. The TIC charges
+   * a 1 nF cap with a constant current during the GPS-1PPS → OCXO-1PPS interval,
+   * so the latched voltage tracks the phase difference. This compile-time
+   * constant is a FALLBACK only: the `LC` command measures the real slope per
+   * board at runtime and stores ns_per_volt / zero_offset / range_ns in the
+   * live parameters (flash ring), which is what algorithm 10 and the
+   * displays actually use. Leave at 0; displays then show volts until LC runs,
+   * after which they show ns from the measured slope. */
+  #define LTIC_NS_PER_VOLT    0.0f /* 0 = use measured LC calibration (normal) */
   /* Self-calibration (LC command) parameters. LC forces a small PWM offset so
    * the phase ramps linearly across the detector, measures the ramp rate from
    * the TIM2 frequency error, and regresses the TIC voltage vs time to get the
@@ -325,12 +399,14 @@ extern "C" {
    * sweet spot of THIS detector (Vsat·(1−1/e) ≈ 0.63·Vsat, near the middle of
    * its usable range and clear of Dan Wiering's measured dead zones: the diode
    * drop + pull-down below ~0.05 V, and the ADC rail/wraparound near 3.3 V).
-   * We anchor the loop's zero_offset here and read ns/V from the local slope in
-   * a ±window around it, instead of averaging the whole ramp.
+   * We anchor the loop's zero_offset at 0.632·Vsat (measured per board by LC)
+   * and read ns/V from the local slope in a ±window around it, instead of
+   * averaging the whole ramp.
    *
-   * NOTE: this is board-specific (LVC74 @ 3.3 V, 1k/1n ramp). If the ramp
-   * amplitude changes, re-measure the sweet spot from a 1 s LC log. */
-  #define LTIC_ZERO_ANCHOR_V  1.85f  /* repeatable operating point [V]        */
+   * NOTE: on the reference board (LVC74 @ 3.3 V, 1k/1n ramp) that sweet spot
+   * lands near 1.85 V, since Vsat ≈ 2.93 V. LC now derives the anchor from the
+   * measured Vsat rather than a fixed constant, so it adapts to any detector;
+   * see do_ltic_calibrate() in gpsdo_control.cpp. */
   #define LTIC_ANCHOR_WIN_V   0.20f  /* half-width for the local-slope fit [V] */
 #define LTIC_CAL_MIN_POINTS   12   /* reject fit with fewer samples          */
 #endif

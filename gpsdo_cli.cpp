@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -119,7 +119,7 @@ static void print_help(void)
     cli_putln("  RH / RD     Human readable / Tab Delimited reporting");
     cli_putln("  RP / RR     Report Pause / Report Resume");
     cli_putln("  MH / MD     Mode Holdover / Mode Disciplined");
-    cli_putln("  LA <0-9>    Loop Algorithm select (10=LTIC, phase A)");
+    cli_putln("  LA <0-10>   Loop Algorithm select (10 = LTIC phase discipline)");
     cli_putln("  LP [n]      List PID Parameters (algo n or current)");
     cli_putln("  KP n val    set Kp for algo n (3-7)");
     cli_putln("  KI n val    set Ki for algo n (3-7)");
@@ -128,7 +128,7 @@ static void print_help(void)
     cli_putln("  BC [val]    algo 8 Blend Crossover (Hz)");
     cli_putln("  BS [val]    algo 8 Blend Scale (Hz)");
     cli_putln("  NS [val]    algo 9 NN max Step (LSB)");
-    cli_putln("  -- LTIC (algo 10) params (loop = phase A) --");
+    cli_putln("  -- LTIC (algo 10) phase-discipline params --");
     cli_putln("  LC          LTIC self-Calibrate (ns/V, offset, range)");
     cli_putln("  LL          List all LTIC params + state");
     cli_putln("  LNV/LZO/LRN cal: ns/V, zero-offset V, range ns");
@@ -420,7 +420,7 @@ static void dispatch(char *line)
                 }
                 cli_puts("Algorithm: "); cli_putint(v);
             } else {
-                cli_putln("LA: value must be 0..9 (10=LTIC, not yet available)");
+                cli_putln("LA: value must be 0..10 (10 = LTIC phase discipline)");
             }
         }
         return;
@@ -525,10 +525,10 @@ static void dispatch(char *line)
     }
 
     /* ====================================================================
-     * Algorithm 10 (LTIC) parameter commands. The loop is not implemented
-     * yet (phase A) — these set/show the persisted parameters so the config
-     * is ready. A single helper handles the "show if no arg, else set with
-     * range check" pattern for the float fields.
+     * Algorithm 10 (LTIC) parameter commands. These set/show the persisted
+     * parameters the phase-discipline loop uses. A single helper handles the
+     * "show if no arg, else set with range check" pattern for the float
+     * fields.
      * ==================================================================== */
     {
         /* table-free dispatch: each verb maps to a float* and a range */
@@ -674,7 +674,7 @@ static void dispatch(char *line)
         cli_putln(g_ltic.centre_v == 0.0f ? " (auto=range mid)" : "");
         const char *sn = (g_ltic.state==LTIC_ACQ)?"ACQ":(g_ltic.state==LTIC_DPLL)?"DPLL":"LOCK";
         cli_puts("  state="); cli_puts(sn);
-        cli_putln("  (loop not yet implemented — phase A)");
+        cli_putln("  (3-stage phase loop: ACQ->DPLL->LOCK)");
         return;
     }
 

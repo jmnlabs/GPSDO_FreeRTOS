@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO FreeRTOS v0.91
+ * Part of GPSDO FreeRTOS v0.94
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -471,6 +471,11 @@ static void ubx_poll_svin_step(void)
     }
     if (millis() > svin_deadline) {
         OUT_SERIAL.println("LEA-T: survey-in safety timeout — continuing anyway");
+        /* We stop polling, but the receiver does NOT stop surveying. Flag it so
+         * the display can keep a quiet indicator up until Time Mode arrives —
+         * only mark it if the survey was actually replying, otherwise there is
+         * nothing running to wait for. */
+        if (ever_replied) g_svin_background = true;
         g_svin_active = false; g_svin_pending = false;
     }
 }
@@ -765,6 +770,10 @@ void vGpsTask(void *pvParameters)
                      * so treat "valid position + absurd HDOP" as Time Mode and
                      * show HDOP:TIME instead of a meaningless number.        */
                     gGps.time_mode = (gGps.hdop >= 5000);
+                    /* Time Mode is the survey's real completion signal — if one
+                     * was still running past our monitor window, it's done now
+                     * and the display indicator can go. */
+                    if (gGps.time_mode) g_svin_background = false;
                     last_pos_valid_ms = millis();   /* genuine fix — reset position timer */
                     had_pos = true;
                 } else if (location_fresh) {

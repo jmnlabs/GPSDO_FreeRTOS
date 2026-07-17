@@ -1,6 +1,6 @@
 /* ======================================================================
  * live_store.cpp  —  live-data persistence over the flash ring buffer
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * See live_store.h for the design and payload layout.
  * ====================================================================== */
 

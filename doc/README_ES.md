@@ -1,6 +1,8 @@
-# GPSDO FreeRTOS v0.94
+# GPSDO FreeRTOS v0.95
 
-[English](README.md) | [Polski](README_PL.md) | **Español**
+[English](README_EN.md) | [Polski](README_PL.md) | **Español**
+
+📖 [Inicio del proyecto](../README.md)
 
 Firmware en tiempo real (FreeRTOS) para un oscilador disciplinado por GPS
 (GPSDO) sobre la plataforma STM32 BlackPill (WeAct F411CE / F401CCU6).
@@ -11,7 +13,7 @@ Firmware en tiempo real (FreeRTOS) para un oscilador disciplinado por GPS
 
 | Rol | Persona / fuente |
 |-----|------------------|
-| Autor del port a FreeRTOS, algoritmos 3–9 | **J. M. Niewiński** — [repositorio](https://github.com/jmnlabs/GPSDO_FreeRTOS) |
+| Autor del port a FreeRTOS, algoritmos 3–10 | **J. M. Niewiński** — [repositorio](https://github.com/jmnlabs/GPSDO_FreeRTOS) |
 | Asistente de programación (Anthropic) | **Claude AI** |
 | Autor de v0.06c — inspiración del port RTOS | **André Balsa** — [repositorio](https://github.com/AndrewBCN/STM32-GPSDO) |
 | Diseño de PCB (prototipo) | **Scrachi** (foro EEVBlog) — [mensaje con archivos](https://www.eevblog.com/forum/projects/yet-another-diy-gpsdo-yes-another-one/825/) · [perfil](https://www.eevblog.com/forum/profile/?u=762266) |
@@ -270,7 +272,7 @@ pantallas I2C — OLED, LCD y TFT pueden funcionar a la vez.
 
 ```
 ┌────────────────────────────────────────────┐
-│ v0.94-rt      GPSDO      LMT 14:32:45 Thu   │ ← header bar (navy)
+│ v0.95-rt      GPSDO      LMT 14:32:45 Thu   │ ← header bar (navy)
 ├────────────────────────────────────────────┤
 │                                            │
 │        10000000.0000 Hz                    │ ← frequency (large, colour-coded)
@@ -557,11 +559,45 @@ funciona cualquier combinación de mayúsculas/minúsculas.
 
 | Comando | Descripción |
 |---------|-------------|
-| `TO [n]` | Mostrar / fijar el desfase de hora local manualmente (horas, −23..23) |
-| `TO A` | Zona horaria automática: zona desde la posición GPS + regla DST de la UE |
+| `TO [n]` | Mostrar / fijar un desfase fijo — horas o `h:mm` (`TO 9:30`, `TO -5`) |
+| `TO A` | Zona automática: zona desde la posición GPS + regla DST de la UE (solo Europa) |
+| `TZ [zona]` | Zona horaria con DST — `TZ Adelaide`, o una regla POSIX. Ver `H TZ` |
 | `PO [f]` | Mostrar / fijar el offset de presión |
 | `AO [f]` | Mostrar / fijar el offset de altitud |
 | `SV [0\|1]` | Survey-in / Time Mode en el receptor de temporización (guardado por `ES`, aplicado en el siguiente arranque) |
+
+### Zonas horarias
+
+`TZ <ciudad>` suele bastar:
+
+```
+TZ Adelaide          → UTC+9:30, y UTC+10:30 con DST activo
+TZ Warsaw            → UTC+1 / UTC+2
+TZ Kolkata           → UTC+5:30, sin DST
+```
+
+Los nombres de ciudad son únicos en toda la base IANA, así que la región es
+opcional (`TZ Australia/Adelaide` también funciona) y no importan las
+mayúsculas. Hay 407 zonas integradas.
+
+La regla también puede darse completa, lo que importa si un gobierno cambia
+las reglas antes de que el firmware lo recoja:
+
+```
+TZ ACST-9:30ACDT,M10.1.0,M4.1.0/3
+```
+
+`H TZ` explica el formato. `ES` guarda el ajuste.
+
+**¿Por qué no la base IANA?** Ocupa ~2 MB, cuatro veces toda la flash de este
+MCU, y su valor está en actualizarse varias veces al año, algo que un GPSDO sin
+internet no puede aprovechar. La cadena POSIX TZ a la que se reduce cada zona
+ocupa 4–44 bytes y recoge el mismo comportamiento actual.
+
+`TO A` (automático desde la posición GPS) sigue igual: es correcto en casi toda
+Europa, pero no conoce el DST fuera de ella y solo devuelve horas enteras.
+Fuera de Europa, usa `TZ`.
+
 
 ### LTIC — algoritmo 10 (tres etapas ACQ/DPLL/LOCK)
 
@@ -734,12 +770,15 @@ La EEPROM (emulada en la Flash del STM32) almacena 144 bytes:
 | 0–5 | 6 B | Firma `"GPSD2"` |
 | 6–7 | 2 B | Valor del DAC PWM (big-endian) |
 | 8 | 1 B | Número de algoritmo (0–9) |
-| 9 | 1 B | Desfase horario (±23 h) |
+| 9 | 1 B | Desfase heredado en horas enteras (sustituido por 234) |
 | 10–121 | 112 B | PID: g_pid[3..9] × {Kp, Ki, Kd, I_LIMIT} |
 | 122–133 | 12 B | g_blend_crossover, g_blend_scale, g_nn_max_step |
 | 134–137 | 4 B | g_pressure_offset (comando PO) |
 | 138–141 | 4 B | g_altitude_offset (comando AO) |
-| 142 | 1 B | modo de zona horaria (0 = manual, 1 = auto `TO A`) |
+| 142 | 1 B | Flag tz_auto heredado (sustituido por 234) |
+| 234 | 1 B | Modo de zona (0 = manual, 1 = auto-EU, 2 = regla POSIX) |
+| 235 | 2 B | Desfase manual, minutos (int16) |
+| 237 | 48 B | Regla POSIX TZ, como texto |
 | 143 | 1 B | habilitación de survey-in (0 = off, 1 = on, comando `SV`) |
 
 ---
@@ -932,8 +971,8 @@ de frecuencia (3–9).
 
 El lazo de control **disciplina el OCXO directamente desde esta fase** mediante
 el algoritmo 10 (`LA 10`) — el lazo de tres etapas ACQ → DPLL → LOCK descrito
-abajo. La fase aparece en el informe serie (`Vphase:` y `dPh:` en ns), como una
-fila `Vph:`/`dPh:` en el TFT y como una línea `LTIC phase (PA1)` en la lista de
+abajo. La fase aparece en el informe serie (`Vphase:` y `dph:` en ns), como una
+fila `Vph:`/`dph:` en el TFT y como una línea `LTIC phase (PA1)` en la lista de
 verificación de arranque. Una vez que `LC` ha calibrado la rampa, la fase se
 reporta en nanosegundos relativa al `zero_offset` calibrado, usando el
 `ns_per_volt` medido; antes de calibrar solo se muestran voltios. (La constante

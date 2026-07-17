@@ -1,4 +1,8 @@
-# Buffer circular en Flash — procedimiento de puesta en marcha (v0.90)
+# Buffer circular en Flash — procedimiento de puesta en marcha
+
+[English](FLASH_RING_BRINGUP_EN.md) | [Polski](FLASH_RING_BRINGUP_PL.md) | **Español**
+
+📖 [Inicio del proyecto](../README.md) · [Manual](README_ES.md)
 
 El buffer circular con nivelación de desgaste guarda los datos «vivos»
 (deriva/amortiguación aprendida, calibración LC, último PWM) en el **sector 6**
@@ -26,8 +30,16 @@ Para restaurar después: `loadbin backup_full.bin 0x08000000`.
 
 Revisa la línea de tamaño: `Sketch uses NNNNNN bytes ...`
 
-`NNNNNN` debe quedar **por debajo de 262144** (0x08040000 − 0x08000000). En
-v0.90 son ~170 KB, ~89 KB de margen. Si un build futuro se acerca a 256 KB,
+`NNNNNN` debe quedar **por debajo de 262144** (0x08040000 − 0x08000000): ahí
+empiezan el sector 6 y el ring. v0.95 mide 216976 B (212 KB), con ~44 KB de
+margen; v0.90 eran ~170 KB, así que crece.
+
+Ignora el porcentaje que imprime el IDE: lo calcula sobre los 512 KB completos,
+así que v0.95 aparece como «41%» — pero los sectores 6 y 7 están ocupados (ring
+y EEPROM), y frente a los 256 KB que el firmware puede usar realmente, la cifra
+verdadera es 83%.
+
+Si un build futuro se acerca a 256 KB,
 mueve el anillo o reduce el firmware **antes** de programar.
 
 ## 2. Activa el anillo, observa `EW`

@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.cpp — Shared state instances and EEPROM helpers
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -16,20 +16,27 @@
  *   [0..5]     signature (6 B)
  *   [6..7]     pwm_output (uint16_t big-endian)
  *   [8]        active_algo
- *   [9]        g_time_offset
+ *   [9]        legacy whole-hour offset (superseded by [234..]; still
+ *              written so older firmware reading this EEPROM sees something
+ *              sane)
  *   [10..121]  g_pid[3..9]: 7 x {Kp, Ki, Kd, I_LIMIT} as float
  *   [122..133] g_blend_crossover, g_blend_scale, g_nn_max_step
  *   [134..137] g_pressure_offset (float)
  *   [138..141] g_altitude_offset (float)
- *   [142]      g_tz_auto (0 = manual offset, 1 = auto from GPS)
+ *   [142]      legacy tz_auto flag (superseded by [234]; see above)
  *   [143]      g_svin_enabled (0 = survey-in off, 1 = on)  (v0.47+)
  *   [144..207] Algorithm 10 (LTIC) params, same signature, NaN/0xFF-guarded
  *              (v0.52+): ns_per_volt, zero_offset, range_ns, DPLL PID, LOCK
  *              PID, ACQ/DPLL thresholds, lock interval, state, submode +
  *              reserve. See the EE_LTIC_* defines below.
+ *   [221..233] warmup/learn/splash/ring/sawtooth flags
+ *   [234..284] timezone: mode, manual offset (minutes), POSIX rule string
+ *              (v0.95+). Reading 0xFF at [234] means a pre-v0.95 EEPROM and
+ *              triggers migration from [9]/[142] — no factory reset needed.
  */
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
+#include "gpsdo_tz.h"
 #include "ubx_timtp.h"
 #include "GPSDO_algorithms.h"
 #include <Arduino.h>
@@ -79,7 +86,7 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_PWM_HI       6u   /* [6]     MSB of pwm_output */
 #define EE_PWM_LO       7u   /* [7]     LSB of pwm_output */
 #define EE_ALGO         8u   /* [8]     active_algo (0..9) */
-#define EE_TIME_OFFSET  9u   /* [9]     g_time_offset as uint8_t */
+#define EE_TIME_OFFSET  9u   /* [9]     legacy whole-hour offset  */
 
 /* PID parameters for algos 3-9 (v0.47+):
  *   7 algos × 4 floats (Kp,Ki,Kd,I_LIMIT) × 4 bytes = 112 bytes [10..121]
@@ -131,6 +138,20 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_SPLASH_EN     231u /* uint8  splash animation on */
 #define EE_FLASH_RING_EN 232u /* uint8  flash ring enable   */
 #define EE_SAW_EN        233u /* uint8  sawtooth qErr correction */
+
+/* ---- Timezone block [234..283] (v0.95+) ------------------------------
+ * The old [9] byte held whole hours, which cannot express +5:30 or +9:45,
+ * and [142] was a bool that only knew "manual or EU-auto". Both are
+ * superseded here; [9] and [142] are still WRITTEN for the benefit of an
+ * older firmware reading this EEPROM, but they are no longer authoritative.
+ *
+ * The POSIX rule is stored as text rather than as a parsed TzSpec: it is
+ * what the user typed, it is what TZ echoes back, and it survives a change
+ * to the internal struct. 48 B covers the longest real rule (Chatham, 44). */
+#define EE_TZ_MODE      234u /* uint8  0=manual 1=auto-EU 2=posix   */
+#define EE_TZ_MAN_MIN   235u /* int16  manual offset, minutes       */
+#define EE_TZ_STR       237u /* char[48] POSIX rule, NUL-terminated */
+/* next free: 285 */
 /* [221..223] reserved for future LTIC params */
 /* Total used: 221 bytes, reserved to 224 (well within 1024-byte page) */
 
@@ -152,12 +173,9 @@ static float ee_read_float(uint16_t addr)
     return u.f;
 }
 
-/*
- * g_time_offset is defined in gpsdo_cli.cpp.
- * Declaring extern here allows eeprom_save / eeprom_recall to access it
- * without moving its definition.
- */
-extern int8_t g_time_offset;
+/* Defined in gpsdo_control.cpp / gpsdo_tz.cpp; extern here so eeprom_save
+ * and eeprom_recall can reach them without moving the definitions. */
+extern int16_t g_time_offset_min;
 extern float  g_pressure_offset;
 extern float  g_altitude_offset;
 
@@ -176,7 +194,7 @@ void eeprom_save(void)
         algo = gCtrl.active_algo;
         xSemaphoreGive(xCtrlMutex);
     }
-    int8_t toffs = g_time_offset;   /* atomic read (single byte) */
+    int16_t toffs_min = g_time_offset_min;   /* snapshot for the log line */
 
     /* Write signature */
     for (int i = 0; i < 6; i++)
@@ -190,7 +208,8 @@ void eeprom_save(void)
     eeprom_buffered_write_byte(EE_PWM_HI,      (uint8_t)(pwm >> 8));
     eeprom_buffered_write_byte(EE_PWM_LO,      (uint8_t)(pwm & 0xFFu));
     eeprom_buffered_write_byte(EE_ALGO,        algo);
-    eeprom_buffered_write_byte(EE_TIME_OFFSET, (uint8_t)toffs);   /* cast preserves bit pattern */
+    /* EE_TIME_OFFSET is written further down, with the rest of the timezone
+     * block — it is legacy-compatibility now, not the live value. */
 
     /* Write PID parameters for algos 3-9 */
     for (int n = 3; n <= 9; n++) {
@@ -205,7 +224,20 @@ void eeprom_save(void)
     ee_write_float(EE_NN_MAX_STEP, (float)g_nn_max_step);
     ee_write_float(EE_PRESS_OFF,   g_pressure_offset);
     ee_write_float(EE_ALT_OFF,     g_altitude_offset);
-    eeprom_buffered_write_byte(EE_TZ_AUTO, g_tz_auto ? 1u : 0u);
+    /* Timezone. The legacy [9] and [142] bytes are still written so that an
+     * older firmware flashed onto this board reads something sane rather
+     * than garbage — it gets the offset rounded to hours, which is what it
+     * could represent anyway. The authoritative values are in the [234..]
+     * block. */
+    eeprom_buffered_write_byte(EE_TIME_OFFSET,
+                               (uint8_t)(int8_t)(g_time_offset_min / 60));
+    eeprom_buffered_write_byte(EE_TZ_AUTO,
+                               (g_tz_mode == TZ_MODE_AUTO_EU) ? 1u : 0u);
+    eeprom_buffered_write_byte(EE_TZ_MODE, g_tz_mode);
+    eeprom_buffered_write_byte(EE_TZ_MAN_MIN,     (uint8_t)(g_tz_manual_min >> 8));
+    eeprom_buffered_write_byte(EE_TZ_MAN_MIN + 1, (uint8_t)(g_tz_manual_min & 0xFF));
+    for (uint8_t i = 0; i < TZ_STR_MAX; i++)
+        eeprom_buffered_write_byte((uint16_t)(EE_TZ_STR + i), (uint8_t)g_tz_str[i]);
     eeprom_buffered_write_byte(EE_SVIN_EN, g_svin_enabled ? 1u : 0u);
 
     /* Algorithm 10 (LTIC) SETTINGS (always saved: these are user-tuned, not
@@ -260,7 +292,7 @@ void eeprom_save(void)
 
     OUT_SERIAL.print("EEPROM save: PWM=");   OUT_SERIAL.print(pwm);
     OUT_SERIAL.print(" algo=");              OUT_SERIAL.print(algo);
-    OUT_SERIAL.print(" toffs=");             OUT_SERIAL.print((int)toffs);
+    OUT_SERIAL.print(" toffs_min=");         OUT_SERIAL.print((int)toffs_min);
     OUT_SERIAL.println(" + PID params");
 }
 
@@ -328,11 +360,6 @@ void eeprom_recall(void)
         float ao = ee_read_float(EE_ALT_OFF);
         if (isfinite(po) && po >= -500.0f && po <= 5000.0f) g_pressure_offset = po;
         if (isfinite(ao) && ao >= -500.0f && ao <= 10000.0f) g_altitude_offset = ao;
-    }
-    {
-        /* tz_auto: only 0/1 are valid; 0xFF (fresh flash) → manual */
-        uint8_t tz = eeprom_buffered_read_byte(EE_TZ_AUTO);
-        g_tz_auto = (tz == 1u);
     }
     {
         /* svin_enabled: 0xFF (fresh flash) → default ON, so timing modules
@@ -405,14 +432,53 @@ void eeprom_recall(void)
         if (sched) xSemaphoreGive(xCtrlMutex);
     }
 
-    /* g_time_offset is a single byte — safe to write directly */
-    g_time_offset = toffs;
+    /* ---- Timezone ------------------------------------------------------
+     * Migration, not a signature bump. An EEPROM written by v0.94 or older
+     * has never been touched above [233], so the block reads back as erased
+     * flash (0xFF). That is the marker: rather than force everyone through a
+     * factory reset for one new field, take the old [9]/[142] pair at face
+     * value and carry it forward. Hours × 60 is exactly what the old
+     * firmware meant.
+     *
+     * A saved TZ string is validated by re-parsing it. If tz_parse rejects
+     * it — corrupt bytes, or a rule format a future firmware wrote and this
+     * one doesn't know — the mode falls back rather than leaving g_tz_spec
+     * half-initialised. */
+    uint8_t tzmode = eeprom_buffered_read_byte(EE_TZ_MODE);
+    if (tzmode == 0xFFu) {
+        /* Pre-v0.95 EEPROM: derive from the legacy bytes. */
+        uint8_t legacy_auto = eeprom_buffered_read_byte(EE_TZ_AUTO);
+        g_tz_mode       = (legacy_auto == 1u) ? TZ_MODE_AUTO_EU : TZ_MODE_MANUAL;
+        g_tz_manual_min = (int16_t)((int)toffs * 60);
+        g_tz_str[0]     = '\0';
+    } else {
+        g_tz_mode = (tzmode <= TZ_MODE_POSIX) ? tzmode : TZ_MODE_AUTO_EU;
+        int16_t mm = (int16_t)(((uint16_t)eeprom_buffered_read_byte(EE_TZ_MAN_MIN) << 8)
+                             |  (uint16_t)eeprom_buffered_read_byte(EE_TZ_MAN_MIN + 1));
+        g_tz_manual_min = (mm >= -720 && mm <= 840) ? mm : 0;
+
+        for (uint8_t i = 0; i < TZ_STR_MAX; i++)
+            g_tz_str[i] = (char)eeprom_buffered_read_byte((uint16_t)(EE_TZ_STR + i));
+        g_tz_str[TZ_STR_MAX - 1] = '\0';
+        if ((uint8_t)g_tz_str[0] == 0xFFu) g_tz_str[0] = '\0';   /* erased */
+
+        if (g_tz_mode == TZ_MODE_POSIX) {
+            if (!g_tz_str[0] || tz_parse(g_tz_str, &g_tz_spec) == 0) {
+                g_tz_mode   = TZ_MODE_AUTO_EU;
+                g_tz_str[0] = '\0';
+            }
+        }
+    }
+    /* Seed the resolved offset so the clock is right before the first fix
+     * arrives; AUTO_EU and POSIX will refine it from there. */
+    g_time_offset_min = g_tz_manual_min;
 
     g_eeprom_valid = true;
 
     OUT_SERIAL.print("EEPROM recall: PWM=");  OUT_SERIAL.print(pwm);
     OUT_SERIAL.print(" algo=");               OUT_SERIAL.print(algo);
-    OUT_SERIAL.print(" toffs=");              OUT_SERIAL.print((int)toffs);
+    OUT_SERIAL.print(" tz_mode=");            OUT_SERIAL.print((int)g_tz_mode);
+    if (g_tz_str[0]) { OUT_SERIAL.print(" tz="); OUT_SERIAL.print(g_tz_str); }
     OUT_SERIAL.println(" + PID params");
 }
 

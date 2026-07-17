@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -186,7 +186,6 @@ extern float  g_aht_temp, g_aht_humi;
 extern float  g_ina_volt, g_ina_curr;
 extern bool   g_eeprom_valid;
 extern bool   g_report_paused;        /* true = serial/BT reports paused */
-extern bool   g_tz_auto;              /* true = timezone derived from GPS */
 extern bool   g_svin_enabled;         /* true = run survey-in on timing rx */
 
 /* Calibration progress — shown on displays during C / CT.

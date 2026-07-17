@@ -1,7 +1,7 @@
 /**
  * GPSDO_FreeRTOS.ino — Main entry point — hardware init and FreeRTOS scheduler start
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -71,7 +71,7 @@ extern void eeprom_recall(void);
 #include "live_store.h"
 
 /* declared in gpsdo_cli.cpp — single byte, safe to read without mutex */
-extern int8_t g_time_offset;
+extern int16_t g_time_offset_min;
 
 /* ---- pinModeAF helper ------------------------------------------------- */
 static void pinModeAF(int ulPin, uint32_t Alternate)
@@ -175,7 +175,7 @@ void setup()
     gCtrl.active_algo = 0;
     gCtrl.holdover_mode = false;
     strcpy(gCtrl.trendstr, " ___");
-    g_time_offset = 0;
+    g_time_offset_min = 0;
 
     /* ---- EEPROM boot recall -------------------------------------------
      *
@@ -183,7 +183,7 @@ void setup()
      *   - It calls xTaskGetSchedulerState() to detect pre-scheduler context
      *   - Skips mutex acquire when scheduler is not running
      *   - Applies analogWrite(PIN_VCTL_PWM, pwm) immediately
-     *   - Restores gCtrl.pwm_output, gCtrl.active_algo, g_time_offset
+     *   - Restores gCtrl.pwm_output, gCtrl.active_algo, timezone
      *
      * If EEPROM is blank or erased, eeprom_recall() prints a message and
      * returns without changing gCtrl — defaults set above stay in effect.
@@ -192,7 +192,7 @@ void setup()
     g_eeprom_valid = eeprom_check_on_boot();
     if (g_eeprom_valid) {
         OUT_SERIAL.println("EEPROM: valid signature found — recalling parameters");
-        eeprom_recall();   /* sets pwm_output, active_algo, g_time_offset */
+        eeprom_recall();   /* sets pwm_output, active_algo, timezone */
     } else {
         OUT_SERIAL.println("EEPROM: blank or erased — using compile-time defaults");
         analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
@@ -214,7 +214,7 @@ void setup()
 
     OUT_SERIAL.print("Initial PWM=");    OUT_SERIAL.print(gCtrl.pwm_output);
     OUT_SERIAL.print(" algo=");          OUT_SERIAL.print(gCtrl.active_algo);
-    OUT_SERIAL.print(" time_offset=");   OUT_SERIAL.println((int)g_time_offset);
+    OUT_SERIAL.print(" time_offset_min="); OUT_SERIAL.println((int)g_time_offset_min);
 
     /* ---- GPS init ---- */
     gpsdo_gps_init();

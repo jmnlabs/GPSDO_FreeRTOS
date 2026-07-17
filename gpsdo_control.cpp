@@ -1,7 +1,7 @@
 /**
  * gpsdo_control.cpp — vControlTask — OCXO control loop
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -17,6 +17,7 @@
  *   6. Automatic holdover on GPS fix loss / recovery
  */
 
+#include "gpsdo_tz.h"
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
 #include "live_store.h"
@@ -27,10 +28,15 @@
 /* Shared with CLI task */
 float g_pressure_offset = 1230.0f;
 float g_altitude_offset = 1.0f;
-int8_t g_time_offset    = 2;
+/* Resolved UTC→local offset in MINUTES. Minutes, not hours: India is
+ * +5:30, Nepal +5:45, Chatham +12:45 — an hours-only offset misses those
+ * silently. Written only by the tz_resolve() call in vControlTask; every
+ * display path reads it. */
+int16_t g_time_offset_min = 120;
 bool   g_show_local_time = true;
 bool   g_report_paused  = false;
-bool   g_tz_auto        = false;   /* true = derive g_time_offset from GPS */
+/* g_tz_mode (gpsdo_tz.cpp) replaced the old g_tz_auto bool — three modes
+ * now, not two. */
 bool   g_svin_enabled   = true;    /* true = run survey-in on timing module */
 
 volatile bool     g_calib_active    = false;
@@ -98,9 +104,12 @@ static bool tz_eu_dst(uint8_t day, uint8_t month, uint16_t year, uint8_t hour_ut
         return (day < last_sun) || (day == last_sun && hour_utc < 1);
 }
 
-static int8_t tz_auto_offset(float lat, float lon,
-                             uint8_t day, uint8_t month, uint16_t year,
-                             uint8_t hour_utc)
+/* Not static: gpsdo_tz.cpp dispatches here for TZ_MODE_AUTO_EU. Kept in
+ * this file because it is the original implementation and its rule set is
+ * documented above; the TZ module owns the newer POSIX path. */
+int8_t tz_auto_offset_eu(float lat, float lon,
+                         uint8_t day, uint8_t month, uint16_t year,
+                         uint8_t hour_utc)
 {
     /* European box: civil-zone rules + EU DST */
     if (lat >= 35.0f && lat <= 72.0f && lon >= -11.0f && lon <= 42.0f) {
@@ -272,6 +281,11 @@ static void do_calibrate_tune(void)
     OUT_SERIAL.println("CT: calibrate + auto-tune started (3 points)");
     g_calib_active = true;
     g_calib_kind   = CALIB_CT;
+    /* CT was the one procedure that never seeded this, so the status bar sat
+     * at "Tune 0s" for the whole run while C and LC counted down properly.
+     * Three PWM points, each settling for OCXO_CALIB_SECS, plus a few seconds
+     * for the averaging and the arithmetic at the end. */
+    g_calib_remaining = 3u * OCXO_CALIB_SECS + 5u;
 
     double f[3]; const uint16_t pwm[3] = { PWM_A, PWM_B, PWM_C };
     for (int i = 0; i < 3; i++) {
@@ -1060,22 +1074,26 @@ void vControlTask(void *pvParameters)
             }
             prev_pos_valid = cur_fix;
 
-            /* ---- Auto timezone (TO A): recompute offset from position.
-             * Cheap (runs at 5 Hz, pure arithmetic); writes the int8
-             * g_time_offset that all display code already consumes.     */
-            if (g_tz_auto && cur_fix) {
+            /* ---- Timezone: recompute the UTC→local offset.
+             * Cheap (5 Hz, pure arithmetic) and re-run every pass so a DST
+             * transition takes effect on its own, without a reboot. All
+             * three modes land here; only AUTO_EU actually looks at the
+             * position, but resolving centrally means g_time_offset_min has
+             * exactly one writer. Manual mode needs no fix — the user gave
+             * us the number. */
+            if (cur_fix || g_tz_mode == TZ_MODE_MANUAL) {
                 float lat = 0, lon = 0;
-                uint8_t  gd = 0, gmo = 0, gh = 0; uint16_t gy = 0;
-                bool tvalid = false;
+                uint8_t  gd = 0, gmo = 0, gh = 0, gmi = 0; uint16_t gy = 0;
+                bool tvalid = (g_tz_mode == TZ_MODE_MANUAL);
                 if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                     lat = gGps.lat;  lon = gGps.lon;
                     gd  = gGps.day;  gmo = gGps.month;
-                    gy  = gGps.year; gh  = gGps.hours;
-                    tvalid = gGps.valid;
+                    gy  = gGps.year; gh  = gGps.hours; gmi = gGps.mins;
+                    tvalid = tvalid || gGps.valid;
                     xSemaphoreGive(xGpsMutex);
                 }
                 if (tvalid)
-                    g_time_offset = tz_auto_offset(lat, lon, gd, gmo, gy, gh);
+                    g_time_offset_min = tz_resolve(lat, lon, gd, gmo, gy, gh, gmi);
             }
         }
 

@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -16,6 +16,7 @@
  * EEPROM (ES/ER/EE), time offset (TO), and diagnostics (SW/H).
  */
 
+#include "gpsdo_tz.h"
 #include "gpsdo_config.h"
 #include "gpsdo_state.h"
 #include "GPSDO_algorithms.h"
@@ -75,6 +76,45 @@ static void cli_putint(int v)
         xSemaphoreGive(xSerialMutex);
     }
 }
+/* Print a UTC offset as +h:mm / -h:mm. Always signed and always with the
+ * minutes, so "+9:30" and "+9:00" line up and nobody has to wonder whether
+ * a bare "+9" meant 9:00 or a truncated 9:30. */
+static void cli_put_offset(int16_t mins)
+{
+    char buf[10];
+    int a = mins < 0 ? -mins : mins;
+    snprintf(buf, sizeof(buf), "%c%d:%02d", mins < 0 ? '-' : '+', a / 60, a % 60);
+    cli_puts(buf);
+}
+
+/* Parse "9", "-5", "9:30", "-3:30", "+5:45" into signed minutes.
+ * Rejects anything outside -12:00..+14:00 (the real range of civil zones —
+ * Baker Island to Kiritimati) and any minutes field over 59. */
+static bool cli_parse_offset(const char *s, int16_t *out)
+{
+    if (!s || !*s) return false;
+    int sign = 1;
+    if      (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') { s++; }
+    if (*s < '0' || *s > '9') return false;
+
+    int h = 0;
+    while (*s >= '0' && *s <= '9') h = h * 10 + (*s++ - '0');
+    int m = 0;
+    if (*s == ':') {
+        s++;
+        if (*s < '0' || *s > '9') return false;
+        while (*s >= '0' && *s <= '9') m = m * 10 + (*s++ - '0');
+    }
+    if (*s != '\0') return false;          /* trailing junk */
+    if (m > 59) return false;
+
+    int total = sign * (h * 60 + m);
+    if (total < -720 || total > 840) return false;
+    *out = (int16_t)total;
+    return true;
+}
+
 static void cli_putfloat(float v, int dec)
 {
     static char tmp[24];
@@ -89,10 +129,9 @@ static void cli_putfloat(float v, int dec)
 /* Shared with control.cpp / gpsdo_tasks.cpp */
 extern float   g_pressure_offset;
 extern float   g_altitude_offset;
-extern int8_t  g_time_offset;
+extern int16_t g_time_offset_min;
 extern bool    g_show_local_time;
 extern bool    g_report_paused;
-extern bool    g_tz_auto;
 extern bool    g_svin_enabled;
 
 /* EEPROM helpers declared in gpsdo_state.cpp */
@@ -108,7 +147,7 @@ static void print_help(void)
     cli_putln(PROGRAM_NAME " " PROGRAM_VERSION " by jmnlabs (see V)");
     cli_putln("Commands (case-insensitive, end with Enter):");
     cli_putln("  V           Version, authors and links");
-    cli_putln("  H / ?       this help");
+    cli_putln("  H / ?       this help  (H TZ for timezone details)");
     cli_putln("  F           Flush frequency ring buffers");
     cli_putln("  C           start auto-Calibration (PWM centring)");
     cli_putln("  CT          Calibrate + auto-Tune PID for all algos");
@@ -153,11 +192,50 @@ static void print_help(void)
     cli_putln("  CR YES      Cold Restart (erase EEPROM, factory)");
     cli_putln("  PO <f>      Pressure Offset");
     cli_putln("  AO <f>      Altitude Offset");
-    cli_putln("  TO <n|A>    UTC-to-local offset (-23..23) or Auto from GPS");
+    cli_putln("  TO <n|A>    Fixed UTC offset (h or h:mm) or Auto (EU only)");
+    cli_putln("  TZ <zone>   Timezone with DST, e.g. TZ Adelaide  (H TZ)");
 #ifdef GPSDO_GPS_TIMING
     cli_putln("  SV <0|1>    Survey-in / Time Mode on timing rx (saved by ES)");
 #endif
     cli_putln("  SW          Stack Watermarks (diagnostic)");
+}
+
+/* TZ takes two quite different arguments and the difference matters, so it
+ * gets its own page rather than a cramped line in the main list. */
+static void print_help_tz(void)
+{
+    cli_putln("TZ — local timezone, with DST");
+    cli_putln("");
+    cli_putln("  TZ <city>        e.g. TZ Adelaide");
+    cli_putln("                   City names are unique worldwide, so the");
+    cli_putln("                   region is optional: TZ Australia/Adelaide");
+    cli_putln("                   works too. Case doesn't matter.");
+    cli_putln("  TZ <posix-rule>  e.g. TZ ACST-9:30ACDT,M10.1.0,M4.1.0/3");
+    cli_putln("                   The raw form, for a zone this firmware");
+    cli_putln("                   doesn't know or whose rule has changed.");
+    cli_putln("  TZ               show the current rule and offset");
+    cli_putln("");
+    cli_putln("The rule format is std<off>[dst[<off>],start,end], where a");
+    cli_putln("transition is Mmonth.week.day — week 5 means last. Note the");
+    cli_putln("POSIX sign is inverted: -9:30 means UTC+9:30.");
+    cli_putln("");
+    cli_putln("  ACST-9:30ACDT,M10.1.0,M4.1.0/3");
+    cli_putln("       |     |    |        |");
+    cli_putln("       |     |    |        +-- ends 1st Sun of Apr, 03:00");
+    cli_putln("       |     |    +----------- starts 1st Sun of Oct");
+    cli_putln("       |     +---------------- summer zone name");
+    cli_putln("       +---------------------- UTC+9:30 standard");
+    cli_putln("");
+    cli_putln("Southern-hemisphere zones need nothing special: a start month");
+    cli_putln("after the end month simply means DST wraps through New Year.");
+    cli_putln("");
+    cli_putln("Related:");
+    cli_putln("  TO <n[:mm]>      fixed offset, no DST (TO 9:30, TO -5)");
+    cli_putln("  TO A             guess the zone from GPS position and apply");
+    cli_putln("                   the EU DST rule. Europe only — elsewhere it");
+    cli_putln("                   gives whole hours and no DST.");
+    cli_putln("  LT 0|1           show UTC or local time");
+    cli_putln("  ES               save the setting to EEPROM");
 }
 
 /* -----------------------------------------------------------------------
@@ -197,9 +275,10 @@ static void dispatch(char *line)
         return;
     }
 
-    /* ---- help ---- */
+    /* ---- help; "H TZ" for the one command that needs more than a line ---- */
     if (cli_ieq(verb, "H") || cli_ieq(verb, "?")) {
-        print_help();
+        if (arg && cli_ieq(arg, "TZ")) print_help_tz();
+        else                           print_help();
         return;
     }
 
@@ -726,27 +805,73 @@ static void dispatch(char *line)
         return;
     }
 
-    /* ---- TO [n | A] — time offset: manual hours or Auto from GPS ---- */
+    /* ---- TO [n[:mm] | A] — fixed offset, or the legacy EU auto mode ---- */
     if (cli_ieq(verb, "TO")) {
         if (arg == NULL) {
-            cli_puts("Time offset: "); cli_putint((int)g_time_offset);
-            cli_puts(g_tz_auto ? "  (auto: GPS position + EU DST)"
-                               : "  (manual)");
-        } else if (arg[0] == 'A' || arg[0] == 'a') {
-            g_tz_auto = true;
-            cli_putln("Time offset: AUTO — zone from GPS position, EU DST rule");
-            cli_putln("(applied on next fix; ES saves the mode to EEPROM)");
-        } else {
-            int v = atoi(arg);
-            if (v >= -23 && v <= 23) {
-                g_tz_auto     = false;
-                g_time_offset = (int8_t)v;
-                cli_puts("Time offset: "); cli_putint(v);
-                cli_puts("  (manual)");
-            } else {
-                cli_putln("TO: value must be -23..23, or A for auto");
+            cli_puts("Time offset: ");
+            cli_put_offset(g_time_offset_min);
+            switch (g_tz_mode) {
+            case TZ_MODE_AUTO_EU: cli_putln("  (auto: GPS position + EU DST)"); break;
+            case TZ_MODE_POSIX:   cli_puts("  (zone: "); cli_puts(g_tz_str);
+                                  cli_putln(")"); break;
+            default:              cli_putln("  (manual)"); break;
             }
+            return;
         }
+        if (arg[0] == 'A' || arg[0] == 'a') {
+            g_tz_mode = TZ_MODE_AUTO_EU;
+            cli_putln("Time offset: AUTO — zone from GPS position, EU DST rule");
+            cli_putln("Reliable in Europe only: no DST elsewhere, whole hours");
+            cli_putln("only. For anywhere else use TZ (see H TZ).");
+            return;
+        }
+        /* Accept "9:30" and "-3:30" as well as plain hours — half-hour zones
+         * are the whole reason this command grew minutes. */
+        int16_t mins;
+        if (!cli_parse_offset(arg, &mins)) {
+            cli_putln("TO: use -14..+14, or h:mm (e.g. 9:30, -3:30), or A");
+            return;
+        }
+        g_tz_mode        = TZ_MODE_MANUAL;
+        g_tz_manual_min  = mins;
+        g_time_offset_min = mins;        /* apply now, don't wait for a fix */
+        cli_puts("Time offset: ");
+        cli_put_offset(mins);
+        cli_putln("  (manual, no DST)");
+        return;
+    }
+
+    /* ---- TZ [zone | posix-rule] — full timezone with DST ---- */
+    if (cli_ieq(verb, "TZ")) {
+        if (arg == NULL) {
+            if (g_tz_mode == TZ_MODE_POSIX) {
+                cli_puts("TZ: "); cli_putln(g_tz_str);
+                cli_puts("    current offset ");
+                cli_put_offset(g_time_offset_min);
+                cli_putln("");
+            } else {
+                cli_putln(g_tz_mode == TZ_MODE_AUTO_EU
+                          ? "TZ: not set (TO A active — EU auto)"
+                          : "TZ: not set (TO manual offset active)");
+            }
+            cli_putln("Set with a zone name (TZ Adelaide) or a POSIX rule.");
+            cli_putln("H TZ explains both.");
+            return;
+        }
+        int r = tz_set_posix(arg);
+        if (r == 0) {
+            cli_puts("TZ: unknown zone or bad rule: "); cli_putln(arg);
+            cli_putln("Try a city name (TZ Adelaide) — see H TZ.");
+            return;
+        }
+        cli_puts("TZ: "); cli_putln(g_tz_str);
+        if (r < 0) {
+            /* Morocco is the only zone in current tzdata that lands here:
+             * its DST follows Ramadan, which no fixed rule can express. */
+            cli_putln("Note: this zone's DST rule can't be expressed in the");
+            cli_putln("POSIX form — using its standard offset year-round.");
+        }
+        cli_putln("(takes effect on the next fix; ES saves it)");
         return;
     }
 

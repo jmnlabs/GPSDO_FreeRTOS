@@ -1,541 +1,717 @@
-# Changelog — GPSDO FreeRTOS
+# Registro de cambios — GPSDO FreeRTOS
 
-**English** | [Polski](CHANGELOG_PL.md) | [Español](CHANGELOG_ES.md)
+[English](CHANGELOG_EN.md) | [Polski](CHANGELOG_PL.md) | **Español**
 
-📖 Back to [README](README.md)
+📖 [Inicio del proyecto](../README.md) · Volver al [README](README_ES.md)
 
-All notable changes to this project are documented here.
+Todos los cambios notables de este proyecto se documentan aquí.
 
-Project by **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>
-Based on **GPSDO v0.06c** by André Balsa
-(<https://github.com/AndrewBCN/STM32-GPSDO>), FreeRTOS port and algorithms
-3–9 by the author, with Claude AI as programming assistant and PCB design
-by Scrachi (EEVBlog forum).
+Proyecto de **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>
+Basado en **GPSDO v0.06c** de André Balsa
+(<https://github.com/AndrewBCN/STM32-GPSDO>), port a FreeRTOS y algoritmos
+3–10 del autor, con Claude AI como asistente de programación y diseño de PCB
+por Scrachi (foro EEVBlog).
 
-The version suffix `-rtos` marks the FreeRTOS port lineage.
+El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
+
+> **Nota sobre la traducción.** Esta es la versión en español del registro de
+> cambios. Las entradas más recientes se mantienen al día; para el máximo
+> detalle histórico consúltense también las versiones en inglés
+> (`CHANGELOG.md`) y polaco (`CHANGELOG_PL.md`).
 
 ---
 
+## [v0.95-rtos] — 2026-07-16
+
+### Añadido
+- **Zonas horarias con horario de verano, en todo el mundo.** `TZ Adelaide`
+  basta para que el reloj sea correcto, incluido su desfase de media hora y su
+  DST del hemisferio sur. Los nombres de ciudad se aceptan solos: son únicos en
+  toda la base IANA, así que la región es opcional (`TZ Australia/Adelaide`
+  también funciona) y no importan las mayúsculas.
+
+  La regla también puede escribirse completa:
+  `TZ ACST-9:30ACDT,M10.1.0,M4.1.0/3`. Esa forma importa cuando un gobierno
+  cambia las reglas y el firmware aún no lo sabe: el usuario lo corrige desde
+  la CLI en lugar de esperar una versión.
+
+  407 zonas y 88 reglas integradas, generadas desde la tzdata del sistema por
+  `tools/gen_tz_table.py`. La base IANA completa ocupa ~2 MB, cuatro veces toda
+  la flash de este MCU, y su valor real está en actualizarse varias veces al
+  año, algo que un GPSDO sin internet no puede aprovechar. La cadena POSIX TZ a
+  la que se reduce cada zona ocupa 4–44 bytes y recoge el mismo comportamiento
+  actual. Coste: ~7 KB de flash.
+- **`H TZ`** — primera página de ayuda por comando.
+- **`TO` acepta minutos**: `TO 9:30`, `TO -3:30`, `TO 5:45`.
+- **Vcc en pantalla (480×320).** Pedido por Dan Wiering. El raíl de 5 V ya se
+  medía pero no tenía hueco; la celda `Alt` cede su mitad derecha y los campos se
+  reagrupan: `qErr` sube junto a `Alt` (es lo que el receptor informa de su
+  propio 1PPS) y `Vcc` ocupa el sitio que deja junto a `Vdd`, de modo que las
+  alimentaciones quedan juntas. `Vdd` recupera su segundo decimal. Solo en 480:
+  en 320 `Alt` y `qErr` piden ~168 px y la celda tiene 148.
+- **`Vdd` solo se veía en compilaciones con LTIC.** Vive en la fila de fase, y la
+  fila entera estaba tras `#ifdef GPSDO_LTIC`. Ahora los raíles quedan fuera de
+  esa guarda: `Vcc` y `Vdd` se muestran siempre; solo el campo de fase sigue
+  condicionado.
+
+### Corregido
+- **Reportado por Dan Wiering: la zona automática no detectaba el DST en
+  Australia Meridional.** Dos errores distintos, solo uno visible. `TO A`
+  deduce la zona de la longitud y aplica la regla europea, así que fuera de
+  Europa no daba DST alguno. Pero además devolvía horas enteras, y Adelaide es
+  UTC+9:30, así que el reloj erraba media hora incluso en invierno. India
+  (+5:30), Nepal (+5:45), Terranova (−3:30) y Chatham (+12:45) sufrían el mismo
+  error silencioso. `TZ <zona>` resuelve ambos; `TO A` sigue disponible sin
+  cambios.
+- **La lectura de frecuencia saltaba lateralmente en el panel 320×240.** v0.94
+  quitó el ancho de campo de `dtostrf`; una cadena que pierde un carácter se
+  recentra igualmente. El ancho de campo ha vuelto, como estaba desde v0.89. El
+  panel 480×320 no se toca.
+- **Los raíles laterales desaparecían junto a la frecuencia.** El sprite borra
+  toda su banda y solo dibujaba la línea separadora superior. Ahora también
+  lleva los raíles. Ambos paneles.
+- **`CT` mostraba «Tune 0s» durante toda su ejecución.** No inicializaba la
+  cuenta atrás, a diferencia de `C` y `LC`. Son 185 s.
+- **`qErr` se desplazaba en el panel 480×320.** Anclar toda la cadena a la
+  derecha fijó la unidad pero arrastró la etiqueta `qErr:` con los dígitos.
+  Etiqueta y valor son ahora dos campos: la etiqueta pegada al borde izquierdo
+  del hueco, el valor anclado a la derecha en 364.
+
+### Cambiado
+- **`dph` mostraba un número seguro mucho después de que el detector dejara de
+  medir.** `ns_per_volt` es una pendiente local alrededor del ancla en 0.632·Vsat;
+  pasada Vsat el pulso de parada ha fallado la ventana y el condensador carga
+  hasta la alimentación. `dph` muestra ahora `ovf` fuera del 15–85% de Vsat.
+  Vsat se recupera de `zero_offset`, que es 0.632·Vsat por construcción.
+- **`dph` en pantalla nunca restaba el diente de sierra.** La pantalla calculaba
+  la fase por su propia vía y se saltaba la corrección que el lazo aplica en
+  `ltic_phase_error_ns()`: ~14 ns de dispersión 1σ medidos en el equipo. Ahora
+  también la resta. Importa sobre todo fuera del algo 10, que es donde `dph` es
+  la única vista de la fase real. El campo `qErr` deja de estar condicionado al
+  algo 10.
+- **Cada columna tiene una línea de alineación derecha (480×320).** La izquierda
+  termina donde «hPa» en la fila BMP, la derecha donde «ns» en la fila de fase.
+  `Vct`, `% rH` y la corriente del INA se anclan ahora a esas líneas. Las líneas
+  se miden con `textWidth()` en el primer uso en vez de fijarse como constantes.
+- **Las filas de sensores se agrupan por columna (480×320).** BMP y AHT ocupan
+  la columna izquierda y los campos eléctricos la derecha: la fase arriba y los
+  raíles justo debajo. `AHT` y `Vph`/`dph` intercambian su sitio.
+- **`dPh:` pasa a `dph:`**, para coincidir con `Vph:`. Cambiado a la vez en el
+  TFT y en el informe serie, que debían coincidir.
+- **El aviso de survey-in pasa de la cabecera a la barra de estado.** Parpadeaba
+  entre el nombre y el reloj, y en el panel de 480 no aparecía en absoluto. Ahora
+  se añade a lo que la barra ya dice: `DISCIPLINED  FIX OK SURVEY` (`SV` en 320).
+  La barra repinta todo su fondo antes de dibujar, así que la palabra no puede
+  quedar recortada por el relleno de un campo vecino, y ahí no necesita parpadear
+  para verse. La condición no cambia: aparece tras el timeout del survey-in si el
+  receptor sigue midiendo, y desaparece al llegar el Time Mode.
+- `g_time_offset` (int8, horas) pasa a `g_time_offset_min` (int16, minutos).
+  `g_tz_auto` (bool) pasa a `g_tz_mode` (manual / auto-EU / POSIX).
+
+### EEPROM
+- Bloque de zona horaria en `[234..284]`.
+- **Los ajustes existentes se migran automáticamente, sin reset de fábrica.**
+- **Volver a una versión anterior es unidireccional**: v0.94 leerá un desfase
+  sensato en horas enteras, pero una regla `TZ` no cabe allí y se perderá.
+
+### Documentación
+- Movida a [`doc/`](../doc/); los archivos en inglés llevan sufijo `_EN` para que
+  los tres idiomas se nombren igual. El `README.md` raíz es ahora un índice breve
+  que GitHub muestra en la página del proyecto.
+- Las guías de puesta en marcha del flash-ring eran huérfanas; ahora llevan la
+  misma navegación de idiomas que el resto.
+- Su cifra de presupuesto de flash llevaba cinco versiones sin actualizar
+  (~170 KB en v0.90). Ahora indica 216976 B (212 KB) en v0.95, ~44 KB de
+  margen — medido, no estimado. La guía advierte además de que el porcentaje
+  del IDE cuenta sobre los 512 KB completos: «41%» es en realidad el 83%.
+
+### Notas
+- `tz_table.h` se genera. Vuelve a ejecutar `tools/gen_tz_table.py` cuando se
+  actualice tzdata.
+- Africa/Casablanca y Africa/El_Aaiun degradan a su desfase estándar con aviso:
+  su DST sigue el ramadán, que el formato POSIX no puede expresar.
+
+---
 ## [v0.94-rtos] — 2026-07-15
 
-### Fixed
-- **The 320×240 frequency field was still drawn with the GFX fonts.** v0.93
-  moved the small panel back to the classic fonts, but the fix only reached the
-  direct-draw path — and that path never runs, because the sprites are created
-  on *both* panels, not just the 480×320 one. The sprite branch still had
-  `GF_FREQ`/`GF_STATUS` hard-coded, so the reading (and `no signal`) kept
-  rendering in FreeMono. It now goes through the same `TFT_FONT_*` macros as
-  everything else.
-- **The frequency twitched sideways on the 480×320 panel.** The reading was
-  centred, so any change in string length moved every character: the averaging
-  window changes the decimals, and 10000000.0000 → 9999999.9999 drops a
-  character outright, with centring splitting that difference across both ends.
-  The reading is now anchored by its right edge at x=464, chosen so the nominal
-  `10000000.0000 Hz` (16 chars x 28 px fixed-width = 448 px) still lands dead
-  centre, leaving 16 px of air on each side. "Hz" no longer moves; only the
-  digits do. Busy messages stay centred — they use the proportional status
-  font, where there are no columns to align.
 
-### Changed
-- **The frame is white on both panels.** Besides matching the big panel, this
-  is what lets the 1-bit data sprite carry the frame itself: that sprite has
-  exactly two colours (white and background), so the navy frame could not be
-  drawn *into* it and had to be repainted on the panel after every push. White
-  means frame and text now go out together in one atomic transfer, on both
-  sizes. The header separator moved into the frequency sprite for the same
-  reason (its 4-bit palette already holds white).
-- **The splash no longer uses the GFX fonts.** It was the last GFX holdout on
-  the small panel, which meant anyone upgrading from v0.92 had to add
-  `LOAD_GFXFF` to `User_Setup.h` or watch the subtitle collapse to a lone "p" —
-  an obscure failure for a cosmetic gain. The subtitle now uses classic font 4
-  (which carries the full alphabet — fonts 6/8 are the letterless ones) and the
-  credits use font 1 on both panels. **A 320×240 build now needs only
-  `LOAD_GLCD`, `LOAD_FONT2` and `LOAD_FONT4`**; `LOAD_GFXFF` is required for
-  the 480×320 build alone. The orphaned `GF_TITLE`/`GF_SUB`/`GF_CREDIT` macros
-  and the dead 320 branch of the `GF_*` block are gone with it.
-- Status bar labels sit 2 px lower on the 320×240 panel. They are all-caps, so
-  the descender space at the bottom of the glyph box is empty and geometric
-  centring reads high; the nudge centres what the eye actually sees. The
-  480×320 panel is unchanged.
-- Version bump to v0.94-rtos, including the per-file headers (which still read
-  v0.92).
+### Corregido
+- **El campo de frecuencia en 320×240 seguía dibujándose con las fuentes GFX.**
+  La v0.93 devolvió el panel pequeño a las fuentes clásicas, pero la corrección
+  solo llegó a la ruta de dibujo directo — y esa ruta nunca se ejecuta, porque
+  los sprites se crean en *ambos* paneles, no solo en el de 480×320. La rama de
+  sprite seguía con `GF_FREQ`/`GF_STATUS` codificados, así que la lectura (y
+  `no signal`) se seguía renderizando en FreeMono. Ahora pasa por las mismas
+  macros `TFT_FONT_*` que todo lo demás.
+- **La frecuencia temblaba lateralmente en el panel 480×320.** La lectura
+  estaba centrada, así que cualquier cambio de longitud movía todos los
+  caracteres: la ventana de promediado cambia los decimales, y
+  10000000.0000 → 9999999.9999 pierde un carácter entero, repartiendo el
+  centrado esa diferencia entre ambos extremos. La lectura se ancla ahora por
+  su borde derecho en x=464, elegido para que la nominal `10000000.0000 Hz`
+  (16 caracteres × 28 px de ancho fijo = 448 px) siga cayendo justo en el
+  centro, dejando 16 px de aire a cada lado. «Hz» ya no se mueve; solo los
+  dígitos. Los mensajes de estado siguen centrados — usan la fuente
+  proporcional, donde no hay columnas que alinear.
+
+### Cambiado
+- **El marco es blanco en ambos paneles.** Además de igualar al panel grande,
+  esto es lo que permite que el sprite de datos de 1 bit lleve el marco él
+  mismo: ese sprite tiene exactamente dos colores (blanco y fondo), así que el
+  marco azul marino no podía dibujarse *dentro* de él y había que repintarlo en
+  el panel tras cada envío. El blanco significa que marco y texto salen ahora
+  juntos en una transferencia atómica, en ambos tamaños. El separador de la
+  cabecera se movió al sprite de frecuencia por la misma razón (su paleta de
+  4 bits ya contiene blanco).
+- **El splash ya no usa las fuentes GFX.** Era el último reducto de GFX en el
+  panel pequeño, lo que obligaba a quien actualizara desde la v0.92 a añadir
+  `LOAD_GFXFF` a `User_Setup.h` o ver el subtítulo reducirse a una sola «p» —
+  un fallo críptico a cambio de una mejora cosmética. El subtítulo usa ahora la
+  fuente clásica 4 (que lleva el alfabeto completo — las fuentes 6/8 son las
+  que no tienen letras) y los créditos la fuente 1 en ambos paneles. **Una
+  compilación 320×240 solo necesita ahora `LOAD_GLCD`, `LOAD_FONT2` y
+  `LOAD_FONT4`**; `LOAD_GFXFF` se requiere únicamente para la de 480×320. Las
+  macros huérfanas `GF_TITLE`/`GF_SUB`/`GF_CREDIT` y la rama muerta de 320 del
+  bloque `GF_*` desaparecen con ello.
+- Las etiquetas de la barra de estado bajan 2 px en el panel 320×240. Van en
+  mayúsculas, así que el espacio para descendentes al pie de la caja del glifo
+  está vacío y el centrado geométrico se lee alto; el desplazamiento centra lo
+  que el ojo realmente ve. El panel 480×320 no cambia.
+- Subida de versión a v0.94-rtos, incluidas las cabeceras de cada archivo (que
+  aún indicaban v0.92).
 
 ## [v0.93-rtos] — 2026-07-14
 
-### Fixed
-- **Countdowns ran slower than the clock.** The OCXO warmup and the
-  calibrations timed their seconds with `vTaskDelay(1000)`, which sleeps *for*
-  a second rather than *until* the next one — so the ADC reads, the serial
-  prints and any preemption were all added on top, and the displayed figure
-  drifted behind real time (worse the busier the system). Both now use
-  `vTaskDelayUntil`, which absorbs the work time and keeps each step a true
-  second. The calibration countdown also stopped at 1 instead of reaching 0.
-- **A survey-in that outlives its monitor window is no longer invisible.** When
-  the safety timeout fires, the firmware stops polling but the receiver keeps
-  surveying ("continuing anyway" in the log) — and with the frequency band back
-  to showing the frequency, nothing on screen said so. A slow-pulsing `SURVEY`
-  now sits in the header between the version and the clock, and clears itself
-  when the receiver reports Time Mode (`HDOP: TIME`), which is the survey's real
-  completion signal.
-- **`qErr` left stale characters on the ILI9488 panel** (shown as
-  `qErr: -1.6 nsss`). The field's text padding was 55 authored units (~82 px)
-  while the widest value, `qErr: -21.3ns`, needs ~104 px in FreeSans 9pt —
-  TFT_eSPI only repaints the background under the padding, so the tail of the
-  previous, longer string survived. Padding widened to 75 authored units
-  (~112 px), which covers the text and still clears the right-anchored `Vdd`
-  field.
-- **Vctl / Vcc / Vdd read 0.000 V for the whole OCXO warmup.** Those ADC
-  averages are sampled in the control task's main loop, but `do_warmup()` runs
-  *before* that loop is entered and only slept — so nothing ever filled them.
-  The warmup countdown now samples the same three channels every second, the
-  way `wait_secs_pwm()` already does during calibration.
-- **Frequency readout sat right of centre and jumped sideways.** The value was
-  formatted with `dtostrf(..., 14, ...)`, left-padding it to 14 characters;
-  `MC_DATUM` then centred the string *including* those invisible spaces, so the
-  visible digits sat ~40 px right of centre — and because the pad count varies
-  with the averaging window (1–4 spaces), the readout shifted whenever
-  precision changed. The width is dropped: `GF_FREQ` is FreeMonoBold, which
-  already holds the digits in fixed columns, so the padding bought nothing. The
-  480-panel trailing-space workaround is gone with it.
+### Corregido
+- **Las cuentas atrás iban más lentas que el reloj.** El calentamiento del OCXO
+  y las calibraciones medían sus segundos con `vTaskDelay(1000)`, que duerme
+  *durante* un segundo en vez de *hasta* el siguiente — así que las lecturas del
+  ADC, las impresiones por serie y cualquier apropiación se sumaban encima, y la
+  cifra mostrada se retrasaba respecto al tiempo real (tanto más cuanto más
+  cargado el sistema). Ambas usan ahora `vTaskDelayUntil`, que absorbe el tiempo
+  de trabajo y mantiene cada paso como un segundo real. La cuenta atrás de
+  calibración además se paraba en 1 en lugar de llegar a 0.
+- **Un survey-in que sobrevive a su ventana de monitorización ya no es
+  invisible.** Cuando salta el tiempo de seguridad, el firmware deja de
+  consultar pero el receptor sigue haciendo el survey («continuing anyway» en el
+  registro) — y con la banda de frecuencia de vuelta mostrando la frecuencia,
+  nada en pantalla lo decía. Un `SURVEY` de pulso lento se sitúa ahora en la
+  cabecera entre la versión y el reloj, y se apaga solo cuando el receptor
+  informa de Time Mode (`HDOP: TIME`), que es la señal real de finalización del
+  survey.
+- **`qErr` dejaba caracteres residuales en el panel ILI9488** (visto como
+  `qErr: -1.6 nsss`). El relleno de texto del campo era de 55 unidades de autor
+  (~82 px), mientras que el valor más ancho, `qErr: -21.3ns`, necesita ~104 px
+  en FreeSans 9pt — TFT_eSPI solo repinta el fondo bajo el relleno, así que la
+  cola de la cadena anterior, más larga, sobrevivía. Relleno ampliado a 75
+  unidades (~112 px), que cubre el texto y sigue despejando el campo `Vdd`
+  anclado a la derecha.
+- **Vctl / Vcc / Vdd marcaban 0,000 V durante todo el calentamiento del OCXO.**
+  Esas medias del ADC se muestrean en el bucle principal de la tarea de control,
+  pero `do_warmup()` se ejecuta *antes* de entrar en ese bucle y solo dormía —
+  así que nada las llenaba. La cuenta atrás del calentamiento ahora muestrea los
+  mismos tres canales cada segundo, igual que ya hace `wait_secs_pwm()` durante
+  la calibración.
+- **La lectura de frecuencia quedaba a la derecha del centro y saltaba de
+  lado.** El valor se formateaba con `dtostrf(..., 14, ...)`, rellenándolo por
+  la izquierda hasta 14 caracteres; `MC_DATUM` centraba luego la cadena
+  *incluyendo* esos espacios invisibles, así que los dígitos visibles quedaban
+  ~40 px a la derecha del centro — y como el número de espacios varía con la
+  ventana de promediado (1–4), la lectura se desplazaba al cambiar la precisión.
+  Se elimina el ancho de campo: `GF_FREQ` es FreeMonoBold, que ya mantiene los
+  dígitos en columnas fijas, así que el relleno no aportaba nada. Con él
+  desaparece el apaño del espacio final en el panel de 480.
 
-### Changed
-- **The 320×240 panels go back to the classic fonts for the operating screen.**
-  v0.92 moved every panel to the GFX free fonts; on 480×320 that was a clear
-  win, but at 320×240 the proportional faces are too wide for a layout authored
-  around the numeric ones — values ran past their columns into the neighbour and
-  the centre divider cut through the overflow. There was no smaller face to fall
-  back on either (FreeSans starts at 9 pt; below it is only the unreadable
-  3×5 TomThumb). The small panel now uses font 2 for the header and grid, font 4
-  for the status bar, and font 1 ×3 (fixed-width) for the frequency, while the
-  splash keeps GFX on both panels. The `TFT_FONT_*` macros pick this at compile
-  time — still one layout, not two. The centre column divider is now 480-only
-  (no room for it at 320), and the frame reverts to navy on the small panel.
-- **The live display regions are double-buffered as sprites.** The header, the
-  frequency band and the data area are each rendered into a `TFT_eSprite` in RAM
-  and pushed to the panel in one continuous SPI transfer, instead of erasing the
-  panel with `setTextPadding` and then drawing on top of it. That erase-then-draw
-  was visible as a once-a-second flicker, especially on the 480×320 panel where
-  it wipes 2.4x the pixels. Palettes keep it cheap (4-bit header/freq, 1-bit
-  data; ~25 KB total on the big panel). If `createSprite()` fails on a
-  fragmented heap, each band falls back to direct drawing — the old flicker
-  returns but nothing breaks; the boot log reports which path is live.
-- **Status messages now spell themselves out, and name which calibration is
-  running.** `WARMUP 285s` → `OCXO warmup 285s`, `SVIN 120s 5m` →
-  `Survey 120s +/-5m`, and the ambiguous `CAL 245s` becomes `Calibrate`, `Tune`
-  or `LTIC cal` — C, CT and LC take very different times, so a bare countdown
-  told the operator little. Both panels. Note the two figures differ in kind:
-  warmup and the calibrations count down, while survey-in counts up (the
-  receiver reports elapsed time, and completion also depends on accuracy, so a
-  "remaining" figure would be a guess).
-- **`SPI_FREQUENCY 40000000` is now the documented setting** (was 27 MHz in the
-  README while `gpsdo_config.h` already said 40). The F411's SPI1 tops out at
-  50 MHz, so 40 leaves headroom; it matters most on the 480×320 panel, where a
-  sprite push is a single transfer whose duration scales with the clock. Drop
-  to 27 MHz if long jumper leads misbehave.
-- **Splash credit lines get more leading on the 480×320 panel.** The authored
-  12-unit gap scales to only ~16 px there, and the credits are FreeSans 9pt
-  (~13 px tall), so the two lines merged visually. The large panel now uses a
-  16-unit gap (~21 px, ~1.6x leading); the 320×240 panel keeps 12, which suits
-  its 6x8 font1.
-- `dPh:` and `qErr:` on the ILI9488 drop the space before their `ns` unit.
-- Version bump to v0.93-rtos.
+### Cambiado
+- **Los paneles 320×240 vuelven a las fuentes clásicas en la pantalla de
+  trabajo.** v0.92 pasó todos los paneles a las fuentes libres GFX; en 480×320
+  fue una mejora clara, pero a 320×240 los tipos proporcionales son demasiado
+  anchos para una maquetación pensada para las numéricas — los valores se salían
+  de sus columnas hacia la vecina y el divisor central cortaba lo que
+  desbordaba. Tampoco había un tipo menor al que recurrir (FreeSans empieza en
+  9 pt; por debajo solo está el ilegible TomThumb de 3×5). El panel pequeño usa
+  ahora la fuente 2 para la cabecera y la rejilla, la 4 para la barra de estado
+  y la 1 ×3 (ancho fijo) para la frecuencia, mientras que el splash mantiene GFX
+  en ambos paneles. Las macros `TFT_FONT_*` eligen esto en tiempo de compilación
+  — sigue habiendo una maquetación, no dos. El divisor central de columnas es
+  ahora solo de 480 (a 320 no hay sitio), y el marco vuelve al azul marino en el
+  panel pequeño.
+- **Las regiones vivas de la pantalla usan doble búfer con sprites.** La
+  cabecera, la banda de frecuencia y el área de datos se renderizan cada una en
+  un `TFT_eSprite` en RAM y se envían al panel en una sola transferencia SPI
+  continua, en vez de borrar el panel con `setTextPadding` y dibujar encima. Ese
+  borrar-y-luego-dibujar se veía como un parpadeo una vez por segundo, sobre
+  todo en el panel 480×320, donde limpia 2,4× los píxeles. Las paletas lo
+  abaratan (4 bits cabecera/frecuencia, 1 bit datos; ~25 KB en total en el panel
+  grande). Si `createSprite()` falla con un montón fragmentado, cada banda
+  recurre al dibujo directo — vuelve el parpadeo pero nada se rompe; el registro
+  de arranque indica qué ruta está activa.
+- **Los mensajes de estado ahora se escriben completos y nombran qué
+  calibración corre.** `WARMUP 285s` → `OCXO warmup 285s`, `SVIN 120s 5m` →
+  `Survey 120s +/-5m`, y el ambiguo `CAL 245s` pasa a ser `Calibrate`, `Tune` o
+  `LTIC cal` — C, CT y LC tardan tiempos muy distintos, así que una cuenta atrás
+  a secas decía poco al operador. Ambos paneles. Ojo: las dos cifras son de
+  distinta naturaleza: el calentamiento y las calibraciones cuentan hacia abajo,
+  mientras que el survey-in cuenta hacia arriba (el receptor informa del tiempo
+  transcurrido, y la finalización depende también de la precisión, así que una
+  cifra de «restante» sería una conjetura).
+- **`SPI_FREQUENCY 40000000` es ahora el ajuste documentado** (el README decía
+  27 MHz mientras `gpsdo_config.h` ya indicaba 40). El SPI1 del F411 llega hasta
+  50 MHz, así que 40 deja margen; importa sobre todo en el panel 480×320, donde
+  un envío de sprite es una única transferencia cuya duración escala con el
+  reloj. Baja a 27 MHz si los cables largos dan problemas.
+- **Las líneas de créditos del splash ganan interlineado en el panel 480×320.**
+  El hueco de 12 unidades de autor escala allí a solo ~16 px, y los créditos son
+  FreeSans 9pt (~13 px de alto), así que ambas líneas se fundían visualmente. El
+  panel grande usa ahora un hueco de 16 unidades (~21 px, interlineado ~1,6×);
+  el panel 320×240 mantiene 12, que encaja con su fuente 6×8.
+- `dPh:` y `qErr:` en el ILI9488 pierden el espacio antes de su unidad `ns`.
+- Incremento de versión a v0.93-rtos.
 
 ## [v0.92-rtos] — 2026-07-12
 
 
-### Changed
-- **Splash simplified and operating-screen proportions refined.** The large
-  green "GPSDO" title was removed from the boot splash; the "GPS Disciplined
-  OCXO" subtitle now sits raised at the top, matching the original 320×240
-  layout. On the operating screen the header text dropped to the data-font size,
-  the bottom status bar was halved in height with a smaller status font, and the
-  reclaimed space went into wider line spacing between the telemetry rows (row
-  pitch 17→20 authored) so the grid breathes. Data font stays at FreeSans 9pt.
-- **All TFT text migrated to Adafruit GFX free fonts (GFXFF).** The header, big
-  frequency readout, data grid, status bar and splash title/subtitle now render
-  in FreeSans / FreeMono instead of the classic numeric GLCD fonts. This fixes a
-  long-standing bug where lettered strings drawn in the numeric fonts (6/8,
-  which contain only `0-9 . : - a p m`) collapsed to a single glyph — most
-  visibly the splash subtitle "GPS Disciplined OCXO" rendering as a lone "p", and
-  the status-bar label appearing blank on a coloured bar. A per-role, per-panel
-  font layer (`GF_DATA` / `GF_HEAD` / `GF_STATUS` / `GF_TITLE` / `GF_SUB` /
-  `GF_FREQ` in `gpsdo_config.h`) picks FreeSans 9/12 pt, FreeSansBold 12/18/24 pt
-  and FreeMonoBold 18/24 pt automatically for the 320×240 and 480×320 panels, so
-  the same layout code serves both. The big frequency uses FreeMonoBold so its
-  digits stay fixed-width and don't shuffle as the value changes.
-- **Requires `#define LOAD_GFXFF` in `User_Setup.h`** (see README). The old
-  `LOAD_FONT2/4/6/8` lines are no longer needed; `LOAD_GLCD` is retained only
-  for the two fine-print splash credit lines.
-- **Operating-screen layout re-geometried for 480×320.** Band boundaries (freq,
-  grid, sensors, status) recomputed so the taller free-font rows never cross a
-  separator on either panel, the two data columns fill the full width with a
-  faint centre divider, and the status bar fills the whole band to the screen
-  bottom (no dead colour strip below the label). Grid values are right-datum
-  anchored so changing widths stay pinned instead of drifting. Verified on the
-  ILI9486 480×320 panel.
+### Cambiado
+- **Splash simplificado y proporciones de la pantalla de operación afinadas.**
+  Se eliminó el gran título verde «GPSDO» de la pantalla de inicio; el subtítulo
+  «GPS Disciplined OCXO» ahora aparece elevado en la parte superior, como en el
+  diseño original 320×240. En la pantalla de operación, el texto de la cabecera
+  se redujo al tamaño de la fuente de datos, la barra de estado inferior se
+  redujo a la mitad de su altura con una fuente de estado más pequeña, y el
+  espacio recuperado pasó a un mayor interlineado entre las filas de telemetría
+  (paso de fila 17→20 autoral) para que la rejilla respire. La fuente de datos
+  se mantiene en FreeSans 9pt.
+- **Todo el texto del TFT migrado a las fuentes libres Adafruit GFX (GFXFF).**
+  La cabecera, el gran indicador de frecuencia, la rejilla de datos, la barra de
+  estado y el título/subtítulo de la pantalla de inicio se dibujan ahora con
+  FreeSans / FreeMono en lugar de las clásicas fuentes GLCD numéricas. Esto
+  corrige un error de larga data en el que las cadenas con letras dibujadas con
+  las fuentes numéricas (6/8, que solo contienen `0-9 . : - a p m`) se reducían a
+  un único glifo — de forma más visible el subtítulo «GPS Disciplined OCXO» que
+  aparecía como una sola «p», y la etiqueta de la barra de estado que quedaba en
+  blanco sobre una barra de color. Una capa de fuentes por rol y por panel
+  (`GF_DATA` / `GF_HEAD` / `GF_STATUS` / `GF_TITLE` / `GF_SUB` / `GF_FREQ` en
+  `gpsdo_config.h`) selecciona automáticamente FreeSans 9/12 pt, FreeSansBold
+  12/18/24 pt y FreeMonoBold 18/24 pt para los paneles 320×240 y 480×320, de modo
+  que el mismo código de diseño sirve para ambos. La frecuencia grande usa
+  FreeMonoBold para que sus dígitos mantengan ancho fijo y no se desplacen al
+  cambiar el valor.
+- **Requiere `#define LOAD_GFXFF` en `User_Setup.h`** (ver README). Las antiguas
+  líneas `LOAD_FONT2/4/6/8` ya no son necesarias; `LOAD_GLCD` se conserva solo
+  para las dos líneas de créditos en letra pequeña de la pantalla de inicio.
+- **Diseño de la pantalla de operación recalculado geométricamente para
+  480×320.** Los límites de las bandas (frecuencia, rejilla, sensores, estado)
+  se recalcularon para que las filas más altas de las fuentes proporcionales
+  nunca crucen un separador en ninguno de los paneles, ambas columnas de datos
+  llenan todo el ancho con un tenue divisor central, y la barra de estado llena
+  toda la banda hasta el borde inferior de la pantalla (sin franja de color
+  muerta bajo la etiqueta). Los valores de la rejilla se anclan con datum
+  derecho, de modo que los anchos cambiantes quedan fijos en lugar de desplazarse.
+  Verificado en el panel ILI9486 480×320.
 
-### Fixed
-- **Stale "not yet implemented / phase A" wording removed from CLI and
-  telemetry.** `LA` with a bad value said "0..9 (10=LTIC, not yet available)",
-  `LL` printed "(loop not yet implemented — phase A)", and the help/comments
-  still described algo 10 as an unimplemented preview. Algorithm 10 has
-  disciplined the loop for many releases; all these now describe the live
-  3-stage ACQ→DPLL→LOCK phase loop. (`Vdd:` on the TFT also gained a space
-  before its value to match the other labels.)
-- **LED spinner animations (warmup / survey-in / calibration) ran ~5x too slow
-  and looked choppy.** The display task wakes on the 1 Hz PPS notification, but
-  the spinners step their frame every 200 ms — so at the 1100 ms wake cadence
-  they advanced only once a second. The task now wakes ~every 150 ms while an
-  animation is active (and keeps the slow 1100 ms cadence otherwise, since the
-  clock only changes once a second). To stop the faster wake from re-pushing
-  identical segments over the software-bit-banged TM1637 (~5–8 ms per write), a
-  small write cache (`tm_set`) skips the transfer when the pattern is unchanged.
-  This is a scheduling/caching fix — no DMA involved; DMA remains a separate
-  future step for the TFT SPI path.
-- **A raised damping floor did not take effect after reflash — lock oscillated
-  LOCK↔DPLL.** The damping multiplier is persisted in the flash ring (live
-  data) and restored on boot. Flash written by a build with the old 0.30 floor
-  therefore reloaded damp = 0.30 even after the floor was raised to 0.45, and
-  since damp only adapts on limit-cycle crossings it stayed stuck there — the
-  loop ran at 30 % correction authority, the phase climbed past the lock
-  threshold, and the loop hunted LOCK↔DPLL every ~30 s (seen on air). The
-  restored damp is now clamped into the current legal band on load (both flash
-  ring and EEPROM), so a reflash takes effect immediately. The damp bounds
-  moved to the shared header so storage and the learner agree.
-- **TFT now shows qErr, and phase gets a `dPh:` label.** On algo 10 with SAW
-  active, the right sensor row leads with the receiver sawtooth `qErr:…ns` and
-  `Vdd:` shortened to 1 decimal. The two are drawn separately — qErr
-  left-aligned, Vdd anchored to the right screen edge — so Vdd no longer drifts
-  sideways as qErr changes width. With SAW off, Vdd alone is shown at full
-  precision, still right-anchored. The LTIC phase on the left is labelled
-  `dPh:±…ns` (no space after `Vph:`) for a clearer, consistent readout; the
-  serial report uses the same `dPh:` label after `Vphase:` so the two match.
-  Both
-  qErr and dPh use a fixed-width signed field (sign always shown, magnitude
-  right-justified), so the digits and units stay put instead of jumping
-  sideways when the value crosses zero or changes digit count.
-### Fixed
-- **LOCK could lose lock on a drifting OCXO — now carries a gentle frequency
-  term.** In the normal LOCK branch the frequency path was disabled
-  (freq_term = 0), so the only defence against a real OCXO drift was the slow
-  drift feed-forward. On warm hardware that lagged badly and the phase walked
-  out of the lock window (11 → −425 ns in 51 s, then LOCK→DPLL→ACQ). LOCK now
-  applies a light 0.1×Kp frequency term — enough to cancel the live drift each
-  update, gentle enough not to inject TIM2 noise into a quiet lock. Combines
-  with the faster drift feed-forward (below). Root-cause analysis: GML-5.2.
-- **ACQ limit cycle (±150 LSB PWM hunting) removed.** Algorithm 10 took its
-  frequency error from avg10 (0.1 Hz quantisation); times Kp (~1550 LSB/Hz)
-  that produced ±150 LSB PWM jumps on a ~10 s cycle, which kept the phase from
-  settling under the lock threshold and slowed acquisition. It now uses avg100
-  (0.01 Hz), 10× finer, and acquisition settles cleanly. Analysis: GML-5.2.
-- **Drift feed-forward now bootstraps after lock.** Its first learning window
-  was a slow 30 s, so a fast post-lock drift escaped before it moved. It now
-  runs three fast 8 s windows at a larger step right after lock (absorbing the
-  drift in ~10–20 s) then relaxes to the quiet 30 s regime.
-- **Damping floor raised 0.30 → 0.45.** The learner could damp so hard the
-  loop had only 30 % correction authority and couldn't follow drift; 0.45 still
-  damps a limit cycle but keeps enough authority to track.
+### Corregido
+- **Eliminado el texto obsoleto «aún no implementado / phase A» de la CLI y la
+  telemetría.** `LA` con un valor incorrecto decía "0..9 (10=LTIC, not yet
+  available)", `LL` imprimía "(loop not yet implemented — phase A)", y la
+  ayuda/comentarios aún describían el algo 10 como una vista previa sin
+  implementar. El algoritmo 10 disciplina el lazo desde hace muchas versiones;
+  ahora todo describe el lazo de fase de 3 etapas ACQ→DPLL→LOCK en
+  funcionamiento. (`Vdd:` en el TFT también ganó un espacio antes de su valor
+  para coincidir con las demás etiquetas.)
+- **Las animaciones del spinner LED (calentamiento / survey-in / calibración)
+  iban ~5× demasiado lento y a saltos.** La tarea de pantalla despierta con la
+  notificación PPS de 1 Hz, pero los spinners avanzan de fotograma cada 200 ms
+  — así que con el despertar cada 1100 ms solo avanzaban una vez por segundo. La
+  tarea ahora despierta ~cada 150 ms mientras hay una animación activa (y
+  mantiene el ritmo lento de 1100 ms si no, ya que el reloj solo cambia una vez
+  por segundo). Para que el despertar más rápido no reenvíe segmentos idénticos
+  por el TM1637 bit-bangeado por software (~5–8 ms por escritura), una pequeña
+  caché de escritura (`tm_set`) omite la transferencia cuando el patrón no
+  cambia. Es una corrección de planificación/caché — sin DMA; DMA sigue siendo
+  un paso futuro aparte para la ruta TFT SPI.
+- **Un suelo de amortiguación elevado no surtía efecto tras reflashear — el
+  enganche oscilaba LOCK↔DPLL.** El multiplicador de amortiguación se persiste
+  en el anillo Flash (datos vivos) y se restaura al arrancar. La Flash escrita
+  por un build con el suelo antiguo de 0,30 recargaba por tanto damp = 0,30
+  incluso tras subir el suelo a 0,45, y como damp solo se adapta en cruces del
+  ciclo límite, se quedaba ahí atascado — el lazo corría al 30 % de autoridad,
+  la fase subía por encima del umbral de enganche y el lazo cazaba LOCK↔DPLL
+  cada ~30 s (visto en hardware). El damp restaurado se acota ahora a la banda
+  legal actual al cargar (anillo Flash y EEPROM), así que un reflasheo surte
+  efecto de inmediato. Los límites de damp se movieron a la cabecera compartida
+  para que el almacenamiento y el aprendiz coincidan.
+- **El TFT ahora muestra qErr, y la fase recibe una etiqueta `dPh:`.** En algo
+  10 con SAW activo, el hueco derecho de la fila de sensores encabeza con el
+  diente de sierra del receptor `qErr:…ns` y sigue con `Vdd:` acortado a 1
+  decimal. Ambos se dibujan por separado — qErr a la izquierda, Vdd anclado al
+  borde derecho de la pantalla — así que Vdd ya no se desplaza lateralmente
+  cuando qErr cambia de ancho. Con SAW apagado se muestra solo Vdd a plena
+  precisión, aún anclado a la derecha. La fase LTIC de la izquierda se etiqueta
+  `dPh:±…ns` (sin espacio tras `Vph:`) para una lectura más clara y coherente;
+  el informe serie usa la misma etiqueta `dPh:` tras `Vphase:` para que
+  coincidan. qErr y dPh usan un campo de ancho fijo con signo (signo siempre visible,
+  magnitud justificada a la derecha), así que los dígitos y las unidades se
+  quedan quietos en vez de saltar de lado al cruzar cero o cambiar de número de
+  cifras.
+### Corregido
+- **LOCK podía perder el enganche con un OCXO a la deriva — ahora lleva un
+  término de frecuencia suave.** En la rama normal de LOCK la ruta de frecuencia
+  estaba desactivada (freq_term = 0), así que la única defensa contra una deriva
+  real del OCXO era el lento feed-forward de deriva. En hardware caliente se
+  retrasaba mucho y la fase se salía de la ventana de enganche (11 → −425 ns en
+  51 s, luego LOCK→DPLL→ACQ). LOCK aplica ahora un término ligero de 0,1×Kp —
+  suficiente para cancelar la deriva viva en cada actualización, lo bastante
+  suave para no inyectar ruido de TIM2 en un enganche silencioso. Se combina con
+  el feed-forward más rápido (abajo). Análisis de causa raíz: GML-5.2.
+- **Eliminado el ciclo límite en ACQ (oscilación de PWM de ±150 LSB).** El
+  algoritmo 10 tomaba su error de frecuencia de avg10 (cuantización de 0,1 Hz);
+  por Kp (~1550 LSB/Hz) producía saltos de PWM de ±150 LSB en un ciclo de ~10 s,
+  que impedían que la fase se asentara bajo el umbral de enganche y ralentizaban
+  la adquisición. Ahora usa avg100 (0,01 Hz), 10× más fino, y la adquisición se
+  asienta limpiamente. Análisis: GML-5.2.
+- **El feed-forward de deriva ahora hace bootstrap tras el enganche.** Su primera
+  ventana de aprendizaje era lenta (30 s), así que una deriva rápida tras el
+  enganche escapaba antes de que se moviera. Ahora corre tres ventanas rápidas de
+  8 s con un paso mayor justo tras el enganche (absorbiendo la deriva en
+  ~10–20 s) y luego se relaja al régimen silencioso de 30 s.
+- **Suelo de amortiguación subido 0,30 → 0,45.** El aprendiz podía amortiguar
+  tan fuerte que el lazo tenía solo el 30 % de autoridad de corrección y no podía
+  seguir la deriva; 0,45 aún amortigua un ciclo límite pero conserva autoridad
+  para seguir.
 
-### Changed
-- **LC calibration anchor is now universal — 0.632·Vsat, derived per board.**
-  The detector is an RC charge ramp V(φ) = Vsat·(1 − e^(−φ/τ)); the point
-  φ = τ, where V = 0.632·Vsat, is the same fractional height on every
-  exponential detector regardless of Vsat. LC now recovers Vsat with a 1-D fit
-  (linearise −ln(1 − V/Vsat) vs t, pick the lowest-residual Vsat) and anchors
-  there. The previous hard-coded 1.85 V only worked because Marek's and Dan
-  Wiering's detectors both happen to have Vsat ≈ 2.93 V; a detector with a
-  different Vsat would have missed the band. LC is now self-adapting per board
-  with no configuration, and `LTIC_ZERO_ANCHOR_V` is retired. Verified on
-  logged runs: Vsat recovered to ~0.3 %, anchors agree ~0.8 % run to run.
-  Physics and derivation: GML-5.2.
-- **Splash subtitle** now reads `GPS Disciplined OCXO` (space, not hyphen).
+### Cambiado
+- **El anclaje de calibración LC es ahora universal — 0,632·Vsat, derivado por
+  placa.** El detector es una rampa de carga RC V(φ) = Vsat·(1 − e^(−φ/τ)); el
+  punto φ = τ, donde V = 0,632·Vsat, es la misma altura fraccional en todo
+  detector exponencial sin importar Vsat. LC recupera ahora Vsat con un ajuste
+  1-D (linealizar −ln(1 − V/Vsat) frente a t, elegir el Vsat de menor residuo) y
+  ancla ahí. El 1,85 V fijo anterior solo funcionaba porque los detectores de
+  Marek y Dan Wiering tienen ambos Vsat ≈ 2,93 V; un detector con otro Vsat
+  habría perdido la banda. LC se autoadapta ahora por placa sin configuración, y
+  `LTIC_ZERO_ANCHOR_V` queda retirado. Verificado en ejecuciones registradas:
+  Vsat recuperado al ~0,3 %, los anclajes concuerdan al ~0,8 % entre ejecuciones.
+  Física y derivación: GML-5.2.
+- **El subtítulo del splash** ahora dice `GPS Disciplined OCXO` (espacio, no guión).
+- **Calibración LC — punto de trabajo anclado + ns/V por pendiente local (Opción D).**
+  El detector de fase de rampa es exponencial (1k/1n, τ≈1 µs), así que ns/V no es
+  constante a lo largo de la rampa, y un promedio de todo el tránsito (range/span)
+  variaba ~15–20 % entre ejecuciones — según dónde el arm del picDIV aparcara la
+  fase. ns/V se toma ahora de la pendiente LOCAL dV/dt en una ventana de ±0,20 V
+  alrededor de un punto de trabajo fijo (LTIC_ZERO_ANCHOR_V = 1,85 V). zero_offset
+  se ancla en ese punto — el centro repetible de la rampa, lejos de las zonas
+  muertas del detector medidas por Dan Wiering (la caída del Schottky + pull-down
+  por debajo de ~0,05 V, y el riel/wraparound del ADC cerca de 3,3 V). Si un
+  barrido nunca cruza la banda de anclaje, el código recurre al antiguo promedio
+  range/span y lo indica.
 
-### Credits
-- Loop-anomaly diagnosis and the universal-anchor derivation in this release
-  were contributed by **GML-5.2**, cross-checked here against the logged data
-  and hardware behaviour. Field logs and testing: **danieljw** (Rb reference)
-  and **lucido**.
+  Hallazgos de banco en varias ejecuciones LC con resolución de 1 s:
+  * El anclaje es exacto — ejecuciones consecutivas sitúan zero_offset en
+    1,8500 V cada vez.
+  * La dispersión de ns/V entre ejecuciones cayó de ~15–20 % (antiguo promedio
+    range/span) a unos pocos por ciento. Con ambas ejecuciones barridas a la
+    MISMA tasa es ~2,8 %; el residuo lo domina la cuantización de la tasa de
+    barrido, no el ajuste de pendiente — avg100 resuelve la tasa a 1 ns/s, así
+    que una etiqueta «−5» vs «−6» lleva ±0,5 ns/s y las bandas de confianza de
+    ambos ns/V se solapan. Esto no perjudica a LOCK: el lazo usa el ns/V exacto
+    que midió, a la tensión en la que realmente trabaja.
+  * La ventana de ajuste se amplió a ±0,20 V (LTIC_ANCHOR_WIN_V): más puntos en
+    la banda (~70 vs ~35) promedian el ruido del ADC, reduciendo la dispersión a
+    igual tasa de ~5,9 % con ±0,10 V a ~2,8 %.
+- **Registro de diagnóstico LC por segundo.** Durante el barrido de muestreo, LC
+  imprime ahora una línea `t=/V=/n=` por segundo, haciendo visible toda la rampa
+  en una captura (se usó para derivar la Opción D).
 
----
-
-## [v0.91-rtos] — 2026-07-11
-
-### Added
-- **LC calibration — anchored operating point + local-slope ns/V (Option D).**
-  The ramp phase detector is exponential (1k/1n, τ≈1 µs), so ns/V is not
-  constant along the ramp and a whole-transit average (range/span) drifted
-  ~15–20 % between runs depending on where the picDIV arm parked the phase.
-  ns/V is now taken from the LOCAL slope dV/dt in a window around a fixed
-  operating point (LTIC_ZERO_ANCHOR_V = 1.85 V). zero_offset is anchored to
-  that point — the repeatable middle of the ramp, clear of the detector dead
-  zones Dan Wiering measured (the Schottky drop + pull-down below ~0.05 V, and
-  the ADC rail/wraparound near 3.3 V). If a sweep never crosses the anchor band
-  the code falls back to the previous range/span average and says so.
-
-  Bench findings across several 1 s-resolved LC runs:
-  * The anchor is exact — back-to-back runs land zero_offset on 1.8500 V every
-    time.
-  * Run-to-run ns/V spread fell from ~15–20 % (old range/span average) to a few
-    percent. With both runs swept at the SAME rate it is ~2.8 %; the residual is
-    dominated by the sweep-rate quantisation, not the slope fit — avg100 resolves
-    the rate to 1 ns/s, so a "−5" vs "−6" label carries ±0.5 ns/s and the two
-    ns/V confidence bands overlap. This does not hurt LOCK: the loop uses the
-    exact ns/V it measured, at the voltage where it actually works.
-  * The fit window was widened to ±0.20 V (LTIC_ANCHOR_WIN_V): more points in
-    the band (~70 vs ~35) average down the ADC noise, taking the same-rate
-    spread from ~5.9 % at ±0.10 V to ~2.8 %.
-- **LC per-second diagnostic log.** During the sampling sweep LC now prints one
-  `t=/V=/n=` line per second, making the whole ramp visible in a capture (used
-  to derive Option D).
-
-### Fixed
-- **Serial report printed twice per second in RD/RH when GPS had a fix.**
-  vDisplayTask is notified by two ~1 Hz sources — the frequency relay (per PPS)
-  and the GPS parser (per time sentence) — so with a fix it woke twice a second
-  and emitted two report lines. The serial line is now gated on a change of the
-  PPS counter, so exactly one line prints per second; the on-screen display
-  still refreshes on every notification. Reported by Dan Wiering.
-- **Credit spelling.** "Wieringa" → "Wiering" in the acknowledgements.
-- **TFT `Vph` phase readout was dead code, and wrong if enabled.** It gated on
-  the compile-time `LTIC_NS_PER_VOLT` (default 0, so the ns figure never showed
-  once the detector was calibrated) and, had the constant been set, computed
-  `V × ns_per_volt` from 0 V instead of relative to `zero_offset`. It now uses
-  the MEASURED `g_ltic.ns_per_volt` and `zero_offset` from LC, showing a signed
-  phase `(V − zero_offset) × ns/V` that matches the loop's own error, or just
-  the volts when uncalibrated.
-- **CT rejected narrow-span (better) OCXOs.** The plant-gain sanity check
-  floored K at 0.1 mHz/LSB, but a narrow EFC span is desirable — smaller Hz/LSB
-  means finer resolution and is one route to E-12. Dan Wiering's build measures
-  0.048 mHz/LSB (~1.05 V EFC span) and was wrongly rejected. Floor lowered to
-  0.02 mHz/LSB; only genuine noise/no-GPS runs are now refused.
-- **ILI9488 (480×320) layout fixes — from user photos, not yet verified on a
-  panel.** Early adopters Dan Wiering and lucido sent photos of their 480×320
-  builds. Several issues were addressed from those images without an ILI9488 on
-  hand: (1) the body font was over-scaled — TFT_F mapped font 2→4 (growing
-  1.63× while rows scale only 1.33×), so lines overran vertically and the
-  status bar was pushed off-screen; the body font is now kept at 2. (2) The
-  BMP sensor row was trimmed (temperature and pressure to 1 decimal) so the
-  wider scaled glyphs don't overrun the AHT column. (3) The `User_Setup.h`
-  font instructions were missing `LOAD_FONT8`, which the frequency readout
-  needs — without it that line stays blank. These are best-effort fixes from
-  photographs; a final geometry pass will follow once an ILI9488 panel is in
-  hand. Small 320×240 panels are unaffected (TFT_F is identity there).
-- **LOCK could lose lock on a drifting OCXO (LOCK→DPLL→ACQ bounce).** With a
-  real frequency drift (measured ~8.5 ns/s on warm hardware), the phase walked
-  out of the lock window — 11 → −425 ns in 51 s — while the correction was too
-  weak to follow: the damping learner had floored at 0.30 (correction at 30 %
-  authority) and the drift feed-forward was still gathering its first 30 s
-  window, so it never moved before lock was lost. Two changes: the damping
-  floor was raised 0.30 → 0.45 (keeps enough authority to track drift while
-  still damping a limit cycle), and the feed-forward now BOOTSTRAPS after lock
-  — three fast 8 s windows at a larger step absorb the drift within ~10–20 s,
-  then it relaxes to the slow, quiet 30 s regime. Simulated on the logged
-  drift, phase now holds near −125 ns instead of running away. Stable, low-drift
-  setups (e.g. a Rb-referenced build) are unaffected — the bootstrap converges
-  immediately and the higher floor is still net damping.
-- **Phase in ns added to the serial report**, after `Vphase:`, once LC has
-  calibrated the detector — `(V − zero_offset) × ns/V`, the same convention as
-  the loop and the TFT row.
-- **LC anchor is now the measured ramp midpoint, not a fixed 1.85 V.** The
-  local-slope anchor was hard-coded to Marek's detector band; a build whose
-  ramp sweeps a different range (Dan's runs lower, ~1.3 V) missed the anchor
-  window entirely and fell back to the coarse range/span average ("weak"
-  result). The anchor is now `vlow + span/2` from the actual sweep, with the
-  config `LTIC_ZERO_ANCHOR_V` used only when it genuinely falls inside the
-  swept band. LC is now self-adapting per board.
-- **TFT pressure could overrun into the AHT column.** BMP pressure was printed
-  with 2 decimals (`1013.25hPa`), which at 4-digit pressures ran past the left
-  column. Reduced to 1 decimal (`1013.2hPa`), matching the serial report.
-- **Warm-boot LOCK bounce (wasted ~1 min of the ~8 min boot-to-lock).** A
-  persisted LOCK/DPLL was resumed as long as the phase read was valid (on the
-  ramp), even when it sat far from zero_offset — e.g. Vphase ≈2.09 V against a
-  1.85 V anchor (~260 ns off). LOCK then engaged, DPLL judged the phase too far
-  a minute later and dropped all the way to ACQ, so the full pull-in ran anyway
-  after a needless detour. The boot guard now demotes a persisted LOCK/DPLL to
-  ACQ unless the phase is valid AND within the ACQ window of zero_offset. Cold
-  boot is unaffected (state defaults to ACQ); a genuinely centred warm boot
-  still resumes LOCK immediately.
+### Corregido
+- **El informe serie se imprimía dos veces por segundo en RD/RH con fix del GPS.**
+  vDisplayTask recibe notificación de dos fuentes de ~1 Hz — el relé de frecuencia
+  (por PPS) y el parser del GPS (por sentencia de tiempo) — así que con fix se
+  despertaba dos veces por segundo y emitía dos líneas de informe. La línea serie
+  se controla ahora por un cambio del contador de PPS, de modo que se imprime
+  exactamente una por segundo; la pantalla sigue refrescándose en cada
+  notificación. Reportado por Dan Wiering.
+- **Ortografía del nombre en los agradecimientos** corregida a «Wiering» (a
+  petición del autor).
+- **La lectura de fase `Vph` del TFT era código muerto, y erróneo si se activaba.**
+  Dependía de la constante de compilación `LTIC_NS_PER_VOLT` (0 por defecto, así
+  que el valor en ns nunca aparecía una vez calibrado el detector) y, de haberse
+  fijado, calculaba `V × ns_per_volt` desde 0 V en vez de relativo a `zero_offset`.
+  Ahora usa los `g_ltic.ns_per_volt` y `zero_offset` MEDIDOS por LC, mostrando una
+  fase con signo `(V − zero_offset) × ns/V` que coincide con el error del lazo, o
+  solo los voltios cuando no está calibrado.
+- **CT rechazaba OCXOs de span estrecho (mejores).** El chequeo de ganancia
+  del planta limitaba K a 0,1 mHz/LSB, pero un span EFC estrecho es deseable —
+  menos Hz/LSB significa más resolución y es una vía hacia E-12. El equipo de
+  Dan Wiering mide 0,048 mHz/LSB (~1,05 V de span EFC) y se rechazaba
+  erróneamente. Límite inferior bajado a 0,02 mHz/LSB; ahora solo se rechazan
+  ejecuciones de ruido/sin-GPS.
+- **Correcciones del diseño ILI9488 (480×320) — a partir de fotos de usuarios,
+  aún no verificadas en un panel.** Los primeros usuarios Dan Wiering y lucido
+  enviaron fotos de sus montajes 480×320. Se abordaron varios problemas a
+  partir de esas imágenes sin un ILI9488 a mano: (1) la fuente del cuerpo se
+  sobre-escalaba — TFT_F mapeaba fuente 2→4 (creciendo 1.63× mientras las filas
+  escalan solo 1.33×), así que las líneas se solapaban verticalmente y la barra
+  de estado se salía de la pantalla; la fuente del cuerpo se mantiene ahora en
+  2. (2) La fila del sensor BMP se acortó (temperatura y presión a 1 decimal)
+  para que los glifos escalados más anchos no invadan la columna AHT. (3) A las
+  instrucciones de `User_Setup.h` les faltaba `LOAD_FONT8`, que necesita la
+  lectura de frecuencia — sin ella esa línea queda en blanco. Son correcciones
+  «al mejor criterio» a partir de fotografías; un pase final de geometría
+  seguirá cuando haya un panel ILI9488 a mano. Los paneles pequeños 320×240 no
+  se ven afectados (TFT_F es identidad ahí).
+- **LOCK podía perder el enganche con un OCXO a la deriva (rebote LOCK→DPLL→ACQ).**
+  Con una deriva de frecuencia real (~8,5 ns/s medidos en hardware caliente), la
+  fase se salía de la ventana de enganche — 11 → −425 ns en 51 s — mientras la
+  corrección era demasiado débil para seguirla: el aprendiz de amortiguación
+  había tocado suelo en 0,30 (corrección al 30 % de autoridad) y el
+  feed-forward de deriva aún recogía su primera ventana de 30 s, así que nunca
+  se movió antes de perder el enganche. Dos cambios: el suelo de amortiguación
+  se subió 0,30 → 0,45 (conserva autoridad para seguir la deriva sin dejar de
+  amortiguar un ciclo límite), y el feed-forward ahora hace BOOTSTRAP tras el
+  enganche — tres ventanas rápidas de 8 s con un paso mayor absorben la deriva
+  en ~10–20 s, luego se relaja al régimen lento y silencioso de 30 s. Simulado
+  sobre la deriva registrada, la fase ahora se mantiene cerca de −125 ns en vez
+  de escaparse. Los montajes estables de baja deriva (p. ej. con referencia Rb)
+  no se ven afectados — el bootstrap converge de inmediato y el suelo más alto
+  sigue siendo amortiguación neta.
+- **Fase en ns añadida al informe serie**, tras `Vphase:`, una vez que LC ha
+  calibrado el detector — `(V − zero_offset) × ns/V`, la misma convención que
+  el lazo y la fila del TFT.
+- **El anclaje de LC es ahora el punto medio medido de la rampa, no 1,85 V fijo.**
+  El anclaje de pendiente local estaba fijado a la banda del detector de Marek;
+  un equipo cuya rampa barre otro rango (el de Dan va más bajo, ~1,3 V) perdía
+  la ventana de anclaje por completo y recurría al promedio range/span (resultado
+  "débil"). El anclaje es ahora `vlow + span/2` del barrido real, usando la
+  constante `LTIC_ZERO_ANCHOR_V` solo cuando cae dentro de la banda barrida. LC
+  se autoadapta por placa.
+- **La presión en el TFT podía invadir la columna AHT.** La presión BMP se
+  imprimía con 2 decimales (`1013.25hPa`), que con presiones de 4 dígitos se salía
+  de la columna izquierda. Reducida a 1 decimal (`1013.2hPa`), igual que el
+  informe serie.
+- **Rebote de LOCK en arranque en caliente (desperdiciaba ~1 min de los ~8 min
+  de arranque a lock).** Un LOCK/DPLL persistido se reanudaba mientras la lectura
+  de fase fuera válida (en la rampa), aunque estuviera lejos de zero_offset —
+  p. ej. Vphase ≈2,09 V frente a un anclaje de 1,85 V (~260 ns de desvío). LOCK
+  se enganchaba, DPLL juzgaba la fase demasiado lejos un minuto después y caía
+  hasta ACQ, así que el pull-in completo corría igualmente tras un desvío inútil.
+  La protección de arranque ahora degrada un LOCK/DPLL persistido a ACQ salvo que
+  la fase sea válida Y esté dentro de la ventana ACQ de zero_offset. El arranque
+  en frío no se ve afectado (el estado por defecto es ACQ); un arranque en
+  caliente genuinamente centrado sigue reanudando LOCK de inmediato.
 
 ---
 
 ## [v0.90-rtos]
 
-### Added
-- **Wear-levelled flash ring buffer for "live" data.** Learned drift/damping,
-  LC calibration and last PWM are now auto-saved to a dedicated flash sector
-  (sector 6, 0x08040000, 128 KB) as a ring of 32-byte slots. Each save
-  programs the next empty slot; the sector is erased only when the ring wraps
-  (once per 4095 saves), so at 100 saves/day the flash lasts on the order of a
-  thousand years. Each slot carries a CRC and a sequence number; a half-written
-  slot (power loss) fails CRC and the previous good slot is used. A signature +
-  format-version header makes the firmware robust to full-chip-erase,
-  sector-only programming, first boot and leftover flash junk alike (a foreign
-  or blank sector is detected and re-initialised).
-- **Auto-save with hysteresis.** Live data is written only when it has settled
-  on a new level: drift changed by > 8 LSB or damping by > 0.03, AND at least
-  20 min since the last save. A successful `LC` calibration saves immediately.
-- **`FR 0|1` command** (saved with `ES`, default on) toggles the ring buffer at
-  runtime — no compile flag, so no build-cache surprises. `FR 0` stops all
-  flash-ring activity.
-- **`EW` command** shows flash-wear diagnostics: erase cycles and slots used.
-- **Sawtooth (qErr) correction for LTIC (`SAW 0|1`).** u-blox timing receivers
-  generate 1PPS by dividing an internal clock, so each pulse lands up to one
-  clock period off true GPS time — a per-pulse quantization error the receiver
-  reports as `qErr` in UBX-TIM-TP. A passive sniffer parses that message
-  (qErr is a signed 32-bit picosecond field at the same offset on LEA-6T,
-  LEA/NEO-M8T and ZED-F9T, so one parser serves all) and the TIC phase path
-  subtracts it, removing the receiver's granularity sawtooth and leaving the
-  OCXO's own error. On a LEA-6T (21 ns granularity) this is the dominant
-  short-term phase term. TIM-TP is enabled automatically at GPS init; `SAW`
-  toggles the correction (saved with `ES`, default off) and shows live qErr.
+### Añadido
+- **Búfer en anillo en Flash con nivelado de desgaste para datos "vivos".** La
+  deriva/amortiguación aprendidas, la calibración LC y el último PWM se
+  auto-guardan ahora en un sector de Flash dedicado (sector 6, 0x08040000,
+  128 KB) como un anillo de slots de 32 bytes. Cada guardado programa el
+  siguiente slot vacío; el sector se borra solo cuando el anillo da la vuelta
+  (una vez cada 4095 guardados), así que a 100 guardados/día el Flash dura del
+  orden de mil años. Cada slot lleva un CRC y un número de secuencia; un slot
+  escrito a medias (corte de energía) falla el CRC y se usa el anterior válido.
+  Una cabecera con firma + versión de formato hace el firmware robusto frente a
+  borrado de chip completo, programación solo por sectores, primer arranque y
+  restos de basura en Flash por igual (un sector ajeno o en blanco se detecta y
+  reinicializa).
+- **Auto-guardado con histéresis.** Los datos vivos se escriben solo cuando se
+  han asentado en un nuevo nivel: la deriva cambió > 8 LSB o la amortiguación
+  > 0,03, Y han pasado al menos 20 min desde el último guardado. Una calibración
+  `LC` exitosa guarda de inmediato.
+- **Comando `FR 0|1`** (guardado con `ES`, activo por defecto) conmuta el búfer
+  en anillo en tiempo de ejecución — sin flag de compilación, así que sin
+  sorpresas de caché de compilación. `FR 0` detiene toda actividad del anillo.
+- **Comando `EW`** muestra diagnósticos de desgaste del Flash: ciclos de borrado
+  y slots usados.
+- **Corrección de diente de sierra (qErr) para LTIC (`SAW 0|1`).** Los receptores
+  de temporización u-blox generan el 1PPS dividiendo un reloj interno, así que
+  cada pulso cae hasta un periodo de reloj lejos del tiempo GPS real — un error
+  de cuantización por pulso que el receptor reporta como `qErr` en UBX-TIM-TP.
+  Un sniffer pasivo parsea ese mensaje (qErr es un campo con signo de 32 bits en
+  picosegundos, en el mismo offset en LEA-6T, LEA/NEO-M8T y ZED-F9T, así que un
+  solo parser sirve para todos) y la ruta de fase del TIC lo resta, eliminando
+  el diente de sierra de granularidad del receptor y dejando el error propio del
+  OCXO. En un LEA-6T (21 ns de granularidad) este es el término de fase de corto
+  plazo dominante. TIM-TP se habilita automáticamente al iniciar el GPS; `SAW`
+  conmuta la corrección (guardada con `ES`, desactivada por defecto) y muestra
+  qErr en vivo.
 
-### Changed
-- **`ES` no longer overwrites learned/calibration values when the ring is on.**
-  With `FR 1`, calibration (ns_per_volt, zero_offset, range_ns, centre_v) and
-  learned drift/damp are owned solely by the ring; `ES` writes only genuine
-  settings (PID gains, thresholds, flags). With `FR 0`, `ES` still saves those
-  live values to EEPROM as a fallback, and `eeprom_recall()` seeds them at boot
-  so migrating an older EEPROM keeps its calibration.
+### Cambiado
+- **`ES` ya no sobrescribe los valores aprendidos/de calibración con el anillo
+  activo.** Con `FR 1`, la calibración (ns_per_volt, zero_offset, range_ns,
+  centre_v) y la deriva/amortiguación aprendidas pertenecen exclusivamente al
+  anillo; `ES` escribe solo ajustes genuinos (ganancias PID, umbrales, flags).
+  Con `FR 0`, `ES` sigue guardando esos valores vivos en EEPROM como respaldo, y
+  `eeprom_recall()` los siembra al arrancar, de modo que migrar una EEPROM
+  antigua conserva su calibración.
 
-### Fixed
-- **`LC` no longer fights the discipline loop.** Running `LC` while algorithm
-  10 was actively disciplining let the loop move PWM at the same time as the
-  calibration sweep, so the two corrupted each other — the measured sweep rate
-  came out at ±1 ns/s and the range as absurd values (1502 / 3518 ns), which
-  the physics gate correctly rejected. The control loop is now suppressed
-  whenever a calibration is active (`g_calib_active`), so `LC` can be run at
-  any time, including under `LA 10`.
-- **Calibration-safe PWM paths.** The same guard now also covers the algorithm
-  9 thermal-holdover steering and the manual PWM commands (`up1`/`up10`/`dp1`/
-  `dp10`/`SP`), which are refused with a clear message while `LC`/`CT` runs, so
-  no path can perturb a sweep in progress.
-- **`LC` no wrap is no longer flagged as a failure.** A detector that does not
-  wrap within the sweep now passes with a good slope/centre/span and is
-  auto-saved; only a genuinely weak result (tiny span or off-band centre) is
-  called out, with the specific reason. Messages no longer tell the user to run
-  `ES` after `LC` — a passing `LC` auto-saves to the flash ring (this is live
-  data). `CT` still prompts for `ES`, since it tunes PID settings.
+### Corregido
+- **`LC` ya no pelea con el lazo de disciplina.** Ejecutar `LC` mientras el
+  algoritmo 10 disciplinaba activamente permitía que el lazo moviera el PWM al
+  mismo tiempo que el barrido de calibración, de modo que ambos se corrompían —
+  la tasa de barrido medida salía a ±1 ns/s y el rango como valores absurdos
+  (1502 / 3518 ns), que la comprobación física rechazaba correctamente. El lazo
+  de control se suprime ahora siempre que hay una calibración activa
+  (`g_calib_active`), así que `LC` puede ejecutarse en cualquier momento,
+  incluso bajo `LA 10`.
+- **Rutas de PWM seguras durante la calibración.** La misma protección cubre
+  ahora también el pilotaje de holdover térmico del algoritmo 9 y los comandos
+  manuales de PWM (`up1`/`up10`/`dp1`/`dp10`/`SP`), que se rechazan con un
+  mensaje claro mientras corre `LC`/`CT`, de modo que ninguna ruta pueda
+  perturbar un barrido en curso.
+- **Que `LC` no dé la vuelta ya no se marca como fallo.** Un detector que no da
+  la vuelta dentro del barrido ahora pasa con buena pendiente/centro/span y se
+  auto-guarda; solo un resultado genuinamente débil (span diminuto o centro
+  fuera de banda) se señala, con el motivo específico. Los mensajes ya no piden
+  al usuario ejecutar `ES` tras `LC` — un `LC` exitoso auto-guarda en el anillo
+  Flash (esto son datos vivos). `CT` sigue pidiendo `ES`, ya que ajusta valores
+  PID.
 
-### Credits
-- Attribution refined: André Balsa credited as author of v0.06c, the
-  inspiration for the RTOS port. Repository link corrected.
+### Créditos
+- Atribución afinada: André Balsa acreditado como autor de v0.06c, la
+  inspiración del port a RTOS. Enlace del repositorio corregido.
 
 ---
 
 ## [v0.89-rtos]
 
-### Added
-- **Self-learning loop aid (`LRN`), shared by algorithm 7 and LTIC.** Two slow,
-  passive learners — informed by Dan Wiering's overnight Rb-referenced traces
-  (a ~9000 s ±80 ns phase sawtooth, an ADEV bump at the loop time constant, and
-  8E-12/day drift): (1) a **drift feed-forward** that estimates the OCXO's mean
-  phase slope over 30 s windows and adds a PWM term to cancel it, so the loop
-  stops chasing a moving target and the phase goes flat; (2) a **damping
-  adaption** that watches phase-error zero-crossings and eases the correction
-  gain down on overshoot, up when sluggish — flattening the ADEV bump at the
-  loop time constant. Both run ONLY when locked, update at most every 30 s, and
-  are hard-clamped (feed-forward ±400 LSB, damping 0.5–1.5) so a bad estimate
-  cannot destabilise the loop; neither injects any excitation. `LRN 1|0` enables
-  /disables (default on), `LRN R` resets to theory, `LRN` alone prints live
-  state; learned values are saved by `ES` (EEPROM 222–230) and recalled at
-  boot. The serial report shows a live `Learn:` line (drift, slope, damping,
-  observed limit-cycle period/amplitude).
-- **Learning now covers every disciplining algorithm (3–10), not just 7/8.**
-  A single `lrn_apply()` wrapper feeds each loop's own phase accumulator and
-  frequency error to the learners; the NN (algo 9), having no explicit phase
-  accumulator, uses damping only. `LRN` state is shared across algorithms.
+### Añadido
+- **Ayuda de lazo auto-aprendida (`LRN`), compartida por el algoritmo 7 y LTIC.**
+  Dos aprendices lentos y pasivos — informados por las trazas nocturnas
+  referenciadas a Rb de Dan Wiering (un diente de sierra de fase de ~9000 s
+  ±80 ns, un bache de ADEV en la constante de tiempo del lazo, y deriva de
+  8E-12/día): (1) un **feed-forward de deriva** que estima la pendiente media de
+  fase del OCXO en ventanas de 30 s y añade un término de PWM para cancelarla,
+  de modo que el lazo deja de perseguir un objetivo móvil y la fase se aplana;
+  (2) una **adaptación de amortiguación** que vigila los cruces por cero del
+  error de fase y baja la ganancia de corrección ante sobreoscilación, la sube
+  cuando va lento — aplanando el bache de ADEV en la constante de tiempo del
+  lazo. Ambos corren SOLO en lock, se actualizan como mucho cada 30 s, y están
+  fuertemente acotados (feed-forward ±400 LSB, amortiguación 0,5–1,5) de modo
+  que una mala estimación no pueda desestabilizar el lazo; ninguno inyecta
+  excitación. `LRN 1|0` activa/desactiva (activo por defecto), `LRN R` restaura
+  a la teoría, `LRN` a secas imprime el estado en vivo; los valores aprendidos
+  se guardan con `ES` (EEPROM 222–230) y se recuperan al arrancar. El informe
+  serie muestra una línea `Learn:` en vivo (deriva, pendiente, amortiguación,
+  periodo/amplitud del ciclo límite observado).
+- **El aprendizaje cubre ahora todos los algoritmos de disciplina (3–10), no
+  solo 7/8.** Un único envoltorio `lrn_apply()` alimenta el acumulador de fase y
+  el error de frecuencia propios de cada lazo a los aprendices; la NN (algo 9),
+  al no tener acumulador de fase explícito, usa solo amortiguación. El estado de
+  `LRN` se comparte entre algoritmos.
 
-### UI / Display
-- **Colour TFT reworked for clarity and a little life.** Consistent single-space
-  label formatting throughout (`Alt: 144m`, `PWM:...`, `Uptime: ...`); the value
-  fields align optically in the proportional font. A navy frame (matching the
-  header) now boxes the data area, with the three separators joined by side
-  rails. The frequency turns green on lock. `DATE:` label added.
-- **Boot splash refined**: title at the frequency's height, two oscillator waves
-  that fade in out of phase, drift into agreement and merge into one green wave
-  with a swelling-then-fading halo, followed by a scrolling hardware-detection
-  list (fixed-height window, credits stay put).
-- **`SPL 0|1` command** (saved with `ES`, default 1) toggles the boot animation.
-  `SPL 0` shows just the title and credits for two seconds — for the
-  art-indifferent.
+### UI / Pantalla
+- **TFT en color reelaborado para claridad y un poco de vida.** Formato de
+  etiquetas consistente con un solo espacio en todo (`Alt: 144m`, `PWM:...`,
+  `Uptime: ...`); los campos de valor se alinean ópticamente en la fuente
+  proporcional. Un marco azul marino (a juego con la cabecera) enmarca ahora el
+  área de datos, con los tres separadores unidos por rieles laterales. La
+  frecuencia se vuelve verde en lock. Etiqueta `DATE:` añadida.
+- **Splash de arranque refinado**: título a la altura de la frecuencia, dos ondas
+  de oscilador que aparecen desfasadas, derivan hasta coincidir y se fusionan en
+  una sola onda verde con un halo que crece y se desvanece, seguido de una lista
+  de detección de hardware con scroll (ventana de altura fija, los créditos se
+  quedan en su sitio).
+- **Comando `SPL 0|1`** (guardado con `ES`, 1 por defecto) conmuta la animación
+  de arranque. `SPL 0` muestra solo el título y los créditos durante dos
+  segundos — para los indiferentes al arte.
 
 ---
 
 ## [v0.88-rtos]
 
-### Fixed
-- **TFT frequency field no longer keeps digit slivers after CAL/WARMUP/SVIN
-  messages.** The busy messages and the big frequency use different text
-  heights, so text padding wiped only the current font's band; the whole
-  field is now cleared on every busy↔normal transition.
+### Corregido
+- **El campo de frecuencia del TFT ya no conserva restos de dígitos tras los
+  mensajes CAL/WARMUP/SVIN.** Los mensajes de ocupado y la frecuencia grande
+  usan alturas de texto distintas, así que el relleno de texto borraba solo la
+  banda de la fuente actual; ahora todo el campo se limpia en cada transición
+  ocupado↔normal.
 
-### Removed
-- **SPI→T6963C bridge support removed** (an experiment): `T6963C_Bridge.h`,
-  its display task section, config block and cross-references are gone.
+### Eliminado
+- **Soporte del puente SPI→T6963C eliminado** (un experimento): `T6963C_Bridge.h`,
+  su sección de tarea de pantalla, bloque de configuración y referencias cruzadas
+  han desaparecido.
 
-### Docs
-- READMEs (EN/PL/ES) updated with the LTIC v0.5x–v0.88 feature set (LC
-  auto-calibration, autotuned gains, ADC median path, runaway guard, WU,
-  LED animations, trustworthy lock colour) and a new section on colour TFT
-  support: any TFT_eSPI panel at 320×240 or 480×320 with setup steps.
+### Documentación
+- READMEs (EN/PL/ES) actualizados con el conjunto de funciones LTIC v0.5x–v0.88
+  (auto-calibración LC, ganancias auto-ajustadas, ruta de mediana del ADC,
+  protección anti-fuga, WU, animaciones LED, color de lock fiable) y una nueva
+  sección sobre soporte de TFT en color: cualquier panel TFT_eSPI a 320×240 o
+  480×320 con los pasos de configuración.
 
 ---
 
 ## [v0.87-rtos]
 
-### Fixed
-- **Zero dead time before sampling — the prep was eating the whole band.**
-  The ADC keeps up fine (1 sample/s ≈ 8 mV/step at 9 ns/s); what failed was
-  the ~60 s of settling and d1/d2 reads between commanding the ramp and the
-  first sample. A fixed offset lands on top of whatever df the saved PWM
-  already has (measured +9 ns/s on air), so the phase flew 0.061→2.62 V
-  through the entire band BEFORE sampling began and the fit saw only
-  saturation. LC now re-arms picDIV (deterministic bottom start), commands
-  the offset and starts sampling within ~3 s; the exact rate is read AFTER
-  the pass from clean avg100. If saturation still arrives before 10 fit
-  points, the offset is halved, picDIV re-armed and the pass retried once.
-  The pre-sweep d1/d2 measurement and the adaptive reduce/increase machinery
-  are removed — the physics gate and the post-pass precise rate make them
-  redundant.
+### Corregido
+- **Cero tiempo muerto antes del muestreo — la preparación se comía toda la
+  banda.** El ADC sigue el ritmo bien (1 muestra/s ≈ 8 mV/paso a 9 ns/s); lo que
+  fallaba eran los ~60 s de asentamiento y las lecturas d1/d2 entre comandar la
+  rampa y la primera muestra. Un offset fijo se suma a cualquier df que el PWM
+  guardado ya tenga (medido +9 ns/s en el banco), así que la fase voló
+  0,061→2,62 V a través de toda la banda ANTES de que empezara el muestreo, y el
+  ajuste solo veía saturación. Ahora LC re-arma el picDIV (arranque
+  determinista desde abajo), comanda el offset y empieza a muestrear en ~3 s; la
+  tasa exacta se lee DESPUÉS de la pasada desde un avg100 limpio. Si la
+  saturación aún llega antes de 10 puntos de ajuste, el offset se reduce a la
+  mitad, se re-arma el picDIV y la pasada se reintenta una vez. La medición
+  d1/d2 previa al barrido y la maquinaria adaptativa de reducir/aumentar se
+  eliminan — la comprobación física y la tasa precisa posterior a la pasada las
+  hacen redundantes.
 
 ---
 
 ## [v0.86-rtos]
 
-### Changed
-- **LC redesigned as a single bottom-to-top pass — no direction probing, no
-  flipping, no wraps needed.** Field logs proved the picDIV arm parks the
-  phase DETERMINISTICALLY ~60 ns above the sync point (Vphase ≈0.061 V after
-  every re-arm), that the negative side below that point is DEAD (edge order
-  inverts, the pulse vanishes — avg100 showed a real −3 ns/s drift while the
-  voltage stood still), and that the positive side runs the whole band up
-  into soft saturation. LC now exploits this: after arming it COMMANDS a
-  positive ~+4 ns/s sweep (offset from the measured K), samples the entire
-  band in one pass, and treats sustained upper saturation as the natural END
-  of the measurement rather than a fault. The precise avg100 read-back
-  (v0.85) scales ns/V exactly. The in-sweep direction flip and its restart
-  machinery are removed.
+### Cambiado
+- **LC rediseñado como una única pasada de abajo hacia arriba — sin sondeo de
+  dirección, sin inversiones, sin necesidad de dar la vuelta.** Los registros de
+  campo demostraron que el arm del picDIV aparca la fase de forma DETERMINISTA
+  ~60 ns por encima del punto de sync (Vphase ≈0,061 V tras cada re-arm), que el
+  lado negativo por debajo de ese punto está MUERTO (el orden de los flancos se
+  invierte, el pulso desaparece — avg100 mostró una deriva real de −3 ns/s
+  mientras la tensión no se movía), y que el lado positivo recorre toda la banda
+  hasta una saturación suave. Ahora LC lo explota: tras armar, COMANDA un barrido
+  positivo de ~+4 ns/s (offset a partir de la K medida), muestrea toda la banda
+  en una pasada, y trata la saturación superior sostenida como el FINAL natural
+  de la medición en vez de un fallo. La relectura precisa de avg100 (v0.85)
+  escala ns/V con exactitud. La inversión de dirección en pleno barrido y su
+  maquinaria de reinicio se eliminan.
 
 ---
 
 ## [v0.85-rtos]
 
-### Fixed
-- **The direction flip now COMMANDS a sweep rate instead of trusting a blind
-  read — and the phase no longer parks at the band's edge.** On air the flip
-  iteration stopped at a nominal "−1 ns/s" that was really ≈0: avg10
-  quantises at 0.1 Hz (d1=0.1000, d2=0.0000 in the log), so below 0.1 Hz the
-  read is noise. With df≈0 the phase sat wherever the picDIV re-arm dropped
-  it (Vphase 0.061 V — the band's lower edge, where too-narrow pulses barely
-  charge the RC), the sweep covered 5 mV, and the physics gate had to abort.
-  Now, when the sign flips between iterations, LC interpolates the 10 MHz
-  point P0 from the last two offsets and sets the ramp to P0 − 0.06 Hz·(LSB/Hz)
-  — a COMMANDED −6 ns/s derived from the measured K, independent of the
-  quantised read. At the end of the sweep (PWM constant throughout, so avg100
-  is clean at 0.01 Hz resolution) the true rate is read back and replaces the
-  commanded one before ns/V is computed, so the fit scale is exact.
+### Corregido
+- **La inversión de dirección ahora COMANDA una tasa de barrido en vez de fiarse
+  de una lectura ciega — y la fase ya no se aparca en el borde de la banda.** En
+  el banco, la iteración de inversión se detenía en un nominal «−1 ns/s» que en
+  realidad era ≈0: avg10 cuantiza a 0,1 Hz (d1=0,1000, d2=0,0000 en el registro),
+  así que por debajo de 0,1 Hz la lectura es ruido. Con df≈0 la fase se quedaba
+  donde el re-arm del picDIV la dejaba (Vphase 0,061 V — el borde inferior de la
+  banda, donde pulsos demasiado estrechos apenas cargan el RC), el barrido
+  cubría 5 mV, y la comprobación física tenía que abortar. Ahora, cuando el
+  signo se invierte entre iteraciones, LC interpola el punto de 10 MHz P0 a
+  partir de los dos últimos offsets y fija la rampa en P0 − 0,06 Hz·(LSB/Hz) —
+  un −6 ns/s COMANDADO derivado de la K medida, independiente de la lectura
+  cuantizada. Al final del barrido (PWM constante en toda la pasada, así que
+  avg100 es limpio a resolución de 0,01 Hz) la tasa real se relee y reemplaza a
+  la comandada antes de calcular ns/V, de modo que la escala del ajuste es
+  exacta.
 
 ---
+
+<!-- ============================================================= -->
+<!-- Las versiones anteriores a v0.85 aún no están traducidas al    -->
+<!-- español. El texto en inglés se conserva abajo verbatim y se    -->
+<!-- traducirá en revisiones sucesivas. Para el historial completo  -->
+<!-- traducido, véanse CHANGELOG.md (EN) y CHANGELOG_PL.md (PL).     -->
+<!-- ============================================================= -->
+
+> **⚠ Traducción pendiente.** Las entradas de v0.84 hacia abajo todavía están
+> en inglés; se irán traduciendo en próximas revisiones. El contenido técnico es
+> idéntico al de `CHANGELOG.md`.
 
 ## [v0.84-rtos]
 

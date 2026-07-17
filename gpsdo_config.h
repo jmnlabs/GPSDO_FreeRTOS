@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Version ─────────────────────────────────────────────────────────── */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v0.94-rtos"
+#define PROGRAM_VERSION  "v0.95-rtos"
 
 /* ---- Serial output macro ----
  * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
@@ -109,8 +109,8 @@ extern "C" {
  * driver selection happens in the TFT_eSPI User_Setup.h.              */
 /* #define GPSDO_TFT_ILI9341 */  /* ILI9341 240x320 SPI TFT */
 //#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
-#define GPSDO_TFT_ILI9488   /* ILI9488 320x480 SPI TFT (480x320 landscape)
-                                  * — UNTESTED: no panel on hand yet. Layout is
+#define GPSDO_TFT_ILI9488   /* ILI9488 320x480 SPI TFT (480x320 landscape)*/
+                                  /* — UNTESTED: no panel on hand yet. Layout is
                                   * the 320x240 design scaled up ~1.5x. Set the
                                   * matching driver + TFT_WIDTH 320 / TFT_HEIGHT
                                   * 480 in TFT_eSPI User_Setup.h. ILI9488 over
@@ -376,15 +376,15 @@ extern "C" {
    * automatically when it measures a fast drift, but the starting value is kept
    * small (60 LSB) so it is gentle by default. */
   #define LTIC_CAL_PWM_OFFSET   70   /* LSB added to centre PWM during LC      */
-  #define LTIC_CAL_SECS        300u  /* seconds of ramp logging. Sized for a
-                                      * wide detector window: LVC74 @ 3.3 V
+  #define LTIC_CAL_SECS        300u  /* seconds of ramp logging. Sized for a*/
+                                      /* wide detector window: LVC74 @ 3.3 V
                                       * spans ~700+ ns, so at ~4 ns/s the sweep
                                       * needs ≥ ~180 s of clean ramp plus margin
                                       * for a railed start. 300 s covers ~1200
                                       * ns with room to spare. (HC74 @ 5 V was
                                       * narrower and fit in 180 s.)            */
-  #define LTIC_DET_PERIOD_NS  100.0  /* unambiguous range of the phase detector
-                                      * = one period of its clock. The xx74
+  #define LTIC_DET_PERIOD_NS  100.0  /* unambiguous range of the phase detector*/
+                                      /* = one period of its clock. The xx74
                                       * flip-flop is clocked at 10 MHz here, so
                                       * 100 ns BY CONSTRUCTION — a physical
                                       * constant, not something to estimate.
@@ -474,8 +474,8 @@ extern "C" {
 #define STACK_CLI        256
 #define STACK_SENSORS    384
 #ifdef GPSDO_TFT
-  #define STACK_DISPLAY  1024  /* TFT_eSPI font rendering + scaled fonts +
-                                * OLED clear loop need generous headroom;
+  #define STACK_DISPLAY  1024  /* TFT_eSPI font rendering + scaled fonts + */
+                                /* OLED clear loop need generous headroom;
                                 * 768 was marginal and caused intermittent
                                 * boot hangs (no stack-overflow hook). */
 #else

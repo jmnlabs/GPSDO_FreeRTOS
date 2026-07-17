@@ -1,18 +1,209 @@
 # Lista zmian — GPSDO FreeRTOS
 
-[English](CHANGELOG.md) | **Polski** | [Español](CHANGELOG_ES.md)
+[English](CHANGELOG_EN.md) | **Polski** | [Español](CHANGELOG_ES.md)
 
-📖 Powrót do [README](README_PL.md)
+📖 [Strona projektu](../README.md) · Powrót do [README](README_PL.md)
 
 Wszystkie istotne zmiany w projekcie są udokumentowane poniżej.
 
 Projekt: **J. M. Niewiński** — <https://github.com/jmnlabs/GPSDO_FreeRTOS>
 Na podstawie **GPSDO v0.06c** autorstwa André Balsy
 (<https://github.com/AndrewBCN/STM32-GPSDO>); port na FreeRTOS oraz
-algorytmy 3–9 autorstwa autora, Claude AI jako asystent programowania,
+algorytmy 3–10 autorstwa autora, Claude AI jako asystent programowania,
 projekt PCB — Scrachi (forum EEVBlog).
 
 Sufiks `-rtos` oznacza linię portu na FreeRTOS.
+
+---
+
+## [v0.95-rtos] — 2026-07-16
+
+### Dodane
+- **Strefy czasowe z DST, w całym świecie.** `TZ Adelaide` wystarczy, żeby
+  zegar był poprawny — łącznie z offsetem pół godziny i DST półkuli
+  południowej. Same nazwy miast są akceptowane: są unikalne w całej bazie
+  IANA, więc region jest opcjonalny (`TZ Australia/Adelaide` też działa),
+  a wielkość liter nie ma znaczenia.
+
+  Regułę można też wpisać w całości: `TZ ACST-9:30ACDT,M10.1.0,M4.1.0/3`. Ta
+  forma ma znaczenie, gdy rząd zmieni przepisy, a firmware jeszcze o tym nie
+  wie — użytkownik poprawi to z CLI, zamiast czekać na wydanie.
+
+  Wbudowane 407 stref i 88 reguł, generowane z systemowej tzdata przez
+  `tools/gen_tz_table.py`. Pełna baza IANA to ~2 MB, czterokrotność całego
+  flasha tego MCU, a jej prawdziwa wartość polega na aktualizacjach kilka razy
+  w roku — z czego GPSDO bez internetu i tak nie skorzysta. String POSIX TZ, do
+  którego sprowadza się każda strefa, ma 4–44 bajty i niesie to samo
+  zachowanie na dziś, więc to on jest przechowywany. Koszt: ~7 KB flasha.
+- **`H TZ`** — pierwsza strona pomocy dla pojedynczej komendy. `TZ` przyjmuje
+  dwa całkiem różne argumenty i ta różnica ma znaczenie, więc dostaje własną
+  stronę zamiast ciasnej linijki w głównej liście.
+- **`TO` przyjmuje teraz minuty**: `TO 9:30`, `TO -3:30`, `TO 5:45`. Same
+  godziny nadal działają.
+- **Vcc na ekranie (480×320).** Prośba Dana Wieringa, obok Vdd. Szyna 5 V była
+  już mierzona, ale nie miała gdzie trafić — każda komórka w obu kolumnach jest
+  zajęta. Komórka `Alt` ma ~134 px luzu za wysokością, więc oddaje prawą połowę,
+  a pola zostały przy okazji przegrupowane: `qErr` idzie w górę obok `Alt` (to
+  raport odbiornika o własnym 1PPS, więc jego miejsce jest przy danych z fixa),
+  a `Vcc` zajmuje miejsce zwolnione przez `qErr` obok `Vdd` — napięcia razem.
+  `Vdd` odzyskuje drugie miejsce po przecinku, które oddawało wyłącznie po to,
+  by zrobić miejsce dla `qErr`.
+
+  Oba tylko na 480. Na 320 `Alt` i `qErr` chcą ~168 px, a komórka ma 148, więc
+  ten panel zostaje przy starym układzie.
+
+### Naprawione
+- **Zgłoszone przez Dana Wieringa: auto-strefa nie łapała DST w Australii
+  Południowej.** Dwa osobne błędy, z czego widoczny był jeden. `TO A` zgaduje
+  strefę z długości geograficznej i stosuje europejską regułę DST, więc poza
+  Europą nie dawało DST w ogóle — to był zgłoszony objaw. Ale zwracało też
+  całe godziny, a Adelaide to UTC+9:30, więc zegar był o pół godziny obok
+  nawet zimą, przy naprawionym DST. Indie (+5:30), Nepal (+5:45), Nowa
+  Fundlandia (−3:30) i Chatham (+12:45) miały ten sam cichy błąd.
+
+  `TZ <strefa>` rozwiązuje oba. `TO A` zostaje bez zmian — jest poprawne
+  w większości Europy i nie wymaga konfiguracji — ale teraz mówi wprost,
+  czego nie potrafi.
+- **Częstotliwość skakała na boki na panelu 320×240.** v0.94 usunęło szerokość
+  pola `dtostrf` w przekonaniu, że font monospace i tak trzyma cyfry
+  w kolumnach. Trzyma — ale string, który traci znak, wciąż jest centrowany na
+  nowo, co przesuwa każdy glif o pół znaku. To szerokość pola sprawia, że
+  *string* ma stałą długość, i wróciła — jest tam od v0.89. Panel 480×320
+  nietknięty: kotwiczy odczyt prawą krawędzią, co jest zweryfikowane na
+  sprzęcie.
+- **Boczne szyny znikały przy częstotliwości.** Sprite częstotliwości czyści
+  całe swoje pasmo przed rysowaniem, a rysował tylko linię separatora nad sobą
+  — więc szyny z początkowego layoutu były zamazywane z tego pasma przy
+  pierwszej aktualizacji i ramka wyglądała, jakby nie dochodziła do linii
+  nagłówka. Sprite niesie teraz także szyny. Oba panele.
+- **Vdd pokazywało się wyłącznie przy zbudowanym LTIC.** Siedzi w wierszu fazy,
+  a cały wiersz był pod `#ifdef GPSDO_LTIC` — więc płytka bez TIC nie widziała
+  własnej szyny 3.3 V, bez lepszego powodu niż to, gdzie akurat napisano to pole.
+  Szyny są teraz poza tym warunkiem: `Vcc` i `Vdd` pokazują się niezależnie od
+  sprzętu, a pod LTIC zostaje samo pole fazy — bez niego lewa połowa wiersza jest
+  po prostu pusta. `qErr` też zostaje pod warunkiem, bo pojawia się wyłącznie
+  przy algo 10.
+- **`CT` pokazywało „Tune 0s" przez cały przebieg.** Ustawiało flagi
+  kalibracji, ale nigdy nie zasiewało licznika, w przeciwieństwie do `C` i
+  `LC`. Trzy punkty po `OCXO_CALIB_SECS`, czyli 185 s.
+- **`qErr` przesuwało się na panelu 480×320.** Przy kotwicy z lewej pole rosło
+  w prawo wraz ze zmianą szerokości wartości i „ns" wędrowało tam i z powrotem.
+  Zakotwiczenie całego stringu z prawej naprawiło jednostkę, ale w zamian
+  ciągnęło etykietę `qErr:` razem z cyframi. Etykieta i wartość to teraz dwa
+  osobne pola: etykieta dosunięta do lewej krawędzi slotu, wartość trzyma
+  kotwicę z prawej, żeby jednostka stała, a zmienia się wyłącznie odstęp między
+  nimi — czyli tak, jak od zawsze zachowuje się wiersz `Vph`/`dph`.
+
+### Zmienione
+- **`dph` podawało pewną siebie liczbę długo po tym, jak detektor przestał
+  mierzyć.** `ns_per_volt` to nachylenie LOKALNE, odczytywane wokół kotwicy,
+  którą LC stawia na 0.632·Vsat; sama rampa to `V = Vsat·(1 − e^(−φ/τ))`, więc z
+  dala od kotwicy krzywa płaszczeje i liniowy odczyt zaniża fazę. Powyżej Vsat
+  nie ma już żadnego odczytu — impuls stopu minął okno i kondensator ładuje się
+  dalej do szyny zasilania. Wyświetlacz zameldował ten stan dwukrotnie jako
+  niewzruszone „+1561 ns" i za każdym razem kosztowało to pomiar, zanim ktoś
+  spojrzał na napięcie obok. `dph` pokazuje teraz `ovf` poza pasmem 15–85% Vsat,
+  a stojące obok `Vph` mówi, którym końcem wyjechało.
+
+  Vsat nie jest nigdzie zapisywane — LC je dopasowuje, stawia kotwicę i wyrzuca
+  — ale kotwica jest z definicji na 0.632·Vsat, więc `zero_offset` je odzyskuje.
+  Na tej płytce wychodzi 2.91 V, co zgadza się z 2.93 V, które komentarze
+  kalibracji podają dla niej.
+
+  Osobno warte odnotowania: własna ochrona pętli przed ucieczką (`railed_now`)
+  testuje twardo wpisane 3.28 V. Przy detektorze nasycającym się koło 2.9 V nie
+  ma prawa zadziałać, więc pasmo między ~2.9 a 3.28 V jest nasycone z punktu
+  widzenia sprzętu i zdrowe z punktu widzenia pętli. Tego ta zmiana nie rusza.
+- **`dph` na ekranie nigdy nie miało odjętego sawtootha.** Wyświetlacz liczył
+  fazę własną ścieżką — napięcie, środek, `ns_per_volt` — i pomijał korektę,
+  którą pętla stosuje w `ltic_phase_error_ns()`. Czyli algo 10 sterowało na
+  fazie skorygowanej, a pokazywało nieskorygowaną; różnica to cały sawtooth
+  odbiornika: zmierzone na sprzęcie ~14 ns rozrzutu 1σ na skądinąd płaskim
+  odczycie. Teraz wyświetlacz też go odejmuje.
+
+  Najbardziej znaczy to poza algo 10. Algorytmy 3–9 nigdy nie wołają fazowej
+  ścieżki pętli, więc `dph` było ich jedynym widokiem na prawdziwą fazę — i to
+  tym zaszumionym. A to właśnie tam TIC jest cenny: rozróżnia odchyłkę
+  częstotliwości na poziomie ~5e-11 w 100 s, podczas gdy licznik cykli potrzebuje
+  1000 s na 1e-10. Pole `qErr` i pozycja `qErr=` w raporcie szeregowym też nie są
+  już bramkowane na algo 10: to, co zostało odjęte, musi być widoczne, inaczej
+  liczby nie da się potem sprawdzić.
+- **Każda kolumna ma jedną linię wyrównania z prawej (480×320).** Lewa kończy
+  się tam, gdzie „hPa" w wierszu BMP, prawa tam, gdzie „ns" w wierszu fazy — bo
+  to najszersze i najstabilniejsze stringi w każdej z nich. `Vct`, `% rH` i prąd
+  z INA są teraz zakotwiczone do tych linii, zamiast każdy kończyć się tam, gdzie
+  akurat wyczerpie się jego tekst — przez co krawędzie kolumn były trzema
+  rozjazdami po kilka pikseli. `PWM:` i `INA:` zachowują etykiety przy lewej
+  krawędzi kolumny, więc oba wiersze musiały stać się dwoma polami zamiast
+  jednym stringiem.
+
+  Linie są mierzone przez `textWidth()` przy pierwszym użyciu, a nie wpisane jako
+  stałe: każda wartość w tych wierszach ma stałą szerokość, więc każda krawędź
+  jest stałą — ale stałą wynikającą z metryk glifów fontu, a tego nie warto
+  zgadywać. Paddingi też wyprowadzone z pomiaru, więc pola kafelkują wiersz
+  niezależnie od tego, ile wyjdzie.
+- **Wiersze sensorów grupowane kolumnami, nie sensorami (480×320).** BMP i AHT
+  wypełniają teraz lewą kolumnę, a pola elektryczne prawą — odczyt fazy na
+  górze, szyny zasilania bezpośrednio pod nim. `AHT` i `Vph`/`dph` zamieniły się
+  miejscami. Przeniesienie pola fazy do węższej prawej kolumny kosztowało jedną
+  spację przed `dph:`; jego padding jest wymierzony na najszerszy możliwy string,
+  nie na kolumnę, więc kurcząca się wartość nie zostawi ogona.
+- **`dPh:` to teraz `dph:`**, pasujące do `Vph:` obok. Zmienione na TFT i w
+  raporcie szeregowym razem — te etykiety miały się zgadzać, więc zmiana tylko
+  jednej pogorszyłaby sprawę, zamiast ją poprawić.
+- **Powiadomienie survey-in przeniesione z belki górnej na belkę statusu.**
+  Pulsowało między nazwą programu a zegarem i na panelu 480 nie pojawiało się
+  w ogóle — usterka, która przetrwała każde czytanie kodu i kilka pewnych
+  siebie błędnych diagnoz. Zamiast polować dalej, powiadomienie dopisuje się
+  teraz do tego, co belka statusu i tak mówi: `DISCIPLINED  FIX OK SURVEY`,
+  albo `SV` na 320, gdzie pełne słowo wyszłoby poza pasek.
+
+  Belka jest lepszym miejscem niezależnie od błędu. Przemalowuje całe swoje tło
+  przed rysowaniem, więc słowa nie utnie padding sąsiada — czego slot w nagłówku
+  nie potrafił zagwarantować; jest jedynym miejscem na ekranie, gdzie oko i tak
+  szuka stanu; a stojąc tam nie musi migać, żeby je zauważyć, więc pulsowanie
+  też zniknęło.
+
+  Warunek bez zmian, bo nigdy nie był problemem: napis pojawia się po timeoucie
+  monitora survey-in, gdy odbiornik nadal go prowadzi, i gaśnie z chwilą
+  wejścia w Time Mode.
+- `g_time_offset` (int8, godziny) to teraz `g_time_offset_min` (int16, minuty),
+  z jednym zapisującym. `g_tz_auto` (bool) stało się `g_tz_mode` (ręczny /
+  auto-EU / POSIX): każda komenda ustawia tryb, więc nie ma pół-stanu, w
+  którym jeden mechanizm jest skonfigurowany, a inny go po cichu nadpisuje.
+
+### EEPROM
+- Blok stref przeniesiony na `[234..284]`: tryb, ręczny offset w minutach i
+  reguła POSIX jako tekst.
+- **Istniejące ustawienia są migrowane automatycznie — bez factory reset.**
+  EEPROM sprzed v0.95 nigdy nie był zapisywany powyżej `[233]`, więc blok
+  odczytuje się jako skasowany flash; to jest znacznik, a stara para
+  `[9]`/`[142]` jest przenoszona (godziny × 60 to dokładnie to, co znaczyła).
+  Sygnatura bez zmian.
+- **Ale powrót do starszej wersji jest jednokierunkowy.** Starsze bajty `[9]`
+  i `[142]` są nadal zapisywane, więc v0.94 wgrane na płytkę z v0.95 odczyta
+  sensowny offset w całych godzinach — ale reguły `TZ` nie da się tam
+  zapisać i zostanie utracona.
+
+### Dokumentacja
+- Przeniesiona do [`doc/`](../doc/), pliki angielskie dostały sufiks `_EN`, żeby
+  wszystkie trzy języki nazywały się tak samo. Główny `README.md` to teraz krótki
+  indeks — GitHub renderuje go na stronie projektu i stamtąd prowadzi do `doc/`.
+- Przewodniki uruchomienia flash-ringu były sierotami: nic do nich nie linkowało
+  i one do niczego. Mają teraz tę samą nawigację językową co reszta.
+- Ich liczba budżetu flasha była przestarzała o pięć wersji (~170 KB przy v0.90).
+  Teraz mówi 216976 B (212 KB) przy v0.95, ~44 KB zapasu poniżej ringu na
+  0x08040000 — zmierzone, nie szacowane. Ta liczba jest całym sensem tego
+  sprawdzenia, więc nie powinna gnić. Przewodnik ostrzega też, że procent z IDE
+  liczy od pełnych 512 KB i wygląda dużo różowiej niż prawda: „41%" to w
+  rzeczywistości 83% tego, co firmware może wykorzystać.
+
+### Uwagi
+- `tz_table.h` jest generowany. Uruchom `tools/gen_tz_table.py` ponownie przy
+  aktualizacji tzdata; reguła zapisana w EEPROM przetrwa regenerację.
+- Africa/Casablanca i Africa/El_Aaiun degradują się do offsetu standardowego
+  z ostrzeżeniem: ich DST zależy od ramadanu, czego format POSIX w ogóle nie
+  wyraża. Każda inna strefa w obecnej tzdata rozstrzyga się w pełni.
 
 ---
 

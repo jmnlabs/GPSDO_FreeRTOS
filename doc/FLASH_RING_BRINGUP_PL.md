@@ -1,4 +1,8 @@
-# Bufor pierścieniowy Flash — procedura uruchomienia na sprzęcie (v0.90)
+# Bufor pierścieniowy Flash — procedura uruchomienia na sprzęcie
+
+[English](FLASH_RING_BRINGUP_EN.md) | **Polski** | [Español](FLASH_RING_BRINGUP_ES.md)
+
+📖 [Strona projektu](../README.md) · [Instrukcja](README_PL.md)
 
 Bufor pierścieniowy z równoważeniem zużycia przechowuje dane „żywe” (nauczony
 dryf/tłumienie, kalibracja LC, ostatni PWM) w **sektorze 6** Flasha
@@ -25,8 +29,15 @@ Przywrócenie później: `loadbin backup_full.bin 0x08000000`.
 
 Sprawdź linię rozmiaru: `Sketch uses NNNNNN bytes ...`
 
-`NNNNNN` musi pozostać **poniżej 262144** (0x08040000 − 0x08000000). W v0.90 to
-~170 KB, ~89 KB zapasu. Jeśli przyszły build zbliży się do 256 KB, przesuń
+`NNNNNN` musi pozostać **poniżej 262144** (0x08040000 − 0x08000000) — tam
+zaczyna się sektor 6 i ring. v0.95 mierzy 216976 B (212 KB), czyli ~44 KB
+zapasu; v0.90 miało ~170 KB, więc rośnie.
+
+Nie sugeruj się procentem z IDE. Liczy on od pełnych 512 KB, więc v0.95
+pokazuje „41%" — ale sektory 6 i 7 są zajęte (ring i EEPROM), a względem
+256 KB, których firmware naprawdę może użyć, prawdziwa liczba to 83%.
+
+Jeśli przyszły build zbliży się do 256 KB, przesuń
 pierścień lub odchudź firmware **przed** wgraniem.
 
 ## 2. Włącz pierścień, obserwuj `EW`

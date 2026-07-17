@@ -1,7 +1,7 @@
 /* ======================================================================
  * ubx_timtp.cpp — UBX-TIM-TP sawtooth (quantization-error) correction
  *
- * Part of GPSDO FreeRTOS v0.94
+ * Part of GPSDO FreeRTOS v0.95
  *
  * u-blox timing receivers generate the 1PPS by dividing an internal
  * oscillator, so each pulse lands on a clock edge — up to one clock period

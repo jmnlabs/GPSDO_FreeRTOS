@@ -1,4 +1,8 @@
-# Flash Ring Buffer — Hardware Bring-Up Procedure (v0.90)
+# Flash Ring Buffer — Hardware Bring-Up Procedure
+
+**English** | [Polski](FLASH_RING_BRINGUP_PL.md) | [Español](FLASH_RING_BRINGUP_ES.md)
+
+📖 [Project home](../README.md) · [Manual](README_EN.md)
 
 The wear-levelled ring buffer stores "live" data (learned drift/damping, LC
 calibration, last PWM) in flash **sector 6** (0x08040000, 128 KB), separate
@@ -26,9 +30,14 @@ To restore later: `loadbin backup_full.bin 0x08000000`.
 
 Check the compile size line: `Sketch uses NNNNNN bytes ...`
 
-`NNNNNN` must stay **below 262144** (0x08040000 - 0x08000000). At v0.90 it is
-~170 KB, ~89 KB of head-room. If a future build nears 256 KB, move the ring
-or trim firmware **before** flashing.
+`NNNNNN` must stay **below 262144** (0x08040000 - 0x08000000) — that is where
+sector 6 and the ring begin. v0.95 measures 216976 B (212 KB), leaving ~44 KB
+of head-room; v0.90 was ~170 KB, so it does grow. If a future build nears
+256 KB, move the ring or trim firmware **before** flashing.
+
+Ignore the percentage the IDE prints. It reports against the full 512 KB, so
+v0.95 shows as "41%" — but sectors 6 and 7 are spoken for (ring and EEPROM),
+and against the 256 KB that firmware may actually use the real figure is 83%.
 
 ## 2. Enable the ring, watch `EW`
 

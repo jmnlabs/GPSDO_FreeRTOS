@@ -49,9 +49,15 @@ def collect():
     zones = []
     seen_cities = set() # Zamiast polegać na os.path.islink, śledzimy unikalne miasta
     
+    # Sort both the directory descent and the file list so the walk order is
+    # identical on every OS. Without this, os.walk follows filesystem order,
+    # which differs between ext4/APFS/NTFS — and where two paths share a city
+    # (Asia/Istanbul vs Europe/Istanbul, Asia/Nicosia vs Europe/Nicosia) the
+    # seen_cities guard would then keep whichever the filesystem happened to
+    # yield first, making the generated table platform-dependent.
     for root, dirs, files in os.walk(BASE):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in files:
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for f in sorted(files):
             p = os.path.join(root, f)
             
             # WAŻNE: Normalizacja separatorów ścieżek dla Windows (\ -> /)

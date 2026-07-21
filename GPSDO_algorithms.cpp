@@ -360,6 +360,28 @@ LticParams_t g_ltic = {
  * 1.65 V is the centre — we use the calibrated zero_offset. Returns phase
  * error; *valid is false if the reading is railed (outside the detector
  * window), which the loop treats specially. */
+/* Damping-term frequency error, windowed per the FA command. Reads the average
+ * the caller passes in (10/100/1000), falling back to the smooth default
+ * (e_freq, i.e. avg100) whenever the requested window is not full yet. With the
+ * default 100 it returns bit-for-bit e_freq: the whole point is that a window of
+ * 100 changes nothing.
+ *
+ * Called once per state — DPLL and LOCK pass their own windows (FAD / FAL) — so
+ * the frequency term can be damped differently in acquisition and steady state.
+ * Escape detection, self-learning, the state machine and the phase PI all keep
+ * the smooth avg100 via e_freq, where a noisier average would cost more than it
+ * gains. */
+static double damp_e_freq(const FreqSnapshot_t *s, double e_freq_default,
+                          uint16_t win)
+{
+    switch (win) {
+        case 10:   return s->have10   ? (s->avg10   - (double)BASE_FREQ) : e_freq_default;
+        case 1000: return s->have1000 ? (s->avg1000 - (double)BASE_FREQ) : e_freq_default;
+        case 100:
+        default:   return e_freq_default;   /* identical to the historical path */
+    }
+}
+
 static double ltic_phase_error_ns(bool *valid)
 {
     float v = g_ltic_voltage;
@@ -540,6 +562,17 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
      * Fall back to avg10 only until the first 100 s window has filled. */
     double e_freq = s.have100 ? (s.avg100 - (double)BASE_FREQ)
                   : s.have10  ? (s.avg10  - (double)BASE_FREQ) : 0.0;
+    /* Damping-term frequency error, one per state. The DPLL and LOCK frequency
+     * terms can now read different averaging windows (FAD / FAL commands), so a
+     * shorter window can be tried in one state without disturbing the other —
+     * the way to find out whether the ~220 s limit cycle lives in acquisition
+     * or in steady state. Everything else (escape detection, self-learning,
+     * state transitions, the phase PI) stays on the smooth avg100 via e_freq.
+     * In LOCK the term keeps its gentle 0.1/0.3 weighting; the window only
+     * changes which average it reads. With both windows at 100 these are
+     * bit-for-bit e_freq, so the default behaviour is unchanged in both. */
+    double e_freq_damp_dpll = damp_e_freq(&s, e_freq, g_freq_damp_win_dpll);
+    double e_freq_damp_lock = damp_e_freq(&s, e_freq, g_freq_damp_win_lock);
 
     bool ph_valid = false;
     double phase_ns = ltic_phase_error_ns(&ph_valid);
@@ -669,8 +702,8 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
             u = 0.0;                    /* hold; polarity not established yet */
         } else if (!ph_valid) {
             /* frequency-only recovery: TIM2 pull, no phase integral wind-up */
-            double freq_term = (state == LTIC_DPLL) ? (pid->Kp * e_freq)
-                           : (state == LTIC_LOCK)  ? (pid->Kp * e_freq * 0.3) : 0.0;
+            double freq_term = (state == LTIC_DPLL) ? (pid->Kp * e_freq_damp_dpll)
+                           : (state == LTIC_LOCK)  ? (pid->Kp * e_freq_damp_lock * 0.3) : 0.0;
             u = -freq_term;
         } else {
             /* LOCK gentleness (deadband + soft knee): inside the deadband the
@@ -702,8 +735,8 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
              * DPLL-strength term would (e_freq is the smooth avg100 now). The
              * feed-forward still absorbs the systematic part; this catches the
              * rest immediately. Credit: analysis by GML-5.2. */
-            double freq_term  = (state == LTIC_DPLL) ? (pid->Kp * e_freq)
-                              : (state == LTIC_LOCK) ? (pid->Kp * e_freq * 0.1)
+            double freq_term  = (state == LTIC_DPLL) ? (pid->Kp * e_freq_damp_dpll)
+                              : (state == LTIC_LOCK) ? (pid->Kp * e_freq_damp_lock * 0.1)
                               : 0.0;
             double phase_term = (double)pol * pid->Kd * p_eff;
             u = integ - (double)pwm - freq_term - phase_term;
@@ -750,7 +783,27 @@ uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount)
     static bool     start_set = false;
     static bool     runaway_warned = false;
     if (!start_set) { start_pwm = pwm; start_set = true; }
-    bool railed_now = (g_ltic_voltage <= 0.02f || g_ltic_voltage >= 3.28f);
+    /* "Railed" means the detector is against a stop and its voltage no longer
+     * tracks phase — the state the runaway checks below need to recognise. A
+     * fixed 3.28 V upper bound assumes the ramp saturates near the 3.3 V ADC
+     * rail, which is only true for detectors whose Vsat happens to sit there.
+     * On one with Vsat ≈ 2.9 V the ramp plateaus well below 3.28, so the loop
+     * can be fully saturated while this test reads healthy, and the runaway
+     * guard never arms — the top rail is effectively invisible to it.
+     *
+     * Use the same band ltic_phase_error_ns() validates against: the swept
+     * region LC measured, centred on zero_offset. Past its high edge the
+     * detector is plateaued regardless of where that edge falls, which is the
+     * condition this actually wants. The low rail stays a fixed 0.02 V — the
+     * cap genuinely discharges to zero and there is no lower calibration point
+     * to key off. Falls back to the old fixed bound only when LC has not run,
+     * so an uncalibrated board behaves exactly as before. */
+    float rail_hi = 3.28f;
+    if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
+        float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
+        rail_hi = g_ltic.zero_offset + 0.55f * span_v;   /* high edge of the band */
+    }
+    bool railed_now = (g_ltic_voltage <= 0.02f || g_ltic_voltage >= rail_hi);
     int32_t pwm_excursion = (int32_t)pwm - (int32_t)start_pwm;
     bool freq_escape = railed_now && fabs(e_freq) > 0.5;            /* Hz, direct */
     bool lsb_backstop = railed_now && (pwm_excursion > 2000 || pwm_excursion < -2000);

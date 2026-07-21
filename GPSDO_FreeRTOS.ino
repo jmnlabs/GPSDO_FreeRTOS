@@ -195,6 +195,14 @@ void setup()
         eeprom_recall();   /* sets pwm_output, active_algo, timezone */
     } else {
         OUT_SERIAL.println("EEPROM: blank or erased — using compile-time defaults");
+        /* Prime the emulation buffer from flash even though there is nothing to
+         * recall. A later selective ES fills the buffer itself, but doing it
+         * here too keeps the invariant simple: after boot the buffer always
+         * mirrors flash, so no save path can ever flush uninitialised bytes over
+         * a group it was not asked to touch. eeprom_check_on_boot() already
+         * filled it; this is just making that guarantee explicit and not
+         * dependent on that call's internals. */
+        eeprom_buffer_fill();
         analogWrite(PIN_VCTL_PWM, gCtrl.pwm_output);
     }
 #else

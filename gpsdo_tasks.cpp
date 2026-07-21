@@ -58,6 +58,8 @@ volatile bool g_ltic_must_read = false;
 int16_t       g_ltic_adc_raw   = 0;
 int16_t       g_ltic_adc_avg   = 0;
 float         g_ltic_voltage   = 0.0f;
+uint16_t      g_freq_damp_win_dpll = 100; /* FAD: DPLL damping average window */
+uint16_t      g_freq_damp_win_lock = 100; /* FAL: LOCK damping average window */
 
 /* ltic_read_fast — read PA1 (the TIC ramp) ~50 µs after the PPS edge, from
  * vFreqRelayTask (which is woken directly by the GPS-PPS ISR). Oversamples
@@ -573,6 +575,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
  *     Row 6: UTC:hh:mm:ss DAY      (UTC time + day of week)
  *     Row 7: PWM:40908 ___[H]      (same as page A)
  *
+ *   Page C — algo-10 phase loop (only present when GPSDO_LTIC is defined;
+ *   without it the cycle is the original A↔B):
+ *     Row 2: St:LOCK    LPOL?      (loop state ACQ/DPLL/LOCK; polarity warning)
+ *     Row 3: Vph:1.861V            (detector voltage)
+ *     Row 4: dph:+52ns / ovf       (phase in ns, or ovf when out of band)
+ *     Row 5: qErr:-6.9ns / off     (sawtooth correction, when enabled)
+ *     Row 6: FA D:100 L:100        (damping windows, DPLL / LOCK)
+ *     Row 7: PWM:40908 ___[H]      (same as pages A/B)
+ *
  * Holdover blink: letter 'H' toggled at col 15 of row 7, every
  * HOLDOVER_BLINK_MS ms. Written via oled_set_last_char() to avoid
  * invalidating the dirty-flag cache for the rest of row 7.
@@ -822,7 +833,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
   /* Previous-value cache for selective redraw (16 + 1 extra slot for the
    * split AHT humidity on the 480×320 panel). */
-  static char tft_prev[22][28];
+  static char tft_prev[23][28];
 
   /* Dirty flag: set when any tft_val/tft_val_r writes to the data sprite.
    * The update loop pushes the sprite once at the end of the cycle, so all
@@ -1818,28 +1829,55 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif
 
       /* ---- sensor row ---- */
-      if (bmp_ok) { static char ft[8],fp[10];
-          /* Pressure width is 7 (480) / 6 (320), not 6 / 5. dtostrf's width is a
-           * MINIMUM, not a field size: "1013.25" overruns a 6 and prints seven
-           * characters, while "999.87" fits and prints six. So every time the
-           * weather dropped below 1000 hPa the string lost a character and the
-           * whole tail — "hPa" included — slid one digit left. Asking for the
-           * width the four-digit form actually needs pads the three-digit form
-           * with a leading space instead, and the unit stops moving.
-           *
-           * This is also what the left column's alignment line is measured
-           * against ("BMP: 00.00 C 0000.00 hPa"), so below 1000 hPa the field
-           * was not even reaching its own line. */
 #if defined(GPSDO_TFT_ILI9488)
-          dtostrf(g_bmp_temp,5,2,ft); dtostrf(g_bmp_pres,7,2,fp);
-          snprintf(s,sizeof(s),"BMP: %s C %s hPa",ft,fp);
+      /* Split, like every other cell in this column: "hPa" pinned to the
+       * alignment line, "BMP:" to the column's left edge.
+       *
+       * This row DEFINES align_L, and left-anchored it landed the unit on that
+       * line by arithmetic rather than by construction — true only while the
+       * string keeps exactly the width of the sample align_L was measured from.
+       * It does today. It would not below -10 C, where the temperature gains a
+       * minus sign and a sixth character, and nothing in the code would notice.
+       * Anchoring the unit makes the invariant structural instead of
+       * coincidental, which is how every neighbour in this column already works.
+       *
+       * The split tiles exactly, and here the arithmetic proves it rather than a
+       * measurement: align_L is TFT_COL_L + w("BMP: 00.00 C 0000.00 hPa"), and
+       * that string is literally the left field plus a space plus the right one,
+       * so left_pad = align_L - pres_w - TFT_COL_L collapses to
+       * w("BMP: 00.00 C ") — the left string with its trailing space. The left
+       * field therefore always fits, with exactly one space of margin, and the
+       * two background fills meet without overlapping.
+       *
+       * Widths are still cut for the longest form, because dtostrf's width is a
+       * minimum and not a field: pressure 7, so "1013.25" and " 999.87" both
+       * print seven and the unit stops jumping a digit every time the weather
+       * crosses 1000 hPa. Below -10 C the temperature would want six and overrun
+       * its pad by that one space; the unit would hold and only the "C" would
+       * suffer, which is the right way round for a sensor living at 51 C inside
+       * the enclosure. */
+      { static char ft[8],fp[10];
+        static int16_t bmp_pres_w = 0;
+        if (bmp_pres_w == 0) bmp_pres_w = tft_text_w("0000.00 hPa");
+        if (bmp_ok) { dtostrf(g_bmp_temp,5,2,ft);
+                      snprintf(s,sizeof(s),"BMP: %s C",ft); }
+        else        { snprintf(s,sizeof(s),"BMP: ---"); }
+        tft_val(11, TFT_COL_L, TFT_SENS_Y,
+                (uint16_t)(align_L - bmp_pres_w - TFT_COL_L), TFT_COL_VALUE, s);
+        if (bmp_ok) { dtostrf(g_bmp_pres,7,2,fp);
+                      snprintf(s,sizeof(s),"%s hPa",fp); }
+        else        { s[0] = '\0'; }
+        tft_val_r(22, align_L, TFT_SENS_Y,
+                  (uint16_t)bmp_pres_w, TFT_COL_VALUE, s);
+      }
 #else
+      if (bmp_ok) { static char ft[8],fp[10];
           dtostrf(g_bmp_temp,4,1,ft); dtostrf(g_bmp_pres,6,1,fp);
           snprintf(s,sizeof(s),"BMP: %sC %shPa",ft,fp);
-#endif
       }
       else snprintf(s,sizeof(s),"BMP: ---");
       tft_val(11, TFT_COL_L, TFT_SENS_Y, TFT_S(156), TFT_COL_VALUE, s);
+#endif
 
       if (aht_ok) { static char ft[8],fh[8];
           dtostrf(g_aht_temp,4,2,ft); dtostrf(g_aht_humi,4,2,fh);
@@ -2143,11 +2181,28 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
            * cleared the moment Time Mode arrives. */
           const bool svin = g_svin_background;
 
-          /* The survey state must be part of the redraw key. Keyed on `st`
-           * alone, the bar would hold its old text until the fix state happened
-           * to change — which, once disciplined, could be hours. */
+          /* The LTIC phase loop refuses to steer until its PWM→phase sign is
+           * known (LPOL), and until then it holds — frequency locks but the
+           * phase can sit parked on a rail indefinitely. On a 2-hour capture
+           * from a second builder that showed as a rock-steady display with the
+           * loop quietly stuck, the only symptom a 10-second serial reminder no
+           * one was watching. Surfacing it on the bar makes the one missing
+           * calibration step visible at a glance. Only meaningful once a
+           * calibration exists, so it is gated on ns_per_volt like the phase
+           * fields; 0 means auto-detect, i.e. not yet forced. */
+#if defined(GPSDO_LTIC)
+          const bool pol_unset = (g_ltic.ns_per_volt > 1.0f)
+                                 && (g_ltic.polarity == 0);
+#else
+          const bool pol_unset = false;
+#endif
+
+          /* Both flags ride on the redraw key. Keyed on `st` alone the bar
+           * would hold its old text until the fix state happened to change —
+           * which, once disciplined, could be hours. */
           static uint8_t prev_key = 0xFF;
-          const uint8_t key = (uint8_t)(st | (svin ? 0x10u : 0u));
+          const uint8_t key = (uint8_t)(st | (svin ? 0x10u : 0u)
+                                           | (pol_unset ? 0x20u : 0u));
           if (key != prev_key) {
               prev_key = key;
               uint16_t bg; const char *base;
@@ -2162,11 +2217,20 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                * FreeSansBold12pt, but ~338 px of only 312 in font 4. */
 #if defined(GPSDO_TFT_ILI9488)
               static const char SVIN_SUFFIX[] = " SURVEY";
+              static const char POL_SUFFIX[]  = " LPOL?";
 #else
               static const char SVIN_SUFFIX[] = " SV";
+              /* Just "P?" on the 320: the full word would butt the 312 px edge
+               * and clip. The bar's colour already carries the state; two chars
+               * are enough to say "polarity still needs setting". */
+              static const char POL_SUFFIX[]  = " P?";
 #endif
-              char txt[40];
-              snprintf(txt, sizeof(txt), "%s%s", base, svin ? SVIN_SUFFIX : "");
+              /* LPOL? takes the tail: a held phase loop is a more pressing thing
+               * to fix than a survey still running, and the two rarely coincide
+               * (a held loop is not disciplining). */
+              char txt[48];
+              snprintf(txt, sizeof(txt), "%s%s%s", base,
+                       svin ? SVIN_SUFFIX : "", pol_unset ? POL_SUFFIX : "");
               /* Fill the whole band from the separator to the screen bottom so
                * no dead colour strip is left below the text (the old fixed
                * TFT_SY(36) height left a gap on the taller 480×320 panel). */
@@ -2755,7 +2819,15 @@ void vDisplayTask(void *pvParameters)
             /* ---- Page switch ---- */
             if (++oled_page_counter >= OLED_PAGE_SWITCH_SECS) {
                 oled_page_counter = 0;
-                oled_page         = oled_page ^ 1u;   /* toggle 0↔1 */
+                /* Cycle A→B→C→A when the LTIC phase page exists, else A↔B.
+                 * Page C carries the algo-10 phase-loop state that the big TFT
+                 * shows inline; on the OLED it earns its own page rather than
+                 * crowding the sensor rows. */
+#ifdef GPSDO_LTIC
+                oled_page = (oled_page >= 2u) ? 0u : (uint8_t)(oled_page + 1u);
+#else
+                oled_page = oled_page ^ 1u;   /* toggle 0↔1 */
+#endif
                 /* Invalidate rows 2–6 so they redraw for the new page */
                 oled_invalidate_rows(2, 6);
             }
@@ -2900,6 +2972,78 @@ void vDisplayTask(void *pvParameters)
                 }
                 oled_set_line(6, line);
             }
+#ifdef GPSDO_LTIC
+            else {
+                /* PAGE C: algo-10 phase loop. Only reached when the three-page
+                 * cycle is active (GPSDO_LTIC). Mirrors what the TFT shows for
+                 * the LTIC loop, sized for 16 columns.
+                 *   Row 2: St:LOCK    LPOL?   (loop state; polarity warning)
+                 *   Row 3: Vph:1.861V         (detector voltage)
+                 *   Row 4: dph:+52ns / ovf    (phase in ns, or ovf out of band)
+                 *   Row 5: qErr:-6.9ns        (sawtooth, when enabled)
+                 *   Row 6: FA D:100 L:100     (damping windows) */
+
+                /* Row 2: loop state + polarity warning. The LPOL? flag is the
+                 * one genuinely important addition — a small-display user has no
+                 * serial console, so an unset polarity would otherwise show as a
+                 * healthy "DISCIPLINED" with the loop silently held. */
+                {
+                    const char *st = "----";
+                    switch (g_ltic.state) {
+                        case LTIC_ACQ:  st = "ACQ";  break;
+                        case LTIC_DPLL: st = "DPLL"; break;
+                        case LTIC_LOCK: st = "LOCK"; break;
+                        default: break;
+                    }
+                    bool pol_unset = (g_ltic.ns_per_volt > 1.0f)
+                                     && (g_ltic.polarity == 0);
+                    snprintf(line, sizeof(line), "St:%-4s %s",
+                             st, pol_unset ? "  LPOL?" : "      ");
+                }
+                oled_set_line(2, line);
+
+                /* Row 3: detector voltage */
+                { static char fv[8]; dtostrf(g_ltic_voltage, 5, 3, fv);
+                  snprintf(line, sizeof(line), "Vph:%sV", fv); }
+                oled_set_line(3, line);
+
+                /* Row 4: phase in ns, using the same band guard as the TFT — if
+                 * the detector is railed the number is meaningless, so show ovf
+                 * rather than a confident-but-false value. */
+                {
+                    bool cal = (g_ltic.ns_per_volt > 1.0f);
+                    bool in_band = false;
+                    double ns = 0.0;
+                    if (cal) {
+                        double centre = (g_ltic.zero_offset > 0.001f)
+                                        ? (double)g_ltic.zero_offset : 0.22;
+                        double vsat = centre / 0.63212;
+                        double v = (double)g_ltic_voltage;
+                        in_band = (v > 0.15 * vsat) && (v < 0.85 * vsat);
+                        ns = (v - centre) * (double)g_ltic.ns_per_volt;
+                    }
+                    if (cal && in_band) snprintf(line, sizeof(line), "dph:%+ldns", (long)ns);
+                    else if (cal)       snprintf(line, sizeof(line), "dph:     ovf");
+                    else                snprintf(line, sizeof(line), "dph:  --    ");
+                }
+                oled_set_line(4, line);
+
+                /* Row 5: sawtooth qErr when the correction is on, else blank */
+                if (g_qerr_enable) {
+                    double q = ubx_timtp_correction_ns();
+                    snprintf(line, sizeof(line), "qErr:%+.1fns", q);
+                } else {
+                    snprintf(line, sizeof(line), "qErr: off       ");
+                }
+                oled_set_line(5, line);
+
+                /* Row 6: FA damping windows (DPLL / LOCK) */
+                snprintf(line, sizeof(line), "FA D:%u L:%u",
+                         (unsigned)g_freq_damp_win_dpll,
+                         (unsigned)g_freq_damp_win_lock);
+                oled_set_line(6, line);
+            }
+#endif /* GPSDO_LTIC */
 
             /* ---- Row 7: PWM + trend (both pages) ----
              * First 15 chars: PWM and trend text.
@@ -2993,8 +3137,8 @@ void vDisplayTask(void *pvParameters)
             if (++lcd_line2_counter >= LCD_LINE2_SWITCH_SECS) {
                 lcd_line2_counter = 0;
                 /* Advance to next available mode */
-                for (uint8_t attempt = 0; attempt < 6; attempt++) {
-                    lcd_line2_mode = (lcd_line2_mode + 1) % 6;
+                for (uint8_t attempt = 0; attempt < 7; attempt++) {
+                    lcd_line2_mode = (lcd_line2_mode + 1) % 7;
                     bool avail = false;
                     if (lcd_line2_mode == 0) avail = snap_g.pos_valid;
                     if (lcd_line2_mode == 1) avail = snap_g.pos_valid;
@@ -3002,6 +3146,15 @@ void vDisplayTask(void *pvParameters)
                     if (lcd_line2_mode == 3) avail = s_aht_ok;
                     if (lcd_line2_mode == 4) avail = s_ina_ok;
                     if (lcd_line2_mode == 5) avail = s_bmp_ok;
+#ifdef GPSDO_LTIC
+                    /* Mode 6: algo-10 phase loop. Available once LC has run, so
+                     * the row only appears when there's a calibrated loop to
+                     * report — and it carries the LPOL? warning a small-display
+                     * user would otherwise never see. */
+                    if (lcd_line2_mode == 6) avail = (g_ltic.ns_per_volt > 1.0f);
+#else
+                    if (lcd_line2_mode == 6) avail = false;
+#endif
                     if (avail) break;
                 }
             }
@@ -3060,7 +3213,6 @@ void vDisplayTask(void *pvParameters)
                     }
                     break;
                 case 5: /* BMP280 */
-                default:
                     if (s_bmp_ok) {
                         static char ft[6],fp[7];
                         dtostrf(g_bmp_temp,4,1,ft); dtostrf(g_bmp_pres,5,1,fp);
@@ -3069,6 +3221,49 @@ void vDisplayTask(void *pvParameters)
                         snprintf(line,sizeof(line),"BMP: not found      ");
                     }
                     break;
+#ifdef GPSDO_LTIC
+                default: /* case 6: algo-10 phase loop — state, phase, polarity.
+                          * "St:LOCK dph:+52ns P?" — 20 chars. The P? at the end
+                          * is the polarity warning; it's the reason this row
+                          * exists, since a small-display user has no serial log
+                          * to see the "polarity unset" reminder on. */
+                    {
+                        const char *st = "----";
+                        switch (g_ltic.state) {
+                            case LTIC_ACQ:  st = "ACQ ";  break;
+                            case LTIC_DPLL: st = "DPLL"; break;
+                            case LTIC_LOCK: st = "LOCK"; break;
+                            default: break;
+                        }
+                        bool cal = (g_ltic.ns_per_volt > 1.0f);
+                        bool in_band = false;
+                        double ns = 0.0;
+                        if (cal) {
+                            double centre = (g_ltic.zero_offset > 0.001f)
+                                            ? (double)g_ltic.zero_offset : 0.22;
+                            double vsat = centre / 0.63212;
+                            double v = (double)g_ltic_voltage;
+                            in_band = (v > 0.15 * vsat) && (v < 0.85 * vsat);
+                            ns = (v - centre) * (double)g_ltic.ns_per_volt;
+                        }
+                        bool pol_unset = cal && (g_ltic.polarity == 0);
+                        char ph[10];
+                        if (in_band)   snprintf(ph, sizeof(ph), "%+ldns", (long)ns);
+                        else           snprintf(ph, sizeof(ph), "ovf");
+                        /* Fixed layout so P? always lands in cols 19-20 and is
+                         * never truncated — it's the whole reason for this row.
+                         * body padded to 18, warning (or blanks) in the last 2. */
+                        char body[19];
+                        snprintf(body, sizeof(body), "St:%s %s",
+                                 (st[3] == ' ') ? "ACQ" : st, ph);
+                        snprintf(line, sizeof(line), "%-18.18s%s",
+                                 body, pol_unset ? "P?" : "  ");
+                    }
+                    break;
+#else
+                default:
+                    break;
+#endif
             }
             lcd_set_line(2, line);
 

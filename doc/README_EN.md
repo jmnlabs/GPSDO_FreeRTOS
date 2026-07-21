@@ -59,7 +59,7 @@ of 10⁻¹⁰–10⁻¹², while preserving the OCXO's short-term stability.
         │              ┌───┴────────┐
      Sensors:          │ ILI9341 /  │  320x240
    ┌────┼────┐         │ ST7789     │
-  AHT  BMP  INA        │ ILI9488    │  480x320 (untested)
+  AHT  BMP  INA        │ ILI9488    │  480x320
                        └────────────┘
 ```
 
@@ -84,12 +84,18 @@ of 10⁻¹⁰–10⁻¹², while preserving the OCXO's short-term stability.
 
 **Displays** (optional):
 
-- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309)
-- **LCD 20×4** I2C (HD44780 + PCF8574T)
+- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309) — rotating pages; a third
+  page shows the algo-10 loop state, phase and LPOL? warning when LTIC is enabled
+- **LCD 20×4** I2C (HD44780 + PCF8574T) — the alternating line adds an algo-10
+  state/phase/LPOL? mode when LTIC is enabled
 - **TM1637** (4- or 6-digit clock display)
 - **TFT 320×240** SPI (ILI9341 / ST7789, TFT_eSPI library)
-- **TFT 480×320** SPI (ILI9488, TFT_eSPI library) — *untested, no panel on
-  hand yet; the 320×240 layout is auto-scaled up*
+- **TFT 480×320** SPI (ILI9488, TFT_eSPI library) — the primary panel in
+  current use, confirmed disciplining to LOCK on several builders' hardware.
+  The layout is drawn natively at 480×320 (not merely up-scaled): a six-field
+  sensor grid with right-anchored units, the algo-10 phase readout (Vph / dph
+  with an out-of-band `ovf` guard / qErr), and a status bar carrying SURVEY and
+  the LPOL? polarity warning
 - **HT16K33** 4-digit 7-segment clock with colon, I2C addr 0x70 (HH:MM)
 
 OLED and LCD can operate simultaneously (different I2C addresses).
@@ -593,11 +599,22 @@ elsewhere and returns whole hours only — so it cannot express Adelaide's
 
 | Command | Description |
 |---------|-------------|
-| `ES` | Save all parameters to EEPROM |
+| `ES [group]` | Save to EEPROM — everything, or one group (see below) |
 | `ER` | Recall parameters from EEPROM |
 | `EE` | Erase EEPROM (restore defaults) |
 | `RB` | Warm reboot — software reset, **EEPROM kept** (OCXO stays warm, recalls disciplined state) |
 | `CR YES` | Cold restart — **erase EEPROM** then reset (factory state; requires the `YES` confirmation) |
+
+`ES` on its own saves the whole parameter page, as before. `ES <group>` saves
+only one block and leaves every other setting on the page at its stored value —
+so committing a timezone change cannot also stamp in a PID you were still
+experimenting with. The groups are `CORE` (PWM, active algorithm), `PID` (algo
+3-9 gains, blend, NN step), `TZ` (timezone), `LTIC` (algo-10 loop tuning,
+thresholds and the FA windows), `LCAL` (algo-10 ramp calibration), `CAL`
+(pressure/altitude offsets) and `MISC` (survey, warmup, splash, ring, saw,
+learn). `ES` with an unknown name lists them rather than guessing. Each save
+fills the emulation buffer from flash, writes the requested section, and
+flushes; untouched bytes keep their on-flash values.
 
 ### LTIC — algorithm 10 (three-stage ACQ/DPLL/LOCK)
 
@@ -666,10 +683,40 @@ out if TIM-TP stops (receiver reset) so a stale value is never applied.
 
 `SAW` with no argument shows the state and live qErr; `SAW 1`/`SAW 0` toggles
 it (saved with `ES`, default off). When on, the `Learn:` telemetry line shows
-`qErr=…ns` for algorithm 10, and the value is subtracted from each TIC phase
-reading. Because Vphase is sampled on the ramp peak right after the PPS edge
+`qErr=…ns` whatever algorithm is running, and the value is subtracted from each
+TIC phase reading — both the loop's and the one the display shows. Because Vphase is sampled on the ramp peak right after the PPS edge
 (see the TIC hardware notes below), each phase reading already pairs with the
 qErr reported for that same second's pulse.
+
+#### Damping-term averaging window — `FA` / `FAD` / `FAL`
+
+The algorithm-10 loop feeds its frequency (damping) term from a running
+frequency average. Rubidium-referenced measurements (Dan Wiering, tinyPFA
+against an S250) showed a ~220 s limit cycle in algo 10 whose mechanism is the
+group delay of the long 100 s average landing near quadrature — while algorithm
+7 on the same reference was clean, which points to the DPLL's second-order
+structure rather than the average alone.
+
+`FA` selects which window that damping term reads, and the DPLL (acquisition)
+and LOCK (steady-state) states can be set independently:
+
+| Command | Effect |
+|---------|--------|
+| `FAD [n]` | Window for the **DPLL** state only |
+| `FAL [n]` | Window for the **LOCK** state only |
+| `FA [n]` | Both at once |
+| `FA` | Show both current windows |
+
+`n` is 10, 100 or 1000 seconds; **100 is the default in each and reproduces the
+previous behaviour bit-for-bit**. Only the frequency term is affected — escape
+detection, self-learning, the state machine and the phase PI all stay on the
+smooth 100 s average. Both windows are saved with `ES` (LTIC group).
+
+The split is a diagnostic as much as a fix: if `FAD` changes the cycle it lives
+in acquisition, if only `FAL` does it is in steady state, and if neither touches
+it the cycle is in the phase branch rather than the frequency term. This is
+deliberately a switch, not a new default — the shorter window is a candidate,
+to be validated against a reference before anything changes by default.
 
 ---
 

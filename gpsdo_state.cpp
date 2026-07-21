@@ -151,6 +151,8 @@ static const char EEPROM_SIG[6] = "GPSD2";
 #define EE_TZ_MODE      234u /* uint8  0=manual 1=auto-EU 2=posix   */
 #define EE_TZ_MAN_MIN   235u /* int16  manual offset, minutes       */
 #define EE_TZ_STR       237u /* char[48] POSIX rule, NUL-terminated */
+#define EE_FREQ_DAMP    285u /* uint8  DPLL damping window /10 (v0.95+) */
+#define EE_FREQ_DAMP_LK 286u /* uint8  LOCK damping window /10 (v0.95+) */
 /* next free: 285 */
 /* [221..223] reserved for future LTIC params */
 /* Total used: 221 bytes, reserved to 224 (well within 1024-byte page) */
@@ -184,9 +186,25 @@ extern float  g_altitude_offset;
  * Writes signature first, then data bytes, then flushes the buffer.
  * Called by CLI command "ES" under xCtrlMutex context.
  * ----------------------------------------------------------------------- */
-void eeprom_save(void)
+/* ---- eeprom_save, section by section ------------------------------------
+ * Each ee_sec_* writes one group's bytes into the (flash-filled) buffer and
+ * nothing else. eeprom_save_group() fills the buffer from flash, writes the
+ * signature plus the requested section(s), and flushes — so a single-group ES
+ * leaves every byte outside that group at its on-flash value. The signature is
+ * written on every path: without it eeprom_recall() rejects the whole page.
+ *
+ * The full ES (EE_GRP_ALL) is just every section in turn, so there is one copy
+ * of each field's write, not two to drift apart. ------------------------- */
+
+static void ee_sec_sig(void)
 {
-    /* Read live values under mutex */
+    for (int i = 0; i < 6; i++)
+        eeprom_buffered_write_byte((uint16_t)(EE_SIG_START + i),
+                                   (uint8_t)EEPROM_SIG[i]);
+}
+
+static void ee_sec_core(void)
+{
     uint16_t pwm  = DEFAULT_PWM_OUTPUT;
     uint8_t  algo = 0;
     if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -194,24 +212,17 @@ void eeprom_save(void)
         algo = gCtrl.active_algo;
         xSemaphoreGive(xCtrlMutex);
     }
-    int16_t toffs_min = g_time_offset_min;   /* snapshot for the log line */
+    /* PWM is a live value too, but harmless to keep here: at boot
+     * eeprom_recall() runs BEFORE live_store_begin(), so when the ring is on it
+     * overrides this with the freshest PWM; when the ring is off this is the
+     * operating-point fallback. algo is a plain setting. */
+    eeprom_buffered_write_byte(EE_PWM_HI, (uint8_t)(pwm >> 8));
+    eeprom_buffered_write_byte(EE_PWM_LO, (uint8_t)(pwm & 0xFFu));
+    eeprom_buffered_write_byte(EE_ALGO,   algo);
+}
 
-    /* Write signature */
-    for (int i = 0; i < 6; i++)
-        eeprom_buffered_write_byte((uint16_t)(EE_SIG_START + i),
-                                   (uint8_t)EEPROM_SIG[i]);
-
-    /* Write data. PWM is a live value too, but harmless to keep here: at boot
-     * eeprom_recall() runs BEFORE live_store_begin(), so when the ring is on
-     * it overrides this with the freshest PWM; when the ring is off this is
-     * the operating-point fallback. algo/time_offset are plain settings. */
-    eeprom_buffered_write_byte(EE_PWM_HI,      (uint8_t)(pwm >> 8));
-    eeprom_buffered_write_byte(EE_PWM_LO,      (uint8_t)(pwm & 0xFFu));
-    eeprom_buffered_write_byte(EE_ALGO,        algo);
-    /* EE_TIME_OFFSET is written further down, with the rest of the timezone
-     * block — it is legacy-compatibility now, not the live value. */
-
-    /* Write PID parameters for algos 3-9 */
+static void ee_sec_pid(void)
+{
     for (int n = 3; n <= 9; n++) {
         uint16_t base = EE_PID_START + (uint16_t)(n - 3) * 16u;
         ee_write_float(base +  0, (float)g_pid[n].Kp);
@@ -222,13 +233,14 @@ void eeprom_save(void)
     ee_write_float(EE_BLEND_CROSS, (float)g_blend_crossover);
     ee_write_float(EE_BLEND_SCALE, (float)g_blend_scale);
     ee_write_float(EE_NN_MAX_STEP, (float)g_nn_max_step);
-    ee_write_float(EE_PRESS_OFF,   g_pressure_offset);
-    ee_write_float(EE_ALT_OFF,     g_altitude_offset);
-    /* Timezone. The legacy [9] and [142] bytes are still written so that an
-     * older firmware flashed onto this board reads something sane rather
-     * than garbage — it gets the offset rounded to hours, which is what it
-     * could represent anyway. The authoritative values are in the [234..]
-     * block. */
+}
+
+static void ee_sec_tz(void)
+{
+    /* The legacy [9] and [142] bytes are still written so that an older
+     * firmware flashed onto this board reads something sane rather than
+     * garbage — it gets the offset rounded to hours, which is what it could
+     * represent anyway. The authoritative values are in the [234..] block. */
     eeprom_buffered_write_byte(EE_TIME_OFFSET,
                                (uint8_t)(int8_t)(g_time_offset_min / 60));
     eeprom_buffered_write_byte(EE_TZ_AUTO,
@@ -238,18 +250,15 @@ void eeprom_save(void)
     eeprom_buffered_write_byte(EE_TZ_MAN_MIN + 1, (uint8_t)(g_tz_manual_min & 0xFF));
     for (uint8_t i = 0; i < TZ_STR_MAX; i++)
         eeprom_buffered_write_byte((uint16_t)(EE_TZ_STR + i), (uint8_t)g_tz_str[i]);
-    eeprom_buffered_write_byte(EE_SVIN_EN, g_svin_enabled ? 1u : 0u);
+}
 
-    /* Algorithm 10 (LTIC) SETTINGS (always saved: these are user-tuned, not
-     * auto-learned). The three CALIBRATION values (ns_per_volt, zero_offset,
-     * range_ns) and centre_v are "live data" — normally owned by the flash
-     * ring buffer, so ES only writes them as a FALLBACK when the ring is
-     * disabled (FR 0). With the ring on, ES never overwrites calibration. */
-    if (!g_flash_ring_enable) {
-        ee_write_float(EE_LTIC_NSV,   g_ltic.ns_per_volt);
-        ee_write_float(EE_LTIC_ZERO,  g_ltic.zero_offset);
-        ee_write_float(EE_LTIC_RANGE, g_ltic.range_ns);
-    }
+static void ee_sec_ltic(void)
+{
+    /* LTIC loop tuning — user-set, always saved. Calibration and centre_v live
+     * in EE_GRP_LCAL, not here, so re-tuning the loop never rewrites what LC
+     * measured. state/submode are written here because the existing code always
+     * wrote them (unguarded): they are the machine state a warm restart resumes
+     * from, so they travel with the tuning rather than the calibration. */
     ee_write_float(EE_LTIC_DPLL_KP, (float)g_ltic.dpll.Kp);
     ee_write_float(EE_LTIC_DPLL_KI, (float)g_ltic.dpll.Ki);
     ee_write_float(EE_LTIC_DPLL_KD, (float)g_ltic.dpll.Kd);
@@ -258,43 +267,93 @@ void eeprom_save(void)
     ee_write_float(EE_LTIC_LOCK_KI, (float)g_ltic.lock.Ki);
     ee_write_float(EE_LTIC_LOCK_KD, (float)g_ltic.lock.Kd);
     ee_write_float(EE_LTIC_LOCK_IL, (float)g_ltic.lock.I_LIMIT);
+    ee_write_float(EE_LTIC_ACQ_KP,  (float)g_ltic.acq.Kp);
+    ee_write_float(EE_LTIC_ACQ_KI,  (float)g_ltic.acq.Ki);
+    ee_write_float(EE_LTIC_ACQ_KD,  (float)g_ltic.acq.Kd);
+    ee_write_float(EE_LTIC_ACQ_IL,  (float)g_ltic.acq.I_LIMIT);
     ee_write_float(EE_LTIC_ACQ_TH,  g_ltic.acq_threshold_ns);
     ee_write_float(EE_LTIC_DPLL_TH, g_ltic.dpll_lock_thresh);
     eeprom_buffered_write_byte(EE_LTIC_LOCK_IV,     (uint8_t)(g_ltic.lock_interval_s >> 8));
     eeprom_buffered_write_byte(EE_LTIC_LOCK_IV + 1, (uint8_t)(g_ltic.lock_interval_s & 0xFFu));
+    eeprom_buffered_write_byte(EE_LTIC_POLARITY, (uint8_t)g_ltic.polarity);
     eeprom_buffered_write_byte(EE_LTIC_STATE,   g_ltic.state);
     eeprom_buffered_write_byte(EE_LTIC_SUBMODE, g_ltic.submode);
-    ee_write_float(EE_LTIC_ACQ_KP, (float)g_ltic.acq.Kp);
-    ee_write_float(EE_LTIC_ACQ_KI, (float)g_ltic.acq.Ki);
-    ee_write_float(EE_LTIC_ACQ_KD, (float)g_ltic.acq.Kd);
-    ee_write_float(EE_LTIC_ACQ_IL, (float)g_ltic.acq.I_LIMIT);
-    eeprom_buffered_write_byte(EE_LTIC_POLARITY, (uint8_t)g_ltic.polarity);
-    if (!g_flash_ring_enable)                        /* centre_v is live data */
+    /* FA windows stored as /10 so each fits a byte: 10/100/1000 -> 1/10/100. */
+    eeprom_buffered_write_byte(EE_FREQ_DAMP,    (uint8_t)(g_freq_damp_win_dpll / 10u));
+    eeprom_buffered_write_byte(EE_FREQ_DAMP_LK, (uint8_t)(g_freq_damp_win_lock / 10u));
+}
+
+static void ee_sec_lcal(void)
+{
+    /* Ramp calibration (LC) and operating point (LCV). These are "live data"
+     * normally owned by the flash ring, so with the ring on they are NOT
+     * written from here at all — the ring is their source of truth and ES must
+     * not stamp a staler copy over it. With the ring off (FR 0) this block is
+     * their only persistence, so it writes them as a fallback. */
+    if (!g_flash_ring_enable) {
+        ee_write_float(EE_LTIC_NSV,      g_ltic.ns_per_volt);
+        ee_write_float(EE_LTIC_ZERO,     g_ltic.zero_offset);
+        ee_write_float(EE_LTIC_RANGE,    g_ltic.range_ns);
         ee_write_float(EE_LTIC_CENTRE_V, g_ltic.centre_v);
-    eeprom_buffered_write_byte(EE_WARMUP_EN, g_warmup_enable ? 1u : 0u);
-    eeprom_buffered_write_byte(EE_SPLASH_EN, g_splash_enable ? 1u : 0u);
+    }
+}
+
+static void ee_sec_cal(void)
+{
+    ee_write_float(EE_PRESS_OFF, g_pressure_offset);
+    ee_write_float(EE_ALT_OFF,   g_altitude_offset);
+}
+
+static void ee_sec_misc(void)
+{
+    eeprom_buffered_write_byte(EE_SVIN_EN,       g_svin_enabled   ? 1u : 0u);
+    eeprom_buffered_write_byte(EE_WARMUP_EN,     g_warmup_enable  ? 1u : 0u);
+    eeprom_buffered_write_byte(EE_SPLASH_EN,     g_splash_enable  ? 1u : 0u);
     eeprom_buffered_write_byte(EE_FLASH_RING_EN, g_flash_ring_enable ? 1u : 0u);
-    eeprom_buffered_write_byte(EE_SAW_EN, g_qerr_enable ? 1u : 0u);
-    eeprom_buffered_write_byte(EE_LRN_EN, g_lrn_enable ? 1u : 0u);
-    if (!g_flash_ring_enable) {                       /* LRN values are live data */
+    eeprom_buffered_write_byte(EE_SAW_EN,        g_qerr_enable    ? 1u : 0u);
+    eeprom_buffered_write_byte(EE_LRN_EN,        g_lrn_enable     ? 1u : 0u);
+    /* LRN drift/damp are live data owned by the ring, same rule as LCAL. */
+    if (!g_flash_ring_enable) {
         ee_write_float(EE_LRN_DRIFT, g_lrn_drift);
         ee_write_float(EE_LRN_DAMP,  g_lrn_damp);
     }
+}
+
+void eeprom_save_group(EeGroup_t grp)
+{
+    /* Always start from the on-flash image. eeprom_recall() at boot fills the
+     * buffer, but on a blank page recall() returns early WITHOUT filling (see
+     * the boot path), so a first-ever selective save would otherwise flush an
+     * uninitialised buffer over the untouched groups. Filling here makes every
+     * save self-contained regardless of what ran before it. */
+    eeprom_buffer_fill();
+    ee_sec_sig();                       /* every path, or recall rejects the page */
+
+    if (grp == EE_GRP_ALL || grp == EE_GRP_CORE) ee_sec_core();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_PID)  ee_sec_pid();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_TZ)   ee_sec_tz();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_LTIC) ee_sec_ltic();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_LCAL) ee_sec_lcal();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_CAL)  ee_sec_cal();
+    if (grp == EE_GRP_ALL || grp == EE_GRP_MISC) ee_sec_misc();
 
     eeprom_buffer_flush();
     g_eeprom_valid = true;
 
-    /* Flush frequency ring buffers so control task sees clean state */
+    /* Flush frequency ring buffers so the control task sees clean state. */
     if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         gFreq.flush_requested = true;
         xSemaphoreGive(xFreqMutex);
     }
 
-    OUT_SERIAL.print("EEPROM save: PWM=");   OUT_SERIAL.print(pwm);
-    OUT_SERIAL.print(" algo=");              OUT_SERIAL.print(algo);
-    OUT_SERIAL.print(" toffs_min=");         OUT_SERIAL.print((int)toffs_min);
-    OUT_SERIAL.println(" + PID params");
+    static const char *const NAMES[] = {
+        "ALL", "CORE", "PID", "TZ", "LTIC", "LCAL", "CAL", "MISC"
+    };
+    OUT_SERIAL.print("EEPROM save: group=");
+    OUT_SERIAL.println(NAMES[(int)grp]);
 }
+
+void eeprom_save(void) { eeprom_save_group(EE_GRP_ALL); }
 
 /* ---- eeprom_recall -----------------------------------------------------
  * Reads PWM, algorithm and time offset from EEPROM.
@@ -393,6 +452,12 @@ void eeprom_recall(void)
         if (st <= LTIC_LOCK) g_ltic.state = st;        /* 0xFF → keep default ACQ */
         uint8_t sm = eeprom_buffered_read_byte(EE_LTIC_SUBMODE);
         if (sm <= 1u) g_ltic.submode = sm;             /* 0xFF → keep default 0   */
+        /* FA windows: stored /10. Only accept the three valid values; blank
+         * EEPROM (0xFF) or anything else leaves the default 100 untouched. */
+        uint8_t fd = eeprom_buffered_read_byte(EE_FREQ_DAMP);
+        if (fd == 1u || fd == 10u || fd == 100u) g_freq_damp_win_dpll = (uint16_t)fd * 10u;
+        uint8_t fl = eeprom_buffered_read_byte(EE_FREQ_DAMP_LK);
+        if (fl == 1u || fl == 10u || fl == 100u) g_freq_damp_win_lock = (uint16_t)fl * 10u;
         v = ee_read_float(EE_LTIC_ACQ_KP); if (isfinite(v) && v >= 0.0f && v <= 100000.0f) g_ltic.acq.Kp = v;
         v = ee_read_float(EE_LTIC_ACQ_KI); if (isfinite(v) && v >= 0.0f && v <= 100000.0f) g_ltic.acq.Ki = v;
         v = ee_read_float(EE_LTIC_ACQ_KD); if (isfinite(v) && v >= 0.0f && v <= 100000.0f) g_ltic.acq.Kd = v;
@@ -516,6 +581,7 @@ bool eeprom_check_on_boot(void)
 
 #else  /* GPSDO_EEPROM not defined — stub implementations */
 void eeprom_save(void)          {}
+void eeprom_save_group(EeGroup_t grp) { (void)grp; }
 void eeprom_recall(void)        {}
 void eeprom_erase(void)         {}
 bool eeprom_check_on_boot(void) { return false; }

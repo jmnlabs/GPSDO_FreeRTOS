@@ -23,6 +23,49 @@ El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
 
 ## [v0.95-rtos] — 2026-07-16
 
+- **Nuevo `tools/gpsdo_tuner.py` — GUI de ajuste en vivo y visualización de
+  fase.** En lugar de ajustar continuamente los valores por defecto para cada
+  OCXO y detector, esta herramienta pone los comandos de ajuste del firmware tras
+  controles directos. Lee cada parámetro del dispositivo (LL / LP / FA), escribe
+  en vivo (el PID de tres etapas LTIC, las ventanas FA, el PID algo 3-9 y la
+  calibración del detector), y confirma con ES o revierte con ER. Inspirado en
+  GPSDO_log.py de lucido y acreditado como tal. Requiere pyserial, pyqtgraph y
+  PySide6.
+- **OLED y LCD muestran ahora el estado del lazo de fase algo-10, incluido el
+  aviso LPOL?.** En el OLED una tercera página (C) se une a la rotación A/B
+  cuando GPSDO_LTIC está definido: estado del lazo, tensión del detector, fase
+  (con el mismo guardián de banda ovf que el TFT), qErr y las ventanas FA. En el
+  LCD 20x4 la línea 2 alternante gana un modo "St:LOCK +52ns" con P? cuando la
+  polaridad no está fijada. Ese aviso es el motivo: un usuario de pantalla
+  pequeña no tiene consola serie, así que sin él un LPOL sin fijar se vería como
+  un DISCIPLINED sano con el lazo retenido en silencio. Ambos bajo GPSDO_LTIC;
+  el TFT no se toca.
+- **`FA` / `FAD` / `FAL`: ventana de promediado conmutable del término de
+  amortiguación LTIC, por estado.** Las medidas de Dan Wiering contra rubidio
+  mostraron un ciclo límite de ~220 s en el algoritmo 10, mientras que el
+  algoritmo 7 en la misma referencia era limpio — lo que sitúa la causa en la
+  estructura de segundo orden del DPLL. DPLL y LOCK se ajustan por separado:
+  `FAD 10` solo en adquisición, `FAL 10` solo en estado estacionario, `FA 10`
+  ambos. Valores 10 / 100 / 1000 s; 100 por defecto reproduce el comportamiento
+  anterior bit a bit. Separar los estados permite que una medida de referencia
+  localice el ciclo. Ambas ventanas se guardan con `ES` (grupo LTIC).
+- **La barra de estado avisa cuando el lazo de fase LTIC no tiene polaridad.**
+  El lazo no dirige la fase hasta conocer el signo PWM→fase (`LPOL`); hasta
+  entonces retiene, y la fase puede quedar horas contra un tope. La barra añade
+  `LPOL?` (`P?` en la 320) tras el texto de estado cuando hay calibración pero
+  la polaridad sigue en cero.
+- **El tope superior del guardián de fuga sigue al detector, no un 3.28 V fijo.**
+  `railed_now` usa ahora el borde alto de la banda medida por LC
+  (`zero_offset + 0.55·span`), la misma frontera que valida la fase, en vez de un
+  3.28 V que un detector con Vsat más bajo nunca alcanza. El tope inferior sigue
+  en 0.02 V; una placa sin calibrar conserva el límite fijo anterior.
+- **`ES` puede guardar ahora un grupo a la vez.** `ES` solo escribe toda la
+  página; `ES <grupo>` escribe solo ese bloque y deja el resto en su valor
+  guardado. Grupos: `CORE`, `PID`, `TZ`, `LTIC`, `LCAL`, `CAL`, `MISC`. Guardar
+  un cambio de zona horaria ya no congela un PID a medio experimentar. Cada
+  guardado rellena el búfer desde flash, escribe la firma y su sección, y
+  vuelca; los bytes intactos conservan su valor. Solo un `ES` completo toma
+  instantánea del flash ring.
 ### Añadido
 - **Zonas horarias con horario de verano, en todo el mundo.** `TZ Adelaide`
   basta para que el reloj sea correcto, incluido su desfase de media hora y su
@@ -91,8 +134,11 @@ El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
   algo 10.
 - **Cada columna tiene una línea de alineación derecha (480×320).** La izquierda
   termina donde «hPa» en la fila BMP, la derecha donde «ns» en la fila de fase.
-  `Vct`, `% rH` y la corriente del INA se anclan ahora a esas líneas. Las líneas
-  se miden con `textWidth()` en el primer uso en vez de fijarse como constantes.
+  `Vct`, `% rH`, la presión BMP y la corriente del INA se anclan ahora a esas
+  líneas. La presión estaba en la línea solo por aritmética (es la cadena de la
+  que se mide align_L); una temperatura bajo cero la habría desplazado. Las
+  líneas se miden con `textWidth()` en el primer uso en vez de fijarse como
+  constantes.
 - **Las filas de sensores se agrupan por columna (480×320).** BMP y AHT ocupan
   la columna izquierda y los campos eléctricos la derecha: la fase arriba y los
   raíles justo debajo. `AHT` y `Vph`/`dph` intercambian su sitio.

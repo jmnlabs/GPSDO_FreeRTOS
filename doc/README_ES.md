@@ -61,7 +61,7 @@ estabilidad a corto plazo del OCXO.
         │              ┌───┴────────┐
      Sensores:         │ ILI9341 /  │  320x240
    ┌────┼────┐         │ ST7789     │
-  AHT  BMP  INA        │ ILI9488    │  480x320 (sin probar)
+  AHT  BMP  INA        │ ILI9488    │  480x320
                        └────────────┘
 ```
 
@@ -86,12 +86,19 @@ estabilidad a corto plazo del OCXO.
 
 **Pantallas** (opcionales):
 
-- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309)
-- **LCD 20×4** I2C (HD44780 + PCF8574T)
+- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309) — páginas rotativas; una
+  tercera página muestra el estado del lazo algo-10, la fase y el aviso LPOL?
+  cuando LTIC está activado
+- **LCD 20×4** I2C (HD44780 + PCF8574T) — la línea alternante añade un modo con
+  estado algo-10 / fase / LPOL? cuando LTIC está activado
 - **TM1637** (reloj de 4 o 6 dígitos)
 - **TFT 320×240** SPI (ILI9341 / ST7789, biblioteca TFT_eSPI)
-- **TFT 480×320** SPI (ILI9488, biblioteca TFT_eSPI) — *sin probar, todavía
-  sin panel disponible; el diseño 320×240 se escala automáticamente*
+- **TFT 480×320** SPI (ILI9488, biblioteca TFT_eSPI) — el panel principal en
+  uso actual, con disciplinado a LOCK confirmado en el hardware de varios
+  constructores. El diseño se dibuja de forma nativa a 480×320 (no solo
+  escalado): una rejilla de seis campos de sensores con unidades alineadas a la
+  derecha, la lectura de fase de algo-10 (Vph / dph con guardián de banda `ovf`
+  / qErr) y una barra de estado con SURVEY y el aviso de polaridad LPOL?
 - **HT16K33** reloj de 7 segmentos de 4 dígitos con dos puntos, dirección
   I2C 0x70 (HH:MM)
 
@@ -675,6 +682,37 @@ pico de la rampa justo tras el flanco PPS (véanse las notas de hardware TIC má
 abajo), cada lectura de fase se empareja con el qErr reportado para el pulso de
 ese mismo segundo.
 
+#### Ventana de promediado del término de amortiguación — `FA` / `FAD` / `FAL`
+
+El lazo del algoritmo 10 alimenta su término de frecuencia (amortiguación) desde
+un promedio de frecuencia móvil. Medidas contra referencia de rubidio (Dan
+Wiering, tinyPFA contra un S250) mostraron un ciclo límite de ~220 s en algo 10
+cuyo mecanismo es el retardo de grupo del promedio largo de 100 s cayendo cerca
+de la cuadratura — mientras que el algoritmo 7 en la misma referencia era limpio,
+lo que apunta a la estructura de segundo orden del DPLL y no al promedio en sí.
+
+`FA` selecciona qué ventana lee ese término, y los estados DPLL (adquisición) y
+LOCK (estacionario) pueden ajustarse de forma independiente:
+
+| Comando | Efecto |
+|---------|--------|
+| `FAD [n]` | Ventana solo para el estado **DPLL** |
+| `FAL [n]` | Ventana solo para el estado **LOCK** |
+| `FA [n]` | Ambos a la vez |
+| `FA` | Muestra ambas ventanas actuales |
+
+`n` es 10, 100 o 1000 segundos; **100 es el valor por defecto en cada uno y
+reproduce el comportamiento anterior bit a bit**. Solo se afecta el término de
+frecuencia — la detección de fuga, el autoaprendizaje, la máquina de estados y el
+phase PI se mantienen en el promedio suave de 100 s. Ambas ventanas se guardan
+con `ES` (grupo LTIC).
+
+La separación es tanto diagnóstico como solución: si `FAD` cambia el ciclo, vive
+en la adquisición; si solo `FAL`, en el estado estacionario; si ninguno lo toca,
+el ciclo está en la rama de fase, no en el término de frecuencia. Es
+deliberadamente un conmutador, no un nuevo valor por defecto — la ventana corta
+es una candidata, a validar contra una referencia antes de cambiar nada.
+
 ---
 
 ## Notas del hardware TIC — integrador de rampa con puerta (Kaashoek)
@@ -755,9 +793,20 @@ irrelevante para el ancho de banda del lazo: LOCK actualiza cada pocos segundos
 
 | Comando | Descripción |
 |---------|-------------|
-| `ES` | Guardar todos los parámetros en EEPROM |
+| `ES [grupo]` | Guardar en EEPROM — todo, o un solo grupo (ver abajo) |
 | `ER` | Recuperar parámetros desde EEPROM |
 | `EE` | Borrar EEPROM (restaurar valores por defecto) |
+
+`ES` por sí solo guarda toda la página de parámetros, como antes. `ES <grupo>`
+guarda solo un bloque y deja el resto de ajustes en su valor almacenado — así,
+confirmar un cambio de zona horaria no puede fijar de paso un PID con el que aún
+estabas experimentando. Los grupos son `CORE` (PWM, algoritmo activo), `PID`
+(ganancias algo 3-9, mezcla, paso NN), `TZ` (zona horaria), `LTIC` (ajuste del
+lazo algo-10, umbrales y las ventanas FA), `LCAL` (calibración de rampa algo-10),
+`CAL` (offsets de presión/altitud) y `MISC` (survey, warmup, splash, ring, saw,
+learn). `ES` con un nombre desconocido los lista en vez de adivinar. Cada guardado
+rellena el búfer de emulación desde flash, escribe la sección pedida y hace flush;
+los bytes intactos conservan sus valores en flash.
 
 ---
 

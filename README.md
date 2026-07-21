@@ -22,6 +22,8 @@ three languages:
 | **Manual** — hardware, wiring, algorithms, CLI, display | [README_EN](doc/README_EN.md) | [README_PL](doc/README_PL.md) | [README_ES](doc/README_ES.md) |
 | **Changelog** — what changed and why | [CHANGELOG_EN](doc/CHANGELOG_EN.md) | [CHANGELOG_PL](doc/CHANGELOG_PL.md) | [CHANGELOG_ES](doc/CHANGELOG_ES.md) |
 | **Flash ring bring-up** — first-time setup of the flash ring buffer | [BRINGUP_EN](doc/FLASH_RING_BRINGUP_EN.md) | [BRINGUP_PL](doc/FLASH_RING_BRINGUP_PL.md) | [BRINGUP_ES](doc/FLASH_RING_BRINGUP_ES.md) |
+| **Timezone generator** — regenerating `tz_table.h` from tzdata | [TZGEN_EN](doc/gen_tz_table_EN.md) | [TZGEN_PL](doc/gen_tz_table_PL.md) | [TZGEN_ES](doc/gen_tz_table_ES.md) |
+| **Tuner GUI** — live loop tuning & phase visualisation | [TUNER_EN](doc/gpsdo_tuner_EN.md) | [TUNER_PL](doc/gpsdo_tuner_PL.md) | [TUNER_ES](doc/gpsdo_tuner_ES.md) |
 
 New here? Start with the manual in your language — it covers the build, the
 wiring and the first calibration run.
@@ -85,8 +87,8 @@ gpsdo_state.cpp         shared state, EEPROM save/recall
 flash_ring.cpp          wear-levelled flash storage for live data
 live_store.cpp          what goes in the ring and when
 TM1637Display.cpp       vendored driver, patched for FreeRTOS
-tz_table.h              generated: 407 zones, 88 rules (see tools/)
-tools/gen_tz_table.py   regenerates tz_table.h from system tzdata
+tz_table.h              generated from tzdata (see tools/ and doc/gen_tz_table_*)
+tools/gen_tz_table.py   regenerates tz_table.h; cross-platform (Linux/macOS/Windows)
 doc/                    manual, changelog and bring-up guide (EN/PL/ES)
 ```
 

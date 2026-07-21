@@ -223,8 +223,30 @@ extern volatile uint16_t g_svin_acc_m;       /* current mean 3D accuracy [m] */
 /* run on the same core (STM32 single-core) and the values are updated      */
 /* atomically (int16_t on ARM is a single-instruction write).              */
 #ifdef GPSDO_LTIC
+  /* Frequency-averaging windows for the LTIC damping term, one per state (FAD =
+   * DPLL, FAL = LOCK; FA sets both at once). The damping freq_term reads these;
+   * everything else — escape detection, self-learning, state transitions, the
+   * phase PI — keeps avg100. Both default to 100 and reproduce the historical
+   * behaviour exactly. Split so a shorter window can be tried in acquisition or
+   * in steady state independently — the way to locate the measured ~220 s limit
+   * cycle (Dan Wiering's Rb reference), whose mechanism is the group delay of
+   * the long average landing near quadrature. Left switchable so it can be
+   * validated on real hardware against a reference before any default changes. */
+  extern uint16_t       g_freq_damp_win_dpll; /* FAD: 10/100/1000 (default 100) */
+  extern uint16_t       g_freq_damp_win_lock; /* FAL: 10/100/1000 (default 100) */
   extern volatile bool  g_ltic_must_read;   /* set by PPS capture ISR   */
   extern int16_t        g_ltic_adc_raw;     /* last ADC reading          */
   extern int16_t        g_ltic_adc_avg;     /* 10-sample moving average  */
   extern float          g_ltic_voltage;     /* averaged voltage (V)      */
+
+/* EEPROM save groups — see eeprom_save_group() in gpsdo_state.cpp.
+ * A selective ES writes only its group's bytes over a flash-filled buffer, so
+ * every other setting on the page is preserved. EE_GRP_ALL is the whole page. */
+typedef enum {
+    EE_GRP_ALL = 0, EE_GRP_CORE, EE_GRP_PID, EE_GRP_TZ,
+    EE_GRP_LTIC, EE_GRP_LCAL, EE_GRP_CAL, EE_GRP_MISC
+} EeGroup_t;
+
+void eeprom_save_group(EeGroup_t grp);
+
 #endif

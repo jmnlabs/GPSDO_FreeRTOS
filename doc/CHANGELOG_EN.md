@@ -18,6 +18,77 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
 
 ## [v0.95-rtos] — 2026-07-16
 
+- **New `tools/gpsdo_tuner.py` — a live tuning and phase-visualisation GUI.**
+  Rather than keep adjusting compile-time defaults to suit every builder's OCXO
+  and phase detector — a moving target across different EFC gains, detector Vsat
+  values and references — this puts the firmware's tuning commands behind direct
+  controls. It reads each parameter back from the device (LL / LP / FA), writes
+  live (the LTIC three-stage PID, the FA windows, the algo 3-9 PID and the
+  detector calibration), and commits with ES or reverts with ER. Live plots show
+  phase, detector voltage with Vsat band guides, and frequency error. Inspired by
+  lucido's GPSDO_log.py and credited as such; the tuning panels and phase
+  visualiser are new. Requires pyserial, pyqtgraph and PySide6.
+- **OLED and LCD now surface the algo-10 phase-loop state, including the LPOL?
+  warning.** The big TFT gained a lot of LTIC detail this session; the small
+  displays get the part that actually matters when something is wrong. On the
+  OLED a third page (C) joins the A/B rotation when GPSDO_LTIC is defined,
+  showing loop state, detector voltage, phase (with the same ovf band guard as
+  the TFT), sawtooth qErr and the FA windows. On the 20x4 LCD the alternating
+  line 2 gains a mode showing "St:LOCK +52ns" with P? in the last two columns
+  when polarity is unset. That polarity warning is the point: a small-display
+  user has no serial console, so without it an unset LPOL would show as a healthy
+  DISCIPLINED while the loop sat silently held — exactly the two-hour surprise a
+  second builder hit. Both are gated on GPSDO_LTIC and leave the TFT untouched.
+- **`FA` / `FAD` / `FAL`: per-state switchable averaging window for the LTIC
+  damping term.** Dan Wiering's rubidium-referenced measurements showed a ~220 s
+  limit cycle in algorithm 10 — a clean 1.7 µs phase sine dominating the ADEV —
+  while algorithm 7 on the same reference was clean, which pins the cause to the
+  DPLL's second-order structure rather than the shared avg100. The frequency
+  (damping) term now reads a switchable window, and DPLL and LOCK can be set
+  independently: `FAD 10` shortens it only during acquisition, `FAL 10` only in
+  steady state, `FA 10` both. Values are 10 / 100 / 1000 s; 100 is the default
+  in each and reproduces the previous behaviour bit-for-bit. Splitting the two
+  states is what lets a reference measurement locate the cycle — if `FAD`
+  changes it the cycle is in acquisition, if only `FAL` does it is in steady
+  state, if neither it is in the phase branch, not the frequency term. Only that
+  term is affected; escape detection, self-learning, the state machine and the
+  phase PI all stay on avg100. Both windows saved with `ES` (LTIC group).
+- **The status bar warns when the LTIC phase loop has no polarity set.** The
+  three-stage loop will not steer the phase until its PWM→phase sign is known
+  (`LPOL`), and until then it holds: the frequency locks but the phase can sit
+  parked on a rail for hours. A two-hour capture from a second builder showed
+  exactly that — a steady display, a correct 10 MHz frequency, and a loop
+  quietly stuck, the only symptom a serial reminder printed every ten seconds
+  that nobody was watching. The bar now appends `LPOL?` (`P?` on the 320) after
+  the status text whenever a calibration exists but the polarity is still zero,
+  so the one missing setup step is visible without a serial console.
+- **The runaway guard's upper rail follows the detector, not a fixed 3.28 V.**
+  `railed_now` decides the phase is against a stop — the condition the escape and
+  backstop checks need — and its high bound was a hard 3.28 V, which assumes the
+  ramp saturates near the 3.3 V ADC rail. A detector whose Vsat sits lower
+  plateaus well below that, so the loop could be fully saturated while the guard
+  read healthy and never armed. It now uses the high edge of the band LC
+  measured (`zero_offset + 0.55·span`), the same bound `ltic_phase_error_ns()`
+  already validates phase against, so "railed" and "phase invalid" agree. The
+  low rail stays 0.02 V, and an uncalibrated board keeps the old fixed bound.
+- **`ES` can now save one group at a time.** `ES` on its own still writes the
+  whole page; `ES <group>` writes only that block and leaves every other setting
+  on the page at its stored value. The groups are `CORE` (PWM, active
+  algorithm), `PID` (algo 3-9 gains, blend, NN step), `TZ` (timezone), `LTIC`
+  (algo 10 loop tuning and thresholds), `LCAL` (algo 10 ramp calibration),
+  `CAL` (pressure/altitude offsets) and `MISC` (survey, warmup, splash, ring,
+  saw, learn). `ES XYZ` with an unknown name lists them rather than guessing.
+
+  The point is that a full `ES` commits whatever happens to be live — so saving
+  a timezone change after an afternoon of PID experiments would have frozen the
+  experiments too. A grouped save touches only what you name.
+
+  Mechanically each save now fills the emulation buffer from flash, writes the
+  signature plus the requested section, and flushes; the untouched bytes keep
+  their on-flash values. The signature is written on every path. Boot now primes
+  that buffer even when the page is blank, so a first-ever grouped save cannot
+  flush uninitialised bytes over the groups it was not asked to write. A grouped
+  save does not snapshot the flash ring — only a full `ES` does, as before.
 ### Added
 - **Timezones with DST, anywhere in the world.** `TZ Adelaide` is now enough to
   get the clock right, including its half-hour offset and its
@@ -132,11 +203,15 @@ The version suffix `-rtos` marks the FreeRTOS port lineage.
   the number cannot be checked after the fact.
 - **Each column has one right-hand alignment line (480×320).** The left column
   ends where "hPa" does on the BMP row, the right where "ns" does on the phase
-  row — those being the widest, most stable strings in each. `Vct`, `% rH` and
-  the INA current are now anchored to those lines instead of each stopping
-  wherever its own text ran out, which left the column edges as three near-misses
-  a few pixels apart. `PWM:` and `INA:` keep their labels at the column's left
-  edge, so both rows had to become two fields rather than one string.
+  row — those being the widest, most stable strings in each. `Vct`, `% rH`, the
+  BMP pressure and the INA current are now anchored to those lines instead of
+  each stopping wherever its own text ran out, which left the column edges as
+  several near-misses a few pixels apart. `PWM:`, `INA:` and `BMP:` keep their
+  labels at the column's left edge, so those rows had to become two fields rather
+  than one string. The pressure was a quiet case: being the string align_L is
+  measured from, it sat on the line by arithmetic while its width happened to
+  match the sample — but a sub-zero temperature adds a sign and a character and
+  would have carried the unit off the line with it.
 
   The lines are measured with `textWidth()` on first use rather than written in
   as constants: every value in these rows is fixed-width, so each edge is a

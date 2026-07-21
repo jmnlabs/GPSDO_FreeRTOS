@@ -18,6 +18,78 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
 
 ## [v0.95-rtos] — 2026-07-16
 
+- **Nowe `tools/gpsdo_tuner.py` — GUI do strojenia na żywo i wizualizacji fazy.**
+  Zamiast ciągle dostrajać domyślne wartości pod OCXO i detektor każdego
+  konstruktora — ruchomy cel przy różnych wzmocnieniach EFC, Vsat detektora i
+  wzorcach — to narzędzie daje bezpośrednie kontrolki dla komend strojenia
+  firmware. Odczytuje każdy parametr z urządzenia (LL / LP / FA), zapisuje na
+  żywo (trzystopniowy PID LTIC, okna FA, PID algo 3-9 i kalibrację detektora),
+  zatwierdza przez ES lub cofa przez ER. Wykresy na żywo pokazują fazę, napięcie
+  detektora z prowadnicami pasma Vsat i błąd częstotliwości. Zainspirowane
+  GPSDO_log.py lucido i tak skredytowane; panele strojenia i wizualizacja fazy są
+  nowe. Wymaga pyserial, pyqtgraph i PySide6.
+- **OLED i LCD pokazują teraz stan pętli fazowej algo-10, w tym ostrzeżenie
+  LPOL?.** Duży TFT zyskał w tej sesji dużo szczegółów LTIC; małe wyświetlacze
+  dostają tę część, która naprawdę liczy się, gdy coś jest nie tak. Na OLED
+  trzecia strona (C) dołącza do rotacji A/B, gdy zdefiniowano GPSDO_LTIC —
+  pokazuje stan pętli, napięcie detektora, fazę (z tym samym strażnikiem pasma
+  ovf co TFT), qErr sawtootha i okna FA. Na LCD 20x4 przemienny wiersz 2 zyskuje
+  tryb pokazujący "St:LOCK +52ns" z P? w dwóch ostatnich kolumnach, gdy
+  polaryzacja jest nieustawiona. To ostrzeżenie o polaryzacji jest sednem:
+  użytkownik małego wyświetlacza nie ma konsoli serial, więc bez niego
+  nieustawione LPOL pokazałoby się jako zdrowe DISCIPLINED, podczas gdy pętla
+  stoi cicho zablokowana — dokładnie ta dwugodzinna niespodzianka, którą trafił
+  inny konstruktor. Oba bramkowane GPSDO_LTIC, TFT nietknięty.
+- **`FA` / `FAD` / `FAL`: przełączalne okno uśredniania członu tłumiącego LTIC,
+  osobno na stan.** Pomiary Dana Wieringa względem rubidu pokazały cykl graniczny
+  ~220 s w algorytmie 10, podczas gdy algorytm 7 na tym samym wzorcu był czysty —
+  co wskazuje na strukturę drugiego rzędu DPLL, nie na wspólne avg100. Człon
+  częstotliwościowy czyta teraz przełączalne okno, a DPLL i LOCK można ustawiać
+  niezależnie: `FAD 10` skraca je tylko w akwizycji, `FAL 10` tylko w stanie
+  ustalonym, `FA 10` w obu. Wartości 10 / 100 / 1000 s; 100 to domyślne w każdym
+  i odtwarza poprzednie zachowanie co do bitu. Rozdzielenie stanów pozwala
+  pomiarowi względem wzorca zlokalizować cykl — jeśli zmienia go `FAD`, jest w
+  akwizycji; jeśli tylko `FAL`, w stanie ustalonym; jeśli żadne, w gałęzi
+  fazowej, nie w członie częstotliwości. Rusza tylko ten człon; detekcja
+  ucieczki, self-learning, maszyna stanów i phase PI zostają na avg100. Oba okna
+  zapisywane przez `ES` (grupa LTIC).
+- **Belka statusu ostrzega, gdy pętla fazowa LTIC nie ma ustawionej
+  polaryzacji.** Trójstopniowa pętla nie steruje fazą, dopóki nie zna znaku
+  PWM→faza (`LPOL`), a do tego czasu trzyma: częstotliwość się zapina, ale faza
+  potrafi godzinami stać na szynie. Dwugodzinny zrzut od innego konstruktora
+  pokazał dokładnie to — spokojny wyświetlacz, poprawne 10 MHz i cicho
+  zablokowaną pętlę, której jedynym objawem było przypomnienie na serialu co
+  dziesięć sekund, którego nikt nie oglądał. Belka dopisuje teraz `LPOL?` (`P?`
+  na 320) po napisie statusu, ilekroć kalibracja istnieje, a polaryzacja jest
+  wciąż zerowa — więc jedyny brakujący krok konfiguracji widać bez konsoli.
+- **Górna szyna strażnika ucieczki podąża za detektorem, nie za stałym 3.28 V.**
+  `railed_now` rozstrzyga, że faza stoi na ograniczniku — czego potrzebują
+  kontrole ucieczki — a jego górna granica była twardym 3.28 V, co zakłada
+  nasycenie rampy przy szynie ADC 3.3 V. Detektor o niższym Vsat nasyca się
+  znacznie poniżej, więc pętla mogła być w pełni nasycona, a strażnik czytał
+  „zdrowo" i nigdy się nie uzbrajał. Teraz używa górnej krawędzi pasma
+  zmierzonego przez LC (`zero_offset + 0.55·span`), tej samej granicy, względem
+  której `ltic_phase_error_ns()` już waliduje fazę — więc „na szynie" i „faza
+  nieważna" są zgodne. Dolna szyna zostaje 0.02 V, a płytka bez kalibracji
+  zachowuje starą stałą granicę.
+- **`ES` może teraz zapisać jedną grupę naraz.** Samo `ES` nadal zapisuje całą
+  stronę; `ES <grupa>` zapisuje tylko ten blok i zostawia każde inne ustawienie
+  na stronie w wartości zapisanej. Grupy: `CORE` (PWM, aktywny algorytm), `PID`
+  (nastawy algo 3-9, blend, krok NN), `TZ` (strefa), `LTIC` (strojenie pętli
+  algo 10 i progi), `LCAL` (kalibracja rampy algo 10), `CAL` (offsety
+  ciśnienia/wysokości) i `MISC` (survey, warmup, splash, ring, saw, learn).
+  `ES XYZ` z nieznaną nazwą wypisuje listę zamiast zgadywać.
+
+  Sedno: pełne `ES` utrwala to, co akurat jest w RAM — więc zapis zmiany strefy
+  po popołudniu eksperymentów z PID zamroziłby też te eksperymenty. Zapis
+  grupowy dotyka tylko tego, co nazwiesz.
+
+  Mechanicznie każdy zapis wypełnia teraz bufor emulacji z flasha, zapisuje
+  sygnaturę plus wybraną sekcję i robi flush; nietknięte bajty zachowują
+  wartości z flasha. Sygnatura zapisywana na każdej ścieżce. Boot wypełnia teraz
+  ten bufor także przy pustej stronie, więc pierwszy zapis grupowy nie odłoży
+  niezainicjalizowanych bajtów na grupy, których nie miał ruszać. Zapis grupowy
+  nie robi migawki flash ring — robi to tylko pełne `ES`, jak dotąd.
 ### Dodane
 - **Strefy czasowe z DST, w całym świecie.** `TZ Adelaide` wystarczy, żeby
   zegar był poprawny — łącznie z offsetem pół godziny i DST półkuli
@@ -130,12 +202,15 @@ Sufiks `-rtos` oznacza linię portu na FreeRTOS.
   liczby nie da się potem sprawdzić.
 - **Każda kolumna ma jedną linię wyrównania z prawej (480×320).** Lewa kończy
   się tam, gdzie „hPa" w wierszu BMP, prawa tam, gdzie „ns" w wierszu fazy — bo
-  to najszersze i najstabilniejsze stringi w każdej z nich. `Vct`, `% rH` i prąd
-  z INA są teraz zakotwiczone do tych linii, zamiast każdy kończyć się tam, gdzie
-  akurat wyczerpie się jego tekst — przez co krawędzie kolumn były trzema
-  rozjazdami po kilka pikseli. `PWM:` i `INA:` zachowują etykiety przy lewej
-  krawędzi kolumny, więc oba wiersze musiały stać się dwoma polami zamiast
-  jednym stringiem.
+  to najszersze i najstabilniejsze stringi w każdej z nich. `Vct`, `% rH`,
+  ciśnienie BMP i prąd z INA są teraz zakotwiczone do tych linii, zamiast każdy
+  kończyć się tam, gdzie akurat wyczerpie się jego tekst — przez co krawędzie
+  kolumn były kilkoma rozjazdami po kilka pikseli. `PWM:`, `INA:` i `BMP:`
+  zachowują etykiety przy lewej krawędzi kolumny, więc te wiersze musiały stać
+  się dwoma polami zamiast jednym stringiem. Ciśnienie było cichym przypadkiem:
+  będąc stringiem, z którego mierzone jest align_L, stało na linii dzięki
+  arytmetyce, dopóki jego szerokość zgadzała się z próbką — ale ujemna
+  temperatura dodaje znak i znak, i zabrałaby jednostkę z linii ze sobą.
 
   Linie są mierzone przez `textWidth()` przy pierwszym użyciu, a nie wpisane jako
   stałe: każda wartość w tych wierszach ma stałą szerokość, więc każda krawędź

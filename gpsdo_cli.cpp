@@ -134,8 +134,9 @@ extern bool    g_show_local_time;
 extern bool    g_report_paused;
 extern bool    g_svin_enabled;
 
-/* EEPROM helpers declared in gpsdo_state.cpp */
-extern void eeprom_save(void);
+/* EEPROM helpers declared in gpsdo_state.cpp (EeGroup_t is in gpsdo_state.h). */
+extern void eeprom_save(void);                 /* == eeprom_save_group(EE_GRP_ALL) */
+extern void eeprom_save_group(EeGroup_t grp);
 extern void eeprom_recall(void);
 extern void eeprom_erase(void);
 
@@ -181,12 +182,13 @@ static void print_help(void)
     cli_putln("  LRN 0|1|R     - self-learning drift/damping (R=reset, ES saves)");
     cli_putln("  LCV [V]     ACQ centring target (0=range mid)");
     cli_putln("  AP          Arm picDIV");
-    cli_putln("  ES          EEPROM Save");
+    cli_putln("  ES [group]  EEPROM Save (all, or one: CORE PID TZ LTIC LCAL CAL MISC)");
     cli_putln("  ER          EEPROM Recall");
     cli_putln("  EE          EEPROM Erase");
     cli_putln("  EW          Flash wear stats (ring buffer erase cycles)");
     cli_putln("  FR 0|1      Flash ring buffer on/off (saved with ES)");
-    cli_putln("  SAW 0|1     Sawtooth qErr correction on/off (algo 10; saved with ES)");
+    cli_putln("  SAW 0|1     Sawtooth qErr correction on/off (saved with ES)");
+    cli_putln("  FA/FAD/FAL [n]  Damping avg window 10/100/1000s: both/DPLL/LOCK (ES saves)");
     cli_putln("  ACG g [cap] ACQ centring drive: LSB/V and max step (algo 10)");
     cli_putln("  RB          Reboot (warm, keep EEPROM)");
     cli_putln("  CR YES      Cold Restart (erase EEPROM, factory)");
@@ -235,7 +237,9 @@ static void print_help_tz(void)
     cli_putln("                   the EU DST rule. Europe only — elsewhere it");
     cli_putln("                   gives whole hours and no DST.");
     cli_putln("  LT 0|1           show UTC or local time");
-    cli_putln("  ES               save the setting to EEPROM");
+    cli_putln("  ES [group]       save to EEPROM (bare = everything; a group = only");
+    cli_putln("                   that block, others on the page kept unchanged:");
+    cli_putln("                   CORE PID TZ LTIC LCAL CAL MISC)");
 }
 
 /* -----------------------------------------------------------------------
@@ -933,13 +937,40 @@ static void dispatch(char *line)
 
     /* ---- EEPROM ---- */
     if (cli_ieq(verb, "ES")) {
+        /* Bare ES saves the whole page, as it always has. ES <group> saves only
+         * that group, leaving every other setting on the page at its stored
+         * value — so committing a timezone change cannot also stamp in a PID
+         * you were still experimenting with. */
+        EeGroup_t grp = EE_GRP_ALL;
+        if (arg != NULL) {
+            if      (cli_ieq(arg, "CORE")) grp = EE_GRP_CORE;
+            else if (cli_ieq(arg, "PID"))  grp = EE_GRP_PID;
+            else if (cli_ieq(arg, "TZ"))   grp = EE_GRP_TZ;
+            else if (cli_ieq(arg, "LTIC")) grp = EE_GRP_LTIC;
+            else if (cli_ieq(arg, "LCAL")) grp = EE_GRP_LCAL;
+            else if (cli_ieq(arg, "CAL"))  grp = EE_GRP_CAL;
+            else if (cli_ieq(arg, "MISC")) grp = EE_GRP_MISC;
+            else {
+                cli_putln("ES: unknown group. Use one of:");
+                cli_putln("  CORE  PWM + active algorithm");
+                cli_putln("  PID   algo 3-9 gains, blend, NN step");
+                cli_putln("  TZ    timezone (mode, offset, rule)");
+                cli_putln("  LTIC  algo 10 loop tuning + thresholds");
+                cli_putln("  LCAL  algo 10 ramp calibration (LC/LCV)");
+                cli_putln("  CAL   pressure / altitude offsets");
+                cli_putln("  MISC  survey, warmup, splash, ring, saw, learn");
+                cli_putln("  (ES with no group saves everything)");
+                return;
+            }
+        }
         cli_putln("Saving EEPROM...");
-        eeprom_save();
-        /* also snapshot the live data to the flash ring, so the ring is
-         * never older than the settings the user just committed (a stale
-         * ring slot restoring an old PWM after a deliberate ES would be
-         * confusing; costs one of 4095 slots) */
-        live_store_request_save();
+        eeprom_save_group(grp);
+        /* Snapshot live data to the flash ring only on a full save. A selective
+         * ES is a deliberately narrow act — the user asked to touch one group —
+         * so it must not drag a fresh ring slot in behind it; the ring keeps its
+         * own cadence. A stale ring slot restoring an old PWM after a full ES
+         * would be confusing, hence the snapshot there (costs one of 4095). */
+        if (grp == EE_GRP_ALL) live_store_request_save();
         cli_putln("Done.");
         return;
     }
@@ -995,6 +1026,36 @@ static void dispatch(char *line)
         return;
     }
 
+    if (cli_ieq(verb, "FA") || cli_ieq(verb, "FAD") || cli_ieq(verb, "FAL")) {
+        /* Frequency-averaging window for the LTIC damping term, per state. A
+         * measured ~220 s limit cycle (Dan Wiering's Rb reference, algo 10)
+         * traces to the group delay of the long avg100 landing near quadrature;
+         * a shorter window is the candidate fix. Split by state so it can be
+         * tried in acquisition (FAD) or steady state (FAL) independently — the
+         * way to find which one the cycle lives in. FA sets both at once. 100 is
+         * the historical value in each and changes nothing. Only the LTIC
+         * frequency term is affected; escape detection, self-learning, the
+         * state machine and the phase PI all stay on avg100. */
+        bool set_dpll = cli_ieq(verb, "FA") || cli_ieq(verb, "FAD");
+        bool set_lock = cli_ieq(verb, "FA") || cli_ieq(verb, "FAL");
+        if (arg == NULL) {
+            cli_puts("FA windows: DPLL="); cli_putint((int)g_freq_damp_win_dpll);
+            cli_puts("s LOCK=");           cli_putint((int)g_freq_damp_win_lock);
+            cli_putln("s  (FA/FAD/FAL n; n=10/100/1000; 100=default)");
+        } else {
+            int v = atoi(arg);
+            if (v == 10 || v == 100 || v == 1000) {
+                if (set_dpll) g_freq_damp_win_dpll = (uint16_t)v;
+                if (set_lock) g_freq_damp_win_lock = (uint16_t)v;
+                cli_puts(set_dpll && set_lock ? "FA (both) = "
+                       : set_dpll             ? "FAD (DPLL) = " : "FAL (LOCK) = ");
+                cli_putint(v); cli_putln(" s (ES to save)");
+            } else {
+                cli_putln("FA: 10, 100 or 1000 (no arg = status)");
+            }
+        }
+        return;
+    }
     if (cli_ieq(verb, "SAW")) {
         /* sawtooth (qErr) correction on/off + status. Subtracts the receiver
          * quantization error (UBX-TIM-TP) from the TIC phase. */

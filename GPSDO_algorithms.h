@@ -29,8 +29,13 @@ typedef struct {
     double I_LIMIT;
 } PidParams_t;
 
-/* g_pid[3..7] hold the tunable coefficients for algorithms 3-7.
- * Indices 0-2, 8, 9 are unused placeholders.
+/* g_pid[3..7] hold Kp/Ki/Kd/I_LIMIT for algorithms 3-7. Indices 8 and 9 are NOT
+ * spare: algorithms 8 (hybrid) and 9 (NN) read their I_LIMIT from here, and the
+ * IL command accordingly accepts 3-9 where KP/KI/KD accept only 3-7. What those
+ * two ignore is Kp/Ki/Kd — the hybrid takes its PID from g_pid[6] and g_pid[7],
+ * the NN uses fixed weights — so CT leaves those fields alone on purpose.
+ * Indices 0-2 really are unused: algorithms 0-2 are open-loop (primitive,
+ * forced drift, random walk) and have nothing to tune.
  * Algorithms read these at runtime; CLI commands KP/KI/KD/IL modify them. */
 extern PidParams_t g_pid[10];
 
@@ -48,10 +53,8 @@ extern double g_nn_max_step;       /* LSB — max PWM delta per step, default 20
  * frequency+phase quickly with a wide-band PID, LOCK then updates slowly
  * (every lock_interval_s) with a narrow-band PID to approach minimum error.
  *
- * NOTE: the loop itself is not implemented yet (planned "phase A"); these
- * parameters, their CLI commands and EEPROM persistence exist now so the
- * configuration survives reboots and is ready when the loop is written.
- * Calibrate ns_per_volt / zero_offset / range_ns on real hardware first. */
+ * Calibrate ns_per_volt / zero_offset / range_ns on real hardware (LC) before
+ * selecting the algorithm: without them the phase reading has no scale. */
 typedef struct {
     /* TIC calibration */
     float ns_per_volt;       /* voltage→time slope [ns/V] (0 = uncalibrated) */

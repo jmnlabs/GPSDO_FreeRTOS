@@ -59,7 +59,7 @@ w długim okresie, przy zachowaniu krótkookresowej stabilności OCXO.
         │              ┌───┴────────┐
      Czujniki:         │ ILI9341 /  │  320x240
    ┌────┼────┐         │ ST7789     │
-  AHT  BMP  INA        │ ILI9488    │  480x320 (nietestowany)
+  AHT  BMP  INA        │ ILI9488    │  480x320
                        └────────────┘            eksperymentalny)
                        * wzajemnie wykluczający się z kolorowymi TFT
 ```
@@ -85,12 +85,18 @@ w długim okresie, przy zachowaniu krótkookresowej stabilności OCXO.
 
 **Wyświetlacze** (opcjonalne):
 
-- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309)
-- **LCD 20×4** I2C (HD44780 + PCF8574T)
+- **OLED 128×64** I2C (SH1106 / SSD1306 / SSD1309) — strony rotacyjne; trzecia
+  strona pokazuje stan pętli algo-10, fazę i ostrzeżenie LPOL?, gdy włączono LTIC
+- **LCD 20×4** I2C (HD44780 + PCF8574T) — przemienny wiersz dodaje tryb ze stanem
+  algo-10 / fazą / LPOL?, gdy włączono LTIC
 - **TM1637** (4- lub 6-cyfrowy wyświetlacz zegarowy)
 - **TFT 320×240** SPI (ILI9341 / ST7789, biblioteka TFT_eSPI)
-- **TFT 480×320** SPI (ILI9488, biblioteka TFT_eSPI) — *nietestowany, brak
-  panelu do testów; układ 320×240 jest automatycznie skalowany*
+- **TFT 480×320** SPI (ILI9488, biblioteka TFT_eSPI) — główny panel w bieżącym
+  użyciu, potwierdzone dyscyplinowanie do LOCK na sprzęcie kilku konstruktorów.
+  Układ rysowany natywnie w 480×320 (nie tylko skalowany w górę): siatka sześciu
+  pól czujników z jednostkami dosuniętymi do prawej, odczyt fazy algo-10 (Vph /
+  dph ze strażnikiem pasma `ovf` / qErr) i belka statusu z SURVEY oraz
+  ostrzeżeniem polaryzacji LPOL?
 - **HT16K33** 4-cyfrowy zegar 7-seg z dwukropkiem, I2C 0x70 (HH:MM)
 
 OLED i LCD mogą działać jednocześnie (różne adresy I2C).
@@ -664,10 +670,41 @@ nie jest stosowana.
 
 `SAW` bez argumentu pokazuje stan i qErr na żywo; `SAW 1`/`SAW 0` przełącza
 (zapis przez `ES`, domyślnie wyłączone). Gdy włączone, linia telemetrii
-`Learn:` pokazuje `qErr=…ns` dla algorytmu 10, a wartość jest odejmowana od
-każdego odczytu fazy TIC. Ponieważ Vphase jest próbkowane na szczycie rampy
+`Learn:` pokazuje `qErr=…ns` niezależnie od pracującego algorytmu, a wartość
+jest odejmowana od każdego odczytu fazy TIC — zarówno tego w pętli, jak i tego
+na wyświetlaczu. Ponieważ Vphase jest próbkowane na szczycie rampy
 tuż po zboczu PPS (patrz uwagi o sprzęcie TIC niżej), każdy odczyt fazy paruje
 się z qErr zgłoszonym dla impulsu tej samej sekundy.
+
+#### Okno uśredniania członu tłumiącego — `FA` / `FAD` / `FAL`
+
+Pętla algorytmu 10 karmi swój człon częstotliwościowy (tłumiący) z bieżącej
+średniej częstotliwości. Pomiary względem wzorca rubidowego (Dan Wiering,
+tinyPFA względem S250) pokazały cykl graniczny ~220 s w algo 10, którego
+mechanizmem jest opóźnienie grupowe długiej średniej 100 s wpadające w pobliże
+kwadratury — podczas gdy algorytm 7 na tym samym wzorcu był czysty, co wskazuje
+na strukturę drugiego rzędu DPLL, nie na samą średnią.
+
+`FA` wybiera, z którego okna czyta ten człon tłumiący, a stany DPLL (akwizycja)
+i LOCK (ustalony) można ustawiać niezależnie:
+
+| Komenda | Efekt |
+|---------|-------|
+| `FAD [n]` | Okno tylko dla stanu **DPLL** |
+| `FAL [n]` | Okno tylko dla stanu **LOCK** |
+| `FA [n]` | Oba naraz |
+| `FA` | Pokaż oba bieżące okna |
+
+`n` to 10, 100 lub 1000 sekund; **100 to domyślne w każdym i odtwarza poprzednie
+zachowanie co do bitu**. Rusza tylko człon częstotliwości — detekcja ucieczki,
+self-learning, maszyna stanów i phase PI zostają na gładkiej średniej 100 s. Oba
+okna zapisywane przez `ES` (grupa LTIC).
+
+Rozdzielenie jest diagnozą tak samo jak poprawką: jeśli `FAD` zmienia cykl, żyje
+on w akwizycji; jeśli tylko `FAL`, w stanie ustalonym; jeśli żadne go nie rusza,
+cykl jest w gałęzi fazowej, nie w członie częstotliwości. To celowo przełącznik,
+nie nowe domyślne — krótsze okno to kandydat, do zweryfikowania względem wzorca,
+zanim cokolwiek zmieni się domyślnie.
 
 ---
 
@@ -746,9 +783,19 @@ więc stała czasowa detektora jest o rzędy wielkości z dala od pętli.
 
 | Komenda | Opis |
 |---------|------|
-| `ES` | Zapisz wszystkie parametry do EEPROM |
+| `ES [grupa]` | Zapis do EEPROM — wszystko, albo jedna grupa (patrz niżej) |
 | `ER` | Odczytaj parametry z EEPROM |
 | `EE` | Wymaż EEPROM (przywróć domyślne) |
+
+Samo `ES` zapisuje całą stronę parametrów, jak dotąd. `ES <grupa>` zapisuje tylko
+jeden blok i zostawia każde inne ustawienie na stronie w wartości zapisanej — więc
+zapis zmiany strefy czasowej nie utrwali przy okazji PID-a, którym się jeszcze
+bawiłeś. Grupy: `CORE` (PWM, aktywny algorytm), `PID` (nastawy algo 3-9, blend,
+krok NN), `TZ` (strefa), `LTIC` (strojenie pętli algo-10, progi i okna FA), `LCAL`
+(kalibracja rampy algo-10), `CAL` (offsety ciśnienia/wysokości) i `MISC` (survey,
+warmup, splash, ring, saw, learn). `ES` z nieznaną nazwą wypisuje listę zamiast
+zgadywać. Każdy zapis wypełnia bufor emulacji z flasha, zapisuje wybraną sekcję i
+robi flush; nietknięte bajty zachowują wartości z flasha.
 
 ---
 

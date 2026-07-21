@@ -37,9 +37,17 @@ Full docs: doc/gpsdo_tuner_EN.md (also PL, ES).
 """
 
 import sys
+import os
 import re
 import time
 from collections import deque, defaultdict
+
+# Force pyqtgraph to use the same Qt binding as the rest of this file (PySide6).
+# pyqtgraph auto-detects a binding, and if PyQt5/PyQt6 is also installed it may
+# pick that instead — then its PlotWidget is a PyQt widget that PySide6's layouts
+# reject ("addWidget called with wrong argument types"). Pinning the env var
+# before pyqtgraph is imported keeps everything on one Qt.
+os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
 try:
     import serial
@@ -49,7 +57,6 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import pyqtgraph as pg
     from PySide6.QtCore import Qt, QThread, Signal, QTimer
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -58,6 +65,7 @@ try:
         QMessageBox,
     )
     from PySide6.QtGui import QFont
+    import pyqtgraph as pg
 except ImportError:
     print("PySide6 / pyqtgraph not found — run: pip install pyqtgraph PySide6")
     sys.exit(1)

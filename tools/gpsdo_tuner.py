@@ -57,7 +57,7 @@ try:
         QDoubleSpinBox, QSpinBox, QTabWidget, QGroupBox, QSplitter, QCheckBox,
         QMessageBox,
     )
-    from PySide6.QtGui import QFont
+    from PySide6.QtGui import QFont, QPen, QColor
 except ImportError:
     print("PySide6 / pyqtgraph not found — run: pip install pyqtgraph PySide6")
     sys.exit(1)
@@ -364,9 +364,24 @@ class GpsdoTuner(QMainWindow):
         # Vphase band guides: anchor and the 15-85% Vsat window get drawn once
         # calibration is known (updated from LL). They make it obvious at a
         # glance when the detector is drifting toward a rail.
-        self.vph_anchor = pg.InfiniteLine(angle=0, pen=pg.mkPen("#888", style=Qt.PenStyle.DashLine))
-        self.vph_lo = pg.InfiniteLine(angle=0, pen=pg.mkPen("#c33", style=Qt.PenStyle.DotLine))
-        self.vph_hi = pg.InfiniteLine(angle=0, pen=pg.mkPen("#c33", style=Qt.PenStyle.DotLine))
+        # Guide-line pens. Two things matter here, both learned the hard way:
+        #  - setCosmetic(True) makes the width a pixel width, not a data-unit
+        #    width; without it a width-1 pen on the ~0-3 V axis draws an ~80 px
+        #    thick band instead of a hairline.
+        #  - setting the style on the QPen directly (not via mkPen's style=)
+        #    keeps it working across pyqtgraph versions.
+        def _guide_pen(color, style):
+            p = QPen(QColor(color))
+            p.setStyle(style)
+            p.setCosmetic(True)
+            p.setWidth(1)
+            return p
+        self.vph_anchor = pg.InfiniteLine(
+            angle=0, pen=_guide_pen("#888", Qt.PenStyle.DashLine))
+        self.vph_lo = pg.InfiniteLine(
+            angle=0, pen=_guide_pen("#c33", Qt.PenStyle.DotLine))
+        self.vph_hi = pg.InfiniteLine(
+            angle=0, pen=_guide_pen("#c33", Qt.PenStyle.DotLine))
         for ln in (self.vph_anchor, self.vph_lo, self.vph_hi):
             self.plot_vph.addItem(ln)
 

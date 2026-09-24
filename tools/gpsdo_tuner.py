@@ -31,10 +31,12 @@ visualiser are new here.
   Algorithm 12 (multi-level) ... Alan Cashin (MIS42N on EEVblog), whose Budget
                                  GPSDO is also the origin of the zero-crossing
                                  correction, the dithered PWM and the CS
-                                 self-assessment idea. The Multi-level (algo 12)
+                                 self-assessment idea. The LTIC-MLA (algo 12)
                                  tab drives his design, so his name belongs on it.
   Algorithm 13 (Kalman filter) . J. M. Niewiński — original to this project
-  Measurements, algos 10 & 11 .. Dan Wiering (rubidium reference)
+  Measurements, algos 10 & 11 .. Dan Wiering (rubidium reference) — invaluable
+                                 help, persistence and patience through the
+                                 algorithm testing and measurement campaigns
   This tuning tool ............. built for the jmnlabs GPSDO project
 
 Dependencies:  pip install pyserial pyqtgraph PySide6
@@ -55,7 +57,7 @@ import math
 # against newer firmware silently mis-parses telemetry and writes commands the
 # board no longer understands, which is a confusing way to lose an evening.
 # Bump this whenever the firmware version changes, even if nothing here moved.
-TOOL_VERSION = "1.06"
+TOOL_VERSION = "1.07"
 from collections import deque, defaultdict
 from array import array
 from bisect import bisect_left
@@ -170,10 +172,23 @@ PLOT_SERIES = {
              ("Vctl",   "Control voltage Vctl (V)",               "#2277cc")],
     # Algorithm 12 does not use the self-learning feed-forward, and its phase
     # comes straight from the detector rather than through a loop filter, so
-    # neither pair above describes it. The top pane shows the phase it is
-    # actually accumulating.
-    "mlacc": [("ph",     "Phase error (ns, LTIC detector)",        "#22aa44"),
+    # neither pair above describes it.
+    #
+    # The top pane used to show `ph`, which looks like the right field and is
+    # not: the firmware prints it as a whole number of nanoseconds
+    # (g_last_offset is an int16 cast of the reading), so the pane was the
+    # detector quantised to 1 ns and labelled "phase error". `dph` is the same
+    # measurement with its decimal, which is what every other family's top pane
+    # shows and what makes this one comparable with them. The ESTIMATE goes
+    # over it as an overlay, exactly as on algorithm 13 - see PLOT_OVERLAY.
+    "mlacc": [("dph",    "Phase  dph (ns) - measured, accumulator estimate over it", "#22aa44"),
               ("Vctl",   "Control voltage Vctl (V)",               "#2277cc")],
+    # Algorithm 11 shared the "ltic" pair with algorithm 10 and therefore drew
+    # only the reading, although it is the one LTIC loop that maintains a
+    # filtered phase of its own (s_phase_filt, printed as phase=). Same panes as
+    # algorithm 10; the difference is the overlay below.
+    "lars": [("dph",    "Phase  dph (ns) - measured, filtered phase over it", "#22aa44"),
+             ("Vphase", "Detector Vphase (V) - ramp position",     "#2277cc")],
     # Algorithm 13 fell through to "pid" and so showed the LRN feed-forward
     # drift, a series it never emits: an empty pane labelled as if it meant
     # something. What it has instead is an ESTIMATE of the phase, which is the
@@ -218,8 +233,38 @@ PLOT_SERIES = {
 # is exactly what a one-sample offset produces and what makes it certain rather
 # than probable. Plotting them index-aligned draws the estimate a second late
 # and makes a filter that is tracking perfectly look like one that lags.
+#
+# EVERY LTIC LOOP THAT HAS AN ESTIMATE NOW DRAWS IT, not only algorithm 13. The
+# three are the same idea arrived at three ways, and the same purple, because
+# the question the trace answers is identical in each: what does the loop
+# believe, against what it was told?
+#
+#   algo 11  phase   s_phase_filt - an exponential smoother whose constant is
+#            time_const/filter_div once locked and 1 while acquiring, so the gap
+#            between trace and reading widens exactly as the loop settles.
+#   algo 12  est     the accumulator's own answer, last_phase normalised the way
+#            the correction normalises it. This is the average of 2^level
+#            readings, so on a settled loop it sits far quieter than the trace
+#            underneath it - which is the whole claim of the algorithm, drawn.
+#   algo 13  ph      the Kalman state x0.
+#
+# Algorithm 10 has NO overlay and that is not an omission. The three-stage loop
+# works on the raw reading and keeps no filtered phase anywhere - its smoothing
+# lives in the PID integrator, which is a control state and not an estimate of
+# anything. Drawing the integrator here would be inventing an estimator the
+# algorithm does not have, so its pane stays a single honest trace.
+#
+# THE LAG IS 1 FOR ALL THREE, and for algorithms 11 and 12 that is by
+# STRUCTURE rather than by measurement: all three fields are written by the
+# control task and printed on the Learn line by vDisplayTask in the same wake,
+# racing the same way, while `dph` on the same block is read live. The
+# cross-correlation that established it for algorithm 13 (below) has not been
+# repeated on a capture of 11 or 12 - a few minutes of RH telemetry under each
+# would settle it, and if either turns out to be 0 the fix is this number.
 PLOT_OVERLAY = {
-    "kalman": ("ph", "Kalman estimate", "#b96ccc", 1),
+    "lars":   ("phase", "Filtered phase (algo 11)",   "#b96ccc", 1),
+    "mlacc":  ("est",   "Accumulator estimate",       "#b96ccc", 1),
+    "kalman": ("ph",    "Kalman estimate",            "#b96ccc", 1),
 }
 
 # Algorithm 11 (LTIC-Lars) parameters: verb -> (label, lo, hi, decimals).
@@ -459,6 +504,7 @@ CSV_COLUMNS = [
     "pwm",
     "f10", "f100",
     "ph_ns", "level", "corr", "sig_ns", "zc",   # algorithm 12 diagnostics
+    "est_ns",     # algorithm 12's phase ESTIMATE (ns); ph_ns is the reading
     "bmp_c",      # board sensor, nearest the OCXO
     "sat", "hdop",
 ]
@@ -532,6 +578,7 @@ class CsvRowBuilder:
                              ("level",   r"\blevel=(\d+)"),
                              ("corr",    r"\bcorr=(\d+)"),
                              ("sig_ns",  r"\bsig=([\d.]+)ns"),
+                             ("est_ns",  r"\best=(-?[\d.]+)ns"),
                              ("zc",      r"\bzc=(\d+)")):
                 m = re.search(pat, line)
                 if m: got[key] = m.group(1)
@@ -592,7 +639,10 @@ class TelemetryParser:
                    # Algorithm 12: the phase it accumulates (ns), which level
                    # last acted, and the cumulative correction count.
                    # All three come from the Learn line.
-                   "ph", "level", "corr", "arm", "sig", "zc"]
+                   "ph", "level", "corr", "arm", "sig", "zc",
+                   # Algorithm 12's phase ESTIMATE (ns) - what the accumulator
+                   # believes, as against "ph" above, which is the reading.
+                   "est"]
 
     def extract(self, line, name):
         """Return the first number following `name` on the line, or None.
@@ -1074,11 +1124,14 @@ class GpsdoTuner(QMainWindow):
             sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             return sa
 
+        # Order follows the algorithm numbers: 3-9 first, then the LTIC line
+        # 10/11/12, then the tools. The FA damping widgets moved into the
+        # algo-10 tab (they are that loop's damping windows, not a peer of
+        # the algorithm groups).
+        tabs.addTab(scrolled(self._tab_pid()), "PID algo 3-9")
         tabs.addTab(scrolled(self._tab_ltic()), "LTIC (algo 10)")
         tabs.addTab(scrolled(self._tab_lars()), "LTIC-Lars (algo 11)")
-        tabs.addTab(scrolled(self._tab_algo12()), "Multi-level (algo 12)")
-        tabs.addTab(scrolled(self._tab_fa()), "FA damping")
-        tabs.addTab(scrolled(self._tab_pid()), "PID algo 3-9")
+        tabs.addTab(scrolled(self._tab_algo12()), "LTIC-MLA (algo 12)")
         tabs.addTab(scrolled(self._tab_cal()), "Calibration")
         tabs.addTab(self._build_monitor(), "Raw monitor")
         tabs.addTab(scrolled(self._tab_help()), "Help")
@@ -1153,6 +1206,45 @@ class GpsdoTuner(QMainWindow):
         g.addWidget(note, row, 0, 1, 6)
         row += 1
 
+        # ---- FA damping windows, formerly their own tab ----
+        # They belong to the algo-10 stage loop (the damping term's averaging
+        # window, split acquisition/steady-state), so they live under it now;
+        # a whole tab for two combos was navigation cost without information.
+        # The attribute names stay fa_dpll/fa_lock — the FA read-back absorption
+        # writes straight into them.
+        g.addWidget(QLabel("<b>Damping-term averaging window (FA)</b>"), row, 0, 1, 4)
+        row += 1
+        fadesc = QLabel("Shorter windows damp a limit cycle but pass more "
+                        "short-tau noise. 100 = firmware default.")
+        fadesc.setWordWrap(True)
+        fadesc.setStyleSheet(f"color:{theme_colours(w)['muted']}; font-size:11px;")
+        g.addWidget(fadesc, row, 0, 1, 4)
+        row += 1
+        g.addWidget(QLabel("DPLL (acquisition):"), row, 0)
+        self.fa_dpll = QComboBox(); self.fa_dpll.addItems(FA_VALUES)
+        self.fa_dpll.setCurrentText("100")
+        g.addWidget(self.fa_dpll, row, 1)
+        b1 = QPushButton("Apply FAD")
+        b1.clicked.connect(lambda: self.worker.send(f"FAD {self.fa_dpll.currentText()}"))
+        g.addWidget(b1, row, 2)
+        row += 1
+        g.addWidget(QLabel("LOCK (steady state):"), row, 0)
+        self.fa_lock = QComboBox(); self.fa_lock.addItems(FA_VALUES)
+        self.fa_lock.setCurrentText("100")
+        g.addWidget(self.fa_lock, row, 1)
+        b2 = QPushButton("Apply FAL")
+        b2.clicked.connect(lambda: self.worker.send(f"FAL {self.fa_lock.currentText()}"))
+        g.addWidget(b2, row, 2)
+        row += 1
+        readb = QPushButton("Read (FA)")
+        readb.clicked.connect(lambda: self.worker.send("FA"))
+        g.addWidget(readb, row, 0)
+        saveb = QPushButton("Save (ES LTIC)")
+        saveb.clicked.connect(lambda: self.confirm_send("ES LTIC",
+                              "Commit FA windows to EEPROM?"))
+        g.addWidget(saveb, row, 1, 1, 2)
+        row += 1
+
         g.setRowStretch(row + 1, 1)
         return w
 
@@ -1214,7 +1306,7 @@ class GpsdoTuner(QMainWindow):
         w = QWidget()
         g = QGridLayout(w)
         row = 0
-        title = QLabel("Algorithm 12 — multi-level accumulator (after Alan Cashin, MIS42N)")
+        title = QLabel("LTIC-MLA (algo 12) — multi-level accumulator (after Alan Cashin, MIS42N)")
         title.setStyleSheet("font-weight:bold;")
         g.addWidget(title, row, 0, 1, 6); row += 1
 
@@ -1396,6 +1488,14 @@ class GpsdoTuner(QMainWindow):
                 ("",            "  here', not 'this task used this'."),
                 ("RB",          "Reboot (warm — settings kept)"),
                 ("CR YES",      "Cold restart: wipe the flash ring, factory defaults"),
+                ("BL [%]",      "TFT backlight brightness, 30..100 percent — auto-saved."),
+                ("",            "  100 (the default) is also the electrically quietest"),
+                ("",            "  setting: the dimmer stage stops switching entirely"),
+                ("",            "  and the 3V3 rail that feeds VDDA — the ADC"),
+                ("",            "  reference, the phase reading, the Vctl monitor — is"),
+                ("",            "  left alone. Dimming trades a little rail noise for"),
+                ("",            "  load and heat in an enclosure coupled to the OCXO."),
+                ("",            "  Compiled in with any TFT; bare BL reports it."),
             ]),
             ("Reporting", [
                 ("RH / RD",     "Report format: human readable / tab delimited"),
@@ -1426,8 +1526,8 @@ class GpsdoTuner(QMainWindow):
             ("Discipline mode", [
                 ("MH / MD",     "Mode holdover / mode disciplined"),
                 ("LA <0-13>",   "Loop algorithm select. 10 = LTIC 3-stage,"),
-                ("",            "  11 = LTIC-Lars, 12 = multi-level accumulator,"),
-                ("",            "  13 = Kalman (phase, frequency, aging)"),
+                ("",            "  11 = LTIC-Lars, 12 = LTIC-MLA (multi-level"),
+                ("",            "  accumulator), 13 = Kalman (phase, freq, aging)"),
                 ("SP <n>",      "Set the PWM DAC directly (1-65535) — manual override."),
                 ("",            "  A whole-LSB intent, so it clears the fine fraction"),
                 ("",            "  (see DAC). CT, LC, the ramps and holdover do too."),
@@ -1460,6 +1560,43 @@ class GpsdoTuner(QMainWindow):
                 ("",            "  The Hz figures need CT — without it the resolution"),
                 ("",            "  is real but its meaning in frequency is unknown,"),
                 ("",            "  and the command says that instead of guessing."),
+                ("DV <v>",      "Volts at full code, for the report's 'commanded'"),
+                ("",            "  (2.50..5.50). 3.30 — the default — is the PWM model;"),
+                ("",            "  set 5.00 on an AD5680 board or the report flags"),
+                ("",            "  MISMATCH on every reading. Three decimals are kept:"),
+                ("",            "  4.096 for a 4.096 V reference. Auto-saved (ES ALGO)."),
+                ("AV <x>",      "Divide ratio of the divider before the ADC pin"),
+                ("",            "  (1.00..10.00, default direct). Scales 'measured' and"),
+                ("",            "  every Vctl display. With a 10k+10k sense divider at"),
+                ("",            "  the DAC output: DV 5.00 + AV 2.00 make the check"),
+                ("",            "  exact. Auto-saved (ES ALGO)."),
+                ("VS [VCC|VREF]","What the PA0 divider is jumpered to — auto-saved"),
+                ("",            "  (ES ALGO). VCC (the default) is the 5 V rail, as on"),
+                ("",            "  every board before V3; VREF is the voltage"),
+                ("",            "  reference, and the DAC report then checks the"),
+                ("",            "  reading against DV and complains past 5 percent —"),
+                ("",            "  a reference missing, sagging or simply not the part"),
+                ("",            "  that was fitted."),
+                ("SPAN",        "EFC span jumper on PB14 (GPSDO_SPAN_SENSE): which"),
+                ("",            "  position it is in and the CT calibration each"),
+                ("",            "  position carries - one K per position, because the"),
+                ("",            "  reduced span is a different plant (5x on the V3"),
+                ("",            "  prototype). Jumper fitted = PB14 to ground ="),
+                ("",            "  REDUCED; open or unwired = FULL, so a board without"),
+                ("",            "  the wire keeps its one calibration. When the jumper"),
+                ("",            "  moves the loop takes that position's K and the code"),
+                ("",            "  is remapped so the EFC pin keeps its voltage - once"),
+                ("",            "  a code pair is known, which the firmware learns by"),
+                ("",            "  itself from a move made while locked or from a CT."),
+                ("",            "  A position with no CT of its own runs on the"),
+                ("",            "  other's while CT starts by itself: with a GPS fix,"),
+                ("",            "  never in holdover, up to four tries (at once, then"),
+                ("",            "  10, 20 and 40 min after a failure). The DAC report"),
+                ("",            "  prints the same lines. Auto-saved."),
+                ("SPAN CLR <p>", "Forget one position's calibration, FULL or REDUCED -"),
+                ("",            "  for one measured in the wrong place, typically a"),
+                ("",            "  board calibrated before PB14 was wired. The first"),
+                ("",            "  CT in the other position usually catches it alone."),
                 ("AP",          "Arm picDIV (resync the divider to 1PPS)"),
             ]),
             ("Calibration", [
@@ -1469,7 +1606,8 @@ class GpsdoTuner(QMainWindow):
                 ("LC",          "LTIC self-calibrate: ns/V, zero offset, range"),
                 ("LL",          "List all LTIC parameters and state"),
                 ("LNV / LZO / LRN", "Calibration: ns per volt, zero-offset V, range ns"),
-                ("LPOL [-1/0/1]", "PWM->phase polarity (0 = auto-detect)"),
+                ("LPOL [-1/0/1]", "PWM->phase polarity (0 = not set — the loop holds"),
+                ("",            "  until it is; LC measures it, so run LC)"),
                 ("SAW 0|1",     "Sawtooth (qErr) correction on/off. With no argument"),
                 ("",            "  it also reports the receiver's own mode bit and how"),
                 ("",            "  often the paired lookup found its pulse. A paired"),
@@ -1516,7 +1654,7 @@ class GpsdoTuner(QMainWindow):
                 ("LTR [V]",     "Temperature reference, in VOLTS (stored as counts)"),
                 ("",            "  Trend: ACQ = frequency-led, PLL = phase, LOCK = locked"),
             ]),
-            ("Algorithm 12 — multi-level accumulator", [
+            ("LTIC-MLA (algo 12) — multi-level accumulator", [
                 ("MG [v]",      "Gain, LSB per ns. 0 = derive it from the CT"),
                 ("",            "  calibration, which is usually what you want."),
                 ("",            "  NOT the same quantity as algo 11's LG, even"),
@@ -1631,41 +1769,6 @@ class GpsdoTuner(QMainWindow):
             html.append("</table>")
         body.setHtml("".join(html))
         outer.addWidget(body, 1)
-        return w
-
-    def _tab_fa(self):
-        """FA damping windows — the acquisition/steady-state split."""
-        w = QWidget()
-        g = QGridLayout(w)
-        g.addWidget(QLabel("<b>Damping-term averaging window</b>"), 0, 0, 1, 4)
-        g.addWidget(QLabel("Shorter windows damp a limit cycle but pass more "
-                           "short-tau noise. 100 = firmware default."),
-                    1, 0, 1, 4)
-
-        g.addWidget(QLabel("DPLL (acquisition):"), 2, 0)
-        self.fa_dpll = QComboBox(); self.fa_dpll.addItems(FA_VALUES)
-        self.fa_dpll.setCurrentText("100")
-        g.addWidget(self.fa_dpll, 2, 1)
-        b1 = QPushButton("Apply FAD")
-        b1.clicked.connect(lambda: self.worker.send(f"FAD {self.fa_dpll.currentText()}"))
-        g.addWidget(b1, 2, 2)
-
-        g.addWidget(QLabel("LOCK (steady state):"), 3, 0)
-        self.fa_lock = QComboBox(); self.fa_lock.addItems(FA_VALUES)
-        self.fa_lock.setCurrentText("100")
-        g.addWidget(self.fa_lock, 3, 1)
-        b2 = QPushButton("Apply FAL")
-        b2.clicked.connect(lambda: self.worker.send(f"FAL {self.fa_lock.currentText()}"))
-        g.addWidget(b2, 3, 2)
-
-        readb = QPushButton("Read (FA)")
-        readb.clicked.connect(lambda: self.worker.send("FA"))
-        g.addWidget(readb, 4, 0)
-        saveb = QPushButton("Save (ES LTIC)")
-        saveb.clicked.connect(lambda: self.confirm_send("ES LTIC",
-                              "Commit FA windows to EEPROM?"))
-        g.addWidget(saveb, 4, 1, 1, 2)
-        g.setRowStretch(5, 1)
         return w
 
     def _tab_pid(self):
@@ -1800,7 +1903,7 @@ class GpsdoTuner(QMainWindow):
             "it. Fixed when logging starts.")
         row.addWidget(self.log_mode)
 
-        tzb = QPushButton("Generate tz_table.h")
+        tzb = QPushButton("Generate gpsdo_tz_table.h")
         tzb.setToolTip("Rebuild the timezone table from this machine's IANA tzdata")
         tzb.clicked.connect(self.generate_tz_table)
         row.addWidget(tzb)
@@ -1893,7 +1996,11 @@ class GpsdoTuner(QMainWindow):
         self._apply_plot_series()
 
     def _plot_family(self):
-        if self._active_algo in (10, 11): return "ltic"
+        # 10 and 11 shared a family until 11 got its own overlay: the panes are
+        # the same pair, but only 11 publishes a filtered phase to draw over
+        # them, and the family is what selects the overlay.
+        if self._active_algo == 10:        return "ltic"
+        if self._active_algo == 11:        return "lars"
         if self._active_algo == 12:        return "mlacc"
         if self._active_algo == 13:        return "kalman"
         return "pid"
@@ -2045,8 +2152,13 @@ class GpsdoTuner(QMainWindow):
         if not self._fw_ver:
             return
         bits = [f"firmware v{self._fw_ver}"]
-        if self._fw_build:
-            bits.append(f"build {self._fw_build}")
+        # From build 56 the name carries the build ("v1.07.57rt"; build 56
+        # itself wrote "v1.07-rt56") and the stamp still ends in "build N", for
+        # tuners that predate the name. Once.
+        b = self._fw_build
+        if b and not (self._fw_ver.endswith(f".{b}rt") or
+                      self._fw_ver.endswith(f"-rt{b}")):
+            bits.append(f"build {b}")
         if self._fw_date:
             # Seconds are noise at a glance; the CRC settles any real ambiguity.
             bits.append(f"{self._fw_date} {self._fw_time[:5]}".strip())
@@ -2198,9 +2310,14 @@ class GpsdoTuner(QMainWindow):
                 self._lp_active = False
                 self._absorb_lp_block("\n".join(self._lp_buf))
                 # fall through to handle this line normally
-        # Firmware version banner, e.g. "GPSDO v1.06-rtos compiled 2026-09-02
-        # 09:46:31  build 27". Compared against the release this tuner was
-        # written for; a mismatch is reported once and not treated as fatal,
+        # Firmware version banner, e.g. "GPSDO v1.07.57rt compiled 2026-09-23
+        # 11:02:37  build 57" - the build is in the name from build 56 on
+        # (build 56 itself wrote "v1.07-rt56"); before that it read
+        # "GPSDO v1.06-rtos ...  build 27". Whatever follows the release is
+        # kept as the suffix, so all three forms parse, and only the release
+        # (1.07) is compared against the one this tuner was written for; the
+        # third number in "v1.07.57rt" is the build, not part of the release.
+        # A mismatch is reported once and not treated as fatal,
         # because an older board is still worth talking to — the operator just
         # needs to know why something might read oddly.
         #
@@ -2315,7 +2432,7 @@ class GpsdoTuner(QMainWindow):
                 if k in self.pid_boxes and k in vals:
                     self.pid_boxes[k].setValue(vals[k])
 
-    # ---- tz_table.h generation ------------------------------------------
+    # ---- gpsdo_tz_table.h generation ------------------------------------------
     # Absorbed from the former tools/gen_tz_table.py so the tuner is the only
     # script anyone has to keep. The logic is unchanged; what is new is that the
     # zone data is looked for in several places rather than assuming
@@ -2396,8 +2513,97 @@ class GpsdoTuner(QMainWindow):
                     zones.append((name, parts[-2].decode("ascii", "ignore")))
         return zones
 
+    @staticmethod
+    def _tz_verify(zones):
+        """Does each rule describe the era the table will actually live in?
+
+        WHY THIS EXISTS, and why it asks about the FUTURE rather than the
+        present. The rule for each zone is the POSIX string at the end of its
+        TZif file, which is the rule that applies AFTER the last transition the
+        file stores - not necessarily the rule in force on the day the table is
+        generated. For a zone with a legislated change ahead of it the two
+        differ, and whether that is a fault depends entirely on which question
+        you ask.
+
+        Asked as "is this rule right for calendar year 2026?", six zones look
+        broken: British Columbia and Alberta stop observing DST on 1 November
+        2026 (IANA 2026d), so their footers read MST7 and CST6 while the first
+        ten months of the year still had PDT and MDT. Asked as "is it right for
+        the years this table will be in flash?", all six are correct and the
+        footer is exactly the right choice. The second question is the one that
+        matters, and this check asks it: it compares each rule against the
+        zone's behaviour a full two to three years out.
+
+        Returns a list of complaints, empty when everything agrees. The check is
+        an offset comparison rather than a second POSIX evaluator on purpose - a
+        reimplementation of the firmware's rule engine could be wrong in the
+        same place and agree with itself."""
+        try:
+            import datetime, re
+            from zoneinfo import ZoneInfo, available_timezones
+        except Exception:
+            return ["(zoneinfo unavailable - rules not verified)"]
+        avail = available_timezones()
+        UTC   = datetime.timezone.utc
+
+        def _off(v):
+            """A POSIX offset field -> minutes EAST of UTC. The field is
+            west-positive, which is the opposite of every other convention in
+            this project and the reason for the minus."""
+            sign = -1 if v.startswith("-") else 1
+            v = v.lstrip("+-")
+            h, _, mm = v.partition(":")
+            return -(sign * (int(h) * 60 + int(mm or 0)))
+
+        NAME = r"(?:<[^>]+>|[A-Za-z]+)"
+        OFF  = r"[+-]?\d+(?::\d+)*"
+
+        def rule_offsets(rule):
+            """The set of offsets a rule can produce, in minutes east of UTC.
+
+            BOTH of them, not just the standard one - and that is not pedantry.
+            Ireland writes its zone as IST-1GMT0: IST is the STANDARD and GMT is
+            a negative summer-time, which is backwards from everywhere else and
+            entirely legal POSIX. A check that reads only the first offset calls
+            Dublin broken every single time, and a check that cries wolf on a
+            correct zone is worse than no check at all - it is how a real
+            complaint gets scrolled past."""
+            m = re.match(rf"^({NAME})({OFF})(?:({NAME})({OFF})?)?", rule)
+            if not m:
+                return None
+            std = _off(m.group(2))
+            if not m.group(3):
+                return {std}
+            return {std, _off(m.group(4)) if m.group(4) else std + 60}
+
+        out  = []
+        base = datetime.datetime.now(UTC) + datetime.timedelta(days=730)
+        for name, rule in zones:
+            if name not in avail:
+                continue
+            try:
+                tz = ZoneInfo(name)
+            except Exception:
+                continue
+            offs, dst = set(), False
+            for k in range(0, 366, 7):            # a whole year, two years out
+                t = (base + datetime.timedelta(days=k)).astimezone(tz)
+                offs.add(int(t.utcoffset().total_seconds() // 60))
+                if (t.dst() or datetime.timedelta()).total_seconds():
+                    dst = True
+            ro  = rule_offsets(rule)
+            has = "," in rule
+            if ro is None:
+                out.append(f"{name}: rule {rule!r} not understood")
+            elif has != dst:
+                out.append(f"{name}: rule {rule!r} says DST={has}, tzdata says {dst}")
+            elif ro != offs:
+                out.append(f"{name}: rule {rule!r} -> {sorted(ro)} min, "
+                           f"tzdata {sorted(offs)}")
+        return out
+
     def generate_tz_table(self):
-        """Write tz_table.h next to this script from the machine's own tzdata."""
+        """Write gpsdo_tz_table.h next to this script from the machine's own tzdata."""
         sources = self._tz_sources()
         zones = []
         used = ""
@@ -2476,7 +2682,13 @@ class GpsdoTuner(QMainWindow):
           " * Zone data comes from this machine. To refresh it:\n"
           " *   pip install -U tzdata      (any OS; zic-compiled IANA data)\n"
           " * then press the button again. */\n")
-        w("#ifndef TZ_TABLE_H\n#define TZ_TABLE_H\n\n#include <stdint.h>\n\n")
+        # GPSDO_TZ_TABLE_H, not TZ_TABLE_H. The file was renamed with the
+        # gpsdo_ prefix in the v1.07 restructure and its guard renamed with it;
+        # this line was missed, so every regeneration quietly put the old,
+        # generic guard back - and "TZ_TABLE_H" is exactly the kind of name a
+        # second library picks too.
+        w("#ifndef GPSDO_TZ_TABLE_H\n#define GPSDO_TZ_TABLE_H\n\n"
+          "#include <stdint.h>\n\n")
         w(f"#define TZ_NZONES   {len(zones)}\n")
         w(f"#define TZ_NRULES   {len(rules)}\n")
         w(f"#define TZ_NREGIONS {len(regions)}\n\n")
@@ -2514,9 +2726,9 @@ class GpsdoTuner(QMainWindow):
         for i in range(0, len(ids), 20):
             w("    " + ",".join(f"{x:3d}" for x in ids[i:i + 20]) + ",\n")
         w("};\n\n")
-        w("#endif /* TZ_TABLE_H */\n")
+        w("#endif /* GPSDO_TZ_TABLE_H */\n")
 
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tz_table.h")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpsdo_tz_table.h")
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("".join(out))
@@ -2528,8 +2740,22 @@ class GpsdoTuner(QMainWindow):
                   + sum(len(s) + 1 for s in rules)
                   + sum(len(r) + 1 for r in regions))
         self.monitor.append(
-            f"*** tz_table.h written: {len(zones)} zones, {len(rules)} rules, "
+            f"*** gpsdo_tz_table.h written: {len(zones)} zones, {len(rules)} rules, "
             f"{len(regions)} regions, ~{approx / 1024:.1f} KB flash")
+        # And then check it, rather than hoping. See _tz_verify for what it asks
+        # and why it asks about two years out instead of today.
+        problems = self._tz_verify(zones)
+        if not problems:
+            self.monitor.append(
+                "*** rules verified against this machine's tzdata, two years out: "
+                "all agree")
+        else:
+            self.monitor.append(
+                f"*** rules verified: {len(problems)} zone(s) disagree with tzdata")
+            for p in problems[:12]:
+                self.monitor.append(f"***   {p}")
+            if len(problems) > 12:
+                self.monitor.append(f"***   ... and {len(problems) - 12} more")
         self.monitor.append(
             f"*** source: {used}"
             + (f"  (IANA {iana})" if iana
@@ -2864,7 +3090,7 @@ class SplashScreen(QWidget):
     def __init__(self, on_done):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self._on_done = on_done
-        self.resize(560, 300)
+        self.resize(560, 320)
         self._t = 0.0                     # 0..1 progress
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -2964,13 +3190,15 @@ class SplashScreen(QWidget):
                    f"v{TOOL_VERSION}  —  GPS Disciplined OCXO tuning console")
 
         # About replays this splash, so it is the only place a user is shown
-        # who the loops come from. Two lines, small, under the subtitle.
+        # who the loops come from. Three lines, small, under the subtitle.
         cred = QFont(); cred.setPointSize(8)
         p.setFont(cred)
         p.drawText(0, int(h * 0.16) + 58, w, 18, Qt.AlignHCenter,
                    "firmware J. M. Niewiński (jmnlabs) · after André Balsa v0.06c")
         p.drawText(0, int(h * 0.16) + 74, w, 18, Qt.AlignHCenter,
                    "algo 11 Lars Walenius · algo 12 Alan Cashin (MIS42N) · logger lucido")
+        p.drawText(0, int(h * 0.16) + 90, w, 18, Qt.AlignHCenter,
+                   "measurements & testing Dan Wiering — invaluable help, patience and persistence")
         p.setFont(sub)
 
         # status line fades in with the merge, echoing the firmware's metaphor

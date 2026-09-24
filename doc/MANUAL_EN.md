@@ -1,4 +1,4 @@
-# GPSDO v1.06 — The Complete Manual (from zero to locked)
+# GPSDO v1.07 — The Complete Manual (from zero to locked)
 
 **English** | [Polski](MANUAL_PL.md) | [Español](MANUAL_ES.md)
 
@@ -6,7 +6,7 @@
 
 📖 [Project home](../README.md) · [README](README_EN.md) · [Changelog](CHANGELOG_EN.md) · [Tuner](README_TUNER_EN.md)
 
-**Firmware:** GPSDO v1.06-rtos by jmnlabs (after André Balsa's original GPSDO,
+**Firmware:** GPSDO v1.07.57rt by jmnlabs (after André Balsa's original GPSDO,
 Lars Walenius' PI loop, Alan Cashin's multi-level accumulator, and the author's
 own Kalman filter) **Board:** WeAct
 BlackPill STM32F411CE · **OCXO:** 10 MHz (e.g. Vectron C4550) **GPS:** u-blox
@@ -121,7 +121,8 @@ populated board (big TFT + all sensors); change it to match reality.
 | `GPSDO_LTIC` | **the phase detector hardware** (ramp TIC on PA1) — required for algorithms 10, 11, 12. Turn it on ONLY if the detector is physically fitted: without it PA1 floats and the loop disciplines the OCXO against ADC noise |
 | `GPSDO_LTIC_ACTIVE_RESET` | active capacitor discharge variant of the detector (leave OFF for the classic RC Kaashoek detector) |
 | `GPSDO_PWM_DITHER` | 24-bit control voltage from a dithered 13-bit PWM (leave ON — this is the good DAC) |
-| `GPSDO_DAC_EXT` | external AD5680 DAC, 18-bit, bit-banged on PB4/PB0/PB2 — mutually exclusive with `GPSDO_PWM_DITHER` |
+| `GPSDO_DAC_EXT` | external AD5680 DAC, 18-bit, bit-bang on PB4/PB0/PB2 — can be compiled together with `GPSDO_PWM_DITHER`; the `DAC` command picks the live path at runtime. Silently disables `GPSDO_TM1637`/`GPSDO_TM1637_6` and `GPSDO_GEN_2kHz_PB5` (PB4 is the DAC chip-select) |
+| `GPSDO_SPAN_SENSE` | the EFC span jumper's second pole on **PB14** (shipped ON): one `CT` calibration per span position, switched when the jumper moves — see `SPAN` in Part 7. A board without the wire reads FULL on the internal pull-up and keeps its one calibration. Turn it off only if PB14 is wired to something else on your board |
 | `GPSDO_GEN_2kHz_PB5` | 2 kHz test square wave on PB5 |
 | `GPSDO_BLUETOOTH` | HC-06 Bluetooth module on PA2/PA3 |
 | `GPSDO_BLUETOOTH_PARALLEL` | USB **and** Bluetooth at the same time (shipped ON) |
@@ -132,7 +133,7 @@ names the conflict.
 
 **Leave `GPSDO_LTIC` and `GPSDO_PWM_DITHER` on** unless you truly don't have the
 detector hardware: without LTIC you lose algorithms 10–13, which are the whole
-point of v1.06.
+point of v1.07.
 
 ### 1.4 Configure TFT_eSPI (TFT users only)
 
@@ -241,7 +242,7 @@ Sketch → Verify/Compile. When it finishes, read the line
 > up belongs to the settings ring in sector 7 (Part 2). Ignore the
 > percentage the IDE prints: it is calculated against the full 512 KB chip,
 > so a build that "fits" by percentage can still overrun into sector 7.
-> v1.06 itself builds around 250 KB — plenty of headroom, just don't
+> v1.07 builds around 265 KB — plenty of headroom, just don't
 > ignore a sudden jump.
 
 > **Which binary is actually running?** The banner prints the compile time —
@@ -373,7 +374,7 @@ lines depend on your hardware), followed by what every line means:
 
 ```
 ================================================
-GPSDO v1.06-rtos compiled 2026-08-23 14:32:45
+GPSDO v1.07.57rt compiled 2026-09-23 11:02:37  build 57
 FreeRTOS port by J. M. Niewinski  with Claude, GLM-5.3 Max & Qwen3.8-Max AI
 https://github.com/jmnlabs/GPSDO_FreeRTOS
 Inspired by GPSDO v0.06c by Andre Balsa
@@ -415,7 +416,7 @@ After that the 1 Hz report starts (Part 6). What each line tells you:
 
 | Line | Meaning |
 |---|---|
-| banner (`GPSDO v1.06-rtos` …) | firmware identity. If you see garbage characters instead: wrong baud rate — use 115200 |
+| banner (`GPSDO v1.07.57rt` …) | firmware identity — release v1.07, build 57 (`.57rt`). If you see garbage characters instead: wrong baud rate — use 115200 |
 | `Reset cause:` | why the chip restarted. `POWER-ON/BROWN-OUT PIN/NRST` = normal power-up or reset button. `SOFTWARE` = a reset commanded by firmware (`RB`, end of an upload). `INDEP-WDG`/`WINDOW-WDG` = a watchdog (this firmware runs none — treat as a fault signal). The extra line `-> supply dipped: check the 3V3 rail under load` appears after a brown-out: your 3V3 supply sagged under the OCXO load — fix the power supply, don't ignore it |
 | `Flash ring: sector 7 ready` | the settings ring in sector 7 was found valid |
 | `Flash ring: sector 7 blank/formatted (defaults)` | virgin or wiped ring — **normal on the very first flash**; the firmware formats it and uses compile-time defaults |
@@ -501,7 +502,9 @@ V, 2.5 V), measures the frequency at each, fits a straight line, and computes
 **K — how many hertz one PWM step is worth on *your* oscillator** (accepted
 range 0.02–2 mHz/LSB). From K it then derives sensible PID gains for algorithms
 3–9 and the LTIC loops, and **auto-saves the PID group** to flash. Do not power
-off during those three minutes.
+off during those three minutes. On a board with the span jumper (PB14), run it
+in the position you use; the other position gets its own `CT` by itself the
+first time the jumper goes there.
 
 **Step 2 — `LC` (phase detector calibration, ~5 minutes).** Type `LC` and Enter.
 The firmware arms the picDIV divider, centres the detector, sweeps one capacitor
@@ -676,7 +679,7 @@ Parameters (all `ES LTIC`; `LL` lists everything):
 | `AQP/AQI/AQD/AQL` | ACQ-stage PID | 0..100000 |
 | `DPP/DPI/DPD/DPL` | DPLL-stage PID | 0..100000 |
 | `LKP/LKI/LKD/LKL` | LOCK-stage PID | 0..100000 |
-| `LPOL` | PWM→phase polarity, −1/0/+1 | 0 = auto |
+| `LPOL` | PWM→phase polarity, −1/0/+1 | 0 = not set: the loop holds |
 | `LCV` | ACQ centring target volts | 0 (= auto mid-range) .. 3.3 |
 | `ACG g [cap]` | centring drive gain [max step] | 50..20000 LSB/V [5..1000 LSB] |
 | `FA`/`FAD`/`FAL` | damping frequency-average window (both / DPLL / LOCK) | 10, 100 or 1000 s |
@@ -1020,7 +1023,7 @@ truth, at different levels of detail.
 ### 5.1 The TFT (480x320 or 320x240)
 
 ```
-y=  0..23   header bar: "GPSDO v1.06"   CPU 58%   LMT 14:32:45 Thu
+y=  0..23   header bar: "GPSDO v1.07"   CPU 58%   LMT 14:32:45 Thu
 
 The `CPU 58%` in the header bar is the total processor load, always on (the
 measurement runs in the uptime task; `TL` on the serial line adds the
@@ -1054,9 +1057,24 @@ volts and current. Sensor row: `BMP:` temperature + pressure, `AHT:` temperature
 + humidity, `Vph:`/`dph:` detector voltage and derived phase in ns (`ovf` = ramp
 outside its valid band), `Vcc:`/`Vdd:` rails.
 
-**Status bar (colour-coded background):** green `DISCIPLINED FIX OK`, orange
-`HOLDOVER (manual)`, red `HOLDOVER (fix lost)` or `WAITING FOR GPS FIX`;
-` SURVEY` appended while survey-in runs.
+**Status bar (colour-coded background).** Green means one thing only: the
+control loop has converged, on the same verdict that colours the frequency
+digits above it — the band and the digits cannot disagree.
+
+| bar | colour | what it means |
+|---|---|---|
+| `DISCIPLINED  FIX OK` | green | fix good, loop locked |
+| `ACQUIRING  FIX OK` | orange | fix good, loop working but not there yet |
+| `OCXO WARMUP` | orange | the oscillator is not yet worth judging |
+| `CALIBRATING` | orange | `C`, `CT` or `LC` is deliberately moving the output |
+| `HOLDOVER (manual)` | orange | frozen by `MH` |
+| `HOLDOVER (fix lost)` | red | the fix went away and the loop froze itself |
+| `WAITING FOR GPS FIX` | red | nothing to discipline against |
+
+` SURVEY` is appended while a survey-in is running. Green is deliberately slow
+to arrive and quick to leave: the loop's verdict is a one-second thing that can
+flicker on a single count of counter wobble, so the bar wants five consecutive
+seconds of lock before it turns green and two of loss before it gives it up.
 
 ### 5.2 The OLED (128x64) — two pages, flipping every 10 s
 
@@ -1077,11 +1095,16 @@ blinking holdover marker.
 Local time HH:MM (colons blink on the second). All dashes = boot/no data; `oooo`
 = no fix; spinners = warm-up / survey / calibration.
 
+Brightness is a compile-time setting, one per display type, both in
+`gpsdo_config.h`: `TM1637_BRIGHTNESS` (0-7) and `HT16K33_BRIGHTNESS` (0-15).
+Neither has a CLI command - they are set once for the module you fitted and the
+ambient light it sits in.
+
 ### 5.5 LEDs on the board
 
 | LED | Meaning |
 |---|---|
-| **Yellow (PB8)** | OFF = no GPS fix · steady = fix OK · slow blink (1 s) = manual holdover · fast blink (200 ms) = fix lost, auto holdover |
+| **Yellow (PB8)** | OFF = no GPS fix *and* not in holdover · steady = fix OK · slow blink (1 s) = manual holdover, with or without a fix · fast blink (200 ms) = fix lost, auto holdover |
 | **Blue (PC13)** | **fault only** — rapid blinking means a firmware fault was caught (assert / stack overflow / heap failure), with the reason on serial. It is *not* a heartbeat; a dark blue LED is the good state. |
 
 ---
@@ -1130,7 +1153,11 @@ The Learn line per family:
 
 **Tab-delimited mode (`RD`)** prints one line per second with the same data as
 columns (uptime, frequency windows, sats, HDOP, PWM, voltages, all sensors, raw
-TIC) — the format choice for logging into a spreadsheet. `RP`/`RR` pause/resume.
+TIC) — the format choice for logging into a spreadsheet. A frequency-average
+column is **left empty until its window has filled** — the first 10, 100, 1000,
+10 000 and 20 000 seconds respectively — so a plot shows missing data rather
+than an oscillator reading zero hertz. The field count never changes, so the
+separators are still there and a parser counting columns is unaffected. `RP`/`RR` pause/resume.
 The report is non-blocking: if a host connects but doesn't read, the firmware
 drops report tails rather than freeze the displays (fixed in v1.06 — a full CDC
 queue used to wedge the display task for good).
@@ -1165,13 +1192,82 @@ hit:
 |---|---|---|
 | `SP [n]` | 1..65535 (no arg = 32767, mid-scale ≈1.65 V) | set the control DAC directly — manual control during experiments |
 | `up1`/`up10`/`dp1`/`dp10` | — | nudge PWM ±1/±10 (refused during a running calibration) |
-| `DAC` | `PWM`/`DITH`/`EXT` | no argument: report — output path, 24-bit and 16-bit codes, commanded **and** measured Vctl, one step in µHz (needs CT). With an argument: select the active output path — **auto-saved**. The jumper on the board switches the signal; this tells the firmware which path it is steering. Unset defaults to `DITH`. |
+| `DAC` | `PWM`/`DITH`/`EXT` | no argument: report — output path, 24-bit and 16-bit codes, commanded **and** measured Vctl, one step in µHz (needs CT), and on a span-jumper board which position the plant belongs to. With an argument: select the active output path — **auto-saved**. The jumper on the board switches the signal; this tells the firmware which path it is steering. Unset defaults to `DITH`. |
+| `DV [v]` | 2.50..5.50 V | volts at full code, for the report's "commanded" — **auto-saved**. `3.30` (the default) is the PWM model; set `5.00` on an AD5680 board. Three decimals are kept (`4.096` for a 4.096 V reference). |
+| `AV [x]` | 1.00..10.00 | divide ratio of the divider before the ADC pin, for "measured" and every Vctl display — **auto-saved**. `1.00` (the default) = direct. |
+| `VS [VCC\|VREF]` | — | what the PA0 divider is jumpered to — **auto-saved**. `VCC` (the default) is the 5 V rail, as on every board before V3. `VREF` is the voltage reference, and the `DAC` report then checks the reading against `DV` and complains past 5 %. |
+| `SPAN [CLR FULL\|REDUCED]` | — | the EFC span jumper on PB14 (`GPSDO_SPAN_SENSE`): no argument = the position the jumper is in and the `CT` calibration each position carries. `CLR` forgets one position's calibration — for one measured in the wrong place. The `DAC` report prints the same lines. |
+
+**Three paths, one node.** All three output paths can be compiled together; the
+`DAC` command picks which one the firmware writes, and the board jumper decides
+which signal reaches the EFC filter (there is no soft multiplexer — two drivers
+on one node would be a hardware fault). At boot every compiled path is brought
+up so a switch is glitch-free, but a control step writes **only the selected
+path**; the others sit frozen at their last code. `PWM` is the plain 16-bit PWM
+on PB9 (on a build with the dither engine: that engine at whole-LSB granularity
+— same voltage, no reconfiguration). `DITH` is the 13-bit carrier + 1-bit
+sigma-delta dither on PB9/TIM4 CH4, an effective 24 bits in time-average
+(carrier ≈12.2 kHz, DMA). `EXT` is the AD5680 over bit-banged SPI on
+PB4/PB0/PB2, written about once per second (~20 µs with interrupts masked).
+
+Internally the control value is **one 24-bit code**; the 16-bit value on the
+display, in the flash ring and in the logs is that number rounded — a view, not
+a second variable. Fine corrections accumulate in the low byte (a 24-bit code
+that is not a multiple of 256 is the proof the fine path is driving; the `DAC`
+report marks it). On `EXT` the command is mapped onto the **18-bit** part by
+scaling, not truncation: `code18 = code24 × 262143 / 16777215`. The AD5680's
+SPI frame is 24 bits — `[0000][D17..D0][00]` — with 18 significant, so "24-bit
+control voltage" in the docs means the command the loop carries (and which
+`DITH` genuinely realises as a time-average); the part itself resolves 18 bits.
+The scaling keeps 16-bit full scale landing exactly on the part's full scale,
+which is why K and every coefficient measured on one path carry over to the
+other unchanged. At 5.0 V one DAC LSB is 19.1 µV; on `EXT` the reference *is*
+the control voltage, so its low-frequency drift maps 1:1 onto frequency.
+
+The report's commanded-against-measured check is honest only when the two
+scales match the board: `DV` states what full code means at the output
+(3.30 V = the PWM model, the default), `AV` states the divide ratio before
+the ADC pin (1.00 = direct). On a 5 V external DAC with a divider at the
+sense point, setting both turns the check from a PWM-board assumption into a
+statement about this board — without them it will flag MISMATCH on every
+reading. Both auto-save.
+
+**Two spans, two calibrations (`GPSDO_SPAN_SENSE`, PB14).** A board with the
+EFC level shifter can run the oscillator over the full control span or a
+reduced one, and the two are different plants — on the V3 prototype K is
+four to five times smaller in the reduced position. Wire the span
+jumper's second pole to **PB14** (jumper fitted = PB14 to ground = REDUCED;
+open or unwired = FULL) and the firmware keeps one `CT` calibration per
+position:
+
+- when the jumper moves (debounced, about half a second) the loop coefficients
+  are re-derived from that position's K and the control code is remapped so
+  the EFC pin keeps its voltage — the frequency before the move is the
+  frequency after it. The remap needs one pair of codes known to give the same
+  voltage in both positions; the firmware learns it by itself — the code the
+  loop was locked at before a move, paired with the code it locks at
+  afterwards or with the 10 MHz code `CT` finds there. Until it has one, a
+  move keeps the code and the loop re-acquires;
+- a position that has never been calibrated runs on the other position's
+  coefficients — as a one-calibration board always did — while `CT` starts by
+  itself as soon as there is a GPS fix (never in holdover), with up to three
+  more attempts 10, 20 and 40 minutes after a failure;
+- a jumper moved while the board was off is handled at power-on, before the
+  loop starts.
+
+`SPAN` shows the state, and the `DAC` report prints it under the plant line. A
+board calibrated before PB14 was wired has its one calibration filed under the
+position the pin read the first time it booted with span sensing — FULL, if the
+wire was not there yet. If that calibration was really made on REDUCED, the first `CT`
+in the other position measures the same plant, says so, and forgets the wrong
+one; `SPAN CLR` does the same by hand. Manual gains in LSB (`LG`, `MG`, `LTK`)
+are not rescaled — a move warns about each one that is set.
 
 ### Calibration
 | Command | Duration | What it does |
 |---|---|---|
 | `C` | ~2 min | older 2-point PWM centring |
-| `CT` | ~3 min | **oscillator sensitivity K + auto-tunes PID 3–9 and LTIC; auto-saves PID** — run this first |
+| `CT` | ~3 min (+3 on gentle K) | **oscillator sensitivity K + auto-tunes PID 3–9 and LTIC; auto-saves PID** — run this first. On a gentle plant (small Hz/LSB — span-reduced EFC, external DAC) a second pass re-measures over a wider, centred code spread so the fit has signal to work with |
 | `LC` | ~5 min | **phase-detector calibration (ns/V, offset, range); auto-saves on PASS** — run this second |
 | `ACG g [cap]` | — | ACQ centring drive: gain 50..20000 LSB/V, max step 5..1000 LSB |
 | `AP` | — | arm the picDIV divider manually |
@@ -1201,12 +1297,12 @@ hit:
 |---|---|---|
 | `LNV` | 0..1e6 | detector slope, ns per volt (LC measures it) |
 | `LZO` | 0..3.3 V | detector zero-offset volts |
-| `LRN` | 0..1e9 | detector range, ns — *note: this command sets the detector range; the "self-learning on/off" meaning listed in the help is unreachable in v1.06 (see quirks below)* |
+| `LRN` | 2..1e9 ns, or `0`/`1`/`R` | detector range, ns (`LC` measures it). The same verb controls self-learning — the drift feed-forward and damping of algorithms 3–10: `LRN 0` freezes it (what it has learned stays applied), `LRN 1` resumes it (default on), `LRN R` returns drift and damping to theory, bare `LRN` shows it. `LRN 0`/`LRN 1` are saved with `ES FLAGS` (see quirks below) |
 | `LAT` | 0.001..1e9 ns (100) | ACQ phase threshold |
 | `LDT` | 1e-13..1.0 (5e-10) | DPLL→LOCK drift threshold |
 | `LIV` | 1..600 s (300) | LOCK correction interval |
 | `AQP/AQI/AQD/AQL`, `DPP/DPI/DPD/DPL`, `LKP/LKI/LKD/LKL` | 0..100000 | stage PIDs |
-| `LPOL` | −1 / 0 / +1 | PWM→phase polarity (0 = auto) |
+| `LPOL` | −1 / 0 / +1 | PWM→phase polarity (0 = not set: the loop holds and says so; run `LC` to measure it) |
 | `LCV` | 0..3.3 V | ACQ centring target |
 | `FA`/`FAD`/`FAL` | 10 / 100 / 1000 s | damping average window (both / DPLL / LOCK) |
 
@@ -1238,6 +1334,26 @@ settle), `KL` (list the filter state) — meanings in Part 4.6.
 | `SAW 0|1` | — | sawtooth (qErr) correction off/on — bare `SAW` shows status; recommended ON with a timing receiver (save with `ES FLAGS`) |
 | `WU 0|1` | — | OCXO warm-up on boot — **auto-saved** |
 | `SPL 0|1` | — | boot animation on/off — **auto-saved** |
+| `BL [%]` | 30..100 | TFT backlight brightness — **auto-saved**. Bare `BL` reports it. |
+
+**The backlight, and why 100 % is the quiet setting.** `BL` drives a P-channel
+MOSFET on **PB5** (TIM3 CH2, 20 kHz) between the 3.3 V rail and the panel's LED
+anode: gate through ~47 Ω, a 100 kΩ pull-down to ground, and 10–47 µF of bulk
+at the drain. The stage **inverts** — a low gate is full brightness — so the
+firmware writes the complement, and `BL 100` lands on a compare of zero: the
+pin sits statically low and the stage does not switch at all. That matters
+because it is the 3.3 V rail that feeds VDDA, and therefore the ADC reference,
+the phase reading and the Vctl monitor. Full brightness is the quietest
+setting, not the loudest; dimming costs a little rail noise and buys back load
+and heat in an enclosure that is thermally coupled to the OCXO.
+
+The floor is 30 % for a reason that is not electrical: below about a third the
+panel stops being readable rather than becoming usefully dim, so a mistyped `3`
+would leave you looking at what could equally be a dead board. On a board
+without the MOSFET the pin simply carries a square wave and nothing happens.
+`BL` is compiled in with any TFT, and **yields PB5 to the 2 kHz test generator**
+if that has been explicitly enabled — a default must not take a pin from a
+deliberate choice.
 
 ### Saving, recalling, resetting
 | Command | What it does |
@@ -1251,10 +1367,19 @@ settle), `KL` (list the filter state) — meanings in Part 4.6.
 | `RB` | warm reboot (keeps settings — but does **not** auto-save first) |
 | `CR YES` | cold restart: wipe settings + learned data, factory defaults (the YES is required because the learned model takes days to rebuild) |
 
-### Known quirks in v1.06 (honest list)
+### Known quirks in v1.07 (honest list)
 
-1. The `H` help line for `ES` omits `ALGO12` — the command itself accepts
-   it (save the algorithm-12 block with `ES ALGO12`).
+1. `LRN` does two jobs and tells them apart by the number: `0` and `1`
+   switch self-learning, any other whole number is the detector range in ns.
+   The number is read as an integer, so a fraction is dropped (`LRN 2500.7`
+   sets 2500) and exponent form is not understood — `LRN 1e3` reads as 1 and
+   switches learning on instead of setting 1000 ns. A word other than `R`
+   counts as 0, so `LRN ON` switches learning off. Type the range in full.
+   The tuner's `LRN` box sends its number the same way: 0 or 1 there switches
+   learning rather than setting a range.
+2. After `LRN R` the firmware suggests `ES FLAGS`, which saves only the on/off
+   switch. The drift and damping `LRN R` leaves are live data (Part 9): they
+   are saved by themselves within 20 minutes, and at once by a full `ES`.
 
 ## Part 8 — The PC tuner
 
@@ -1370,7 +1495,7 @@ The practical checklist, one last time:
 | Boot freezes right after `TFT: init start` | same as above — check wiring and the driver `#define` |
 | USB serial missing after upload | press RESET; if still gone, Zadig driver for VID 0483/PID 5740 (Part 2.5) |
 | Settings/calibration gone after flashing | someone used **Erase Chip** — that's the sector 7 rule (Part 2.2); re-run `CT`, `LC`, `ES` |
-| Yellow LED off | no GPS fix — antenna, sky view, cable |
+| Yellow LED off | no GPS fix and not in holdover — antenna, sky view, cable. In holdover it always blinks, so a dark LED never means "frozen output" |
 | `HDOP:TIME` never appears | survey-in not finished (needs timing receiver + `SV 1` + good sky); it re-runs after each power loss |
 | `CT` fails / rejects K | EFC wiring or oscillator sensitivity out of 0.02–2 mHz/LSB range — check the DAC buffer and EFC span |
 | `LC` fails | run `CT` first; keep the unit still during the 5 minutes |

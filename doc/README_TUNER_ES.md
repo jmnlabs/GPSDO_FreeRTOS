@@ -26,7 +26,7 @@ pip install PySide6 pyqtgraph pyserial tzdata
 | PySide6 | la interfaz de usuario Qt |
 | pyqtgraph | las gráficas en vivo |
 | pyserial | la comunicación con la placa |
-| tzdata | solo el botón **Generate tz_table.h** |
+| tzdata | solo el botón **Generate gpsdo_tz_table.h** |
 
 `tzdata` es opcional si nunca pulsas ese botón, y en Linux o macOS el sistema ya
 proporciona los mismos datos de zonas. En Windows es la única fuente, ya que el
@@ -47,12 +47,15 @@ escribió. Al conectar lee la versión de la propia placa y compara:
   la medida en que la haya ofrecido:
 
   ```
-  connected — firmware v1.06-rtos  build 27  2026-09-02 09:46  CRC 78B08D26
+  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
   ```
 
   Los tres datos responden a preguntas distintas. La **versión** dice con qué
-  protocolo habla el afinador. El **build** y la hora de compilación dicen de qué
-  árbol de fuentes salió. El **CRC** dice qué binario está corriendo realmente, y
+  protocolo habla el afinador. El **build** — dentro del nombre desde el build
+  56, `.57rt` (el propio build 56 escribía `-rt56`); un firmware anterior
+  (`v1.07-rtos`) lo envía aparte y la línea
+  muestra `build N` — y la hora de compilación dicen de qué árbol de fuentes
+  salió. El **CRC** dice qué binario está corriendo realmente, y
   es el único que no puede quedarse obsoleto: la placa lo calcula de su propia
   flash al arrancar, así que sigue siendo honesto aunque el compilador de Arduino
   reutilice un objeto y la marca de tiempo no lo refleje. Todo lo que va después
@@ -71,17 +74,20 @@ placa nunca ha oído. Usa el par que se distribuyó junto.
 
 | Pestaña | Función |
 |---------|---------|
-| **LTIC (algo 10)** | PID por etapa del lazo de fase de tres etapas, más la calibración del detector |
-| **LTIC-Lars (algo 11)** | Los parámetros del PI continuo (`LG`, `LD`, `LTC`, …) |
-| **Multi-level (algo 12)** | Los dos escalares (`MG`, `MR`) y los once límites de fase por nivel |
-| **FA damping** | Ventana de promediado de amortiguación, por etapa |
 | **PID algo 3-9** | Kp / Ki / Kd / I_LIMIT para los algoritmos en el dominio de la frecuencia |
+| **LTIC (algo 10)** | PID por etapa del lazo de fase de tres etapas, más la calibración del detector y la ventana de promediado de amortiguación (`FAD` / `FAL`, por etapa) |
+| **LTIC-Lars (algo 11)** | Los parámetros del PI continuo (`LG`, `LD`, `LTC`, …) |
+| **LTIC-MLA (algo 12)** | Los dos escalares (`MG`, `MR`) y los once límites de fase por nivel |
 | **Calibration** | `LC`, `CT` y las constantes del detector |
 | **Raw monitor** | Todo lo que envía la placa, sin analizar |
 | **Help** | La referencia completa de comandos del firmware |
 
 Todos los grupos de parámetros se leen al conectar, así que los paneles arrancan
-poblados en vez de vacíos.
+poblados en vez de vacíos. Las pestañas siguen los números de los algoritmos.
+Los comandos que describen la placa y no al lazo — las escalas del camino de
+salida (`DV`, `AV`, `VS`), el puente de span del EFC (`SPAN`), la
+retroiluminación (`BL`) — no tienen pestaña propia: van por la caja de
+comandos, y la pestaña **Help** los documenta con el resto.
 
 ---
 
@@ -224,8 +230,8 @@ el registro termina, de modo que un log está entero redactado o entero sin
 redactar; uno redactado a medias parece seguro de un vistazo y no lo es. En
 cualquier caso el propio log lo dice, en su segunda línea.
 
-**Generate tz_table.h** reconstruye la tabla de zonas horarias del firmware a
-partir de los datos IANA de esta máquina y escribe `tz_table.h` junto al script.
+**Generate gpsdo_tz_table.h** reconstruye la tabla de zonas horarias del firmware a
+partir de los datos IANA de esta máquina y escribe `gpsdo_tz_table.h` junto al script.
 Sustituye al antiguo `gen_tz_table.py`, así que el tuner es ya el único script
 que mantener.
 

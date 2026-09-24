@@ -1,4 +1,4 @@
-# GPSDO v1.07.57rt
+# GPSDO v1.06.42rt
 
 A GPS-disciplined 10 MHz OCXO on an STM32 BlackPill (F411CE), running FreeRTOS.
 Fourteen disciplining algorithms (0–13), a time-interval counter with
@@ -47,87 +47,7 @@ same ground in more depth.
 
 ---
 
-## What's new in v1.07 (builds 43-57, released 2026-09-24)
-
-**The output path tells the truth.** `DV` and `AV` state what full code means
-at the output and what divider sits before the ADC pin, so the `DAC` report's
-commanded-against-measured check — which flagged MISMATCH on every reading of
-a 5 V board — becomes exact; `VS` says what the PA0 divider is jumpered to
-(V3 boards: the 5 V rail or the voltage reference, checked against `DV`). The
-report also names what the converter can really do: an 18-bit step on the
-AD5680, 24 on the dithered PWM, 50 000 steps on plain PWM in a build without
-the dither engine — not one 16/24-bit figure for all three.
-
-**CT handles gentle plants.** A second three-point pass, wider and centred on
-the fitted 10 MHz code, runs when K is small (span-reduced EFC, external
-DAC) — on such boards the fixed sweep moved the oscillator under a hertz and
-the slope fit scattered 10-50% high against DMM ground truth. Both sweep ends
-keep a rail guard, and the plausibility floor drops to 0.01 mHz/LSB.
-
-**Indicators stopped bluffing.** The status bar's lock verdict comes from the
-loops themselves (`tft_loop_locked()` with hysteresis; four states instead of
-one green lie), algorithm 13 publishes a real verdict computed in the filter
-(detector spoke, estimate inside the band, uncertainty inside the band — a
-detector frozen 1.3 µs out no longer reads as locked for four hours), the
-yellow LED stays lit in manual holdover when the fix drops, and `LPOL 0`
-says "not set" instead of the "auto" it never was.
-
-**Readings that look calm but aren't are gone.** The serial phase report now
-prints `dph:ovf` outside the detector's band instead of a plausible number
-measured at three times the noise; `LC` rejects an anchor slope the ramp
-cannot have (one such calibration cost eight picDIV re-arms); the tab report
-leaves unfilled averages empty rather than printing 0.0 Hz; algorithms 12 and
-13 finally count corrections in `CS`.
-
-**Under the hood:** the control voltage no longer passes through
-`analogWrite()` (TIM4 driven through registers, carrier unchanged); an
-uninitialised read (`snap_c`) and a null pointer (`set_trend(0)` → `NoCT`)
-fixed;
-settings records grow without version bumps; `BL` dims the TFT backlight
-(30-100 %, and 100 % is the electrically quietest setting); files renamed to
-a uniform `gpsdo_` prefix and the repository re-laid-out so a clone reads.
-
-**Two EFC spans, two calibrations (`SPAN`, build 55).** A board with the EFC
-level shifter runs two different plants — on the V3 prototype K differs four
-to five times between the jumper positions — and every coefficient is derived
-from K. A
-second pole of that jumper now reaches PB14, and the firmware keeps one
-calibration per position: on a move it re-derives every coefficient, rescales
-the learned state, and **remaps the control code so the EFC pin keeps its
-voltage** — through a pair of codes *measured* on the board, not modelled.
-Simulated over full power cycles against a build without the sensing: a move
-between calibrated positions lands at 1e-11 instead of 1e-7. A board without
-the wire behaves exactly as before.
-
-**The DST bug every zone had (build 52).** Transition instants are written in
-local time and were compared against UTC — an error of exactly the zone's
-offset at the boundary (New York switched five hours early, on the Saturday
-evening; London's spring change looked right only because GMT is UTC). The
-comparison now runs on day-of-year ordinals with each boundary converted by
-its own offset; verified minute-by-minute against IANA data across 416 zones.
-The zone table is regenerated from IANA 2026d and its generator now checks
-its own work two years ahead — including Dublin, which writes its rule
-backwards.
-
-**The loops behave at the moments that were never tested (builds 54-57),
-measured on real captures.** Algorithm 11 spent five minutes answering
-detector noise at full gain after the phase was already home (replayed on a
-recorded plant, the mean output step falls from 5.9 to 0.5 LSB, and to 0.2
-once settled); algorithm 13 kicked the DAC 143 LSB one second after every
-restart (the short control horizon now waits for a horizon's worth of
-measurements, and the correction is slew-limited); `CT` restarts the loop
-after centring it, so its first steps stop undoing the calibration. And the
-build number moved into the firmware's name — `v1.07.57rt` — so a capture, a
-photo or a tuner line says which build it came from; `DV` keeps its third
-decimal (the ADR4540 boards run 4.096 V).
-
-**Upgrading from v1.06:** settings carry over — PID, LC, timezone and the
-rest — with the new fields at their defaults; no factory reset.
-
-The full history, with the reasoning and the ideas that were tried and
-abandoned, is in the [changelog](doc/CHANGELOG_EN.md).
-
-## Previously — v1.06 (build 42)
+## What's new in v1.06 (build 42)
 
 **Algorithm 13 — a Kalman filter.** Three states (phase, frequency, aging)
 with scalar updates; it *measures* its own detector noise (R, from two lags of
@@ -170,7 +90,7 @@ were tried and abandoned, is in the [changelog](doc/CHANGELOG_EN.md).
    `gpsdo_config.h`.
 2. **Flash** — via ST-Link or DFU.
 3. **Connect** — serial at 115200. `H` lists every command.
-4. **Calibrate** — `CT` first (~3 min, doubled when the plant is gentle): it measures the oscillator's Hz-per-LSB
+4. **Calibrate** — `CT` first (~3 min): it measures the oscillator's Hz-per-LSB
    slope and tunes every algorithm from it. Then `LC` to calibrate the phase
    detector. **That order matters** — `LC` without a measured slope falls back to
    a generic value and comes out quietly wrong.
@@ -190,7 +110,7 @@ The [manual](doc/README_EN.md) covers each of these properly.
 ```
 GPSDO_FreeRTOS/     the Arduino sketch — source files and nothing else
 doc/                manual, changelog, tuner guide, bring-up (EN / PL / ES)
-tools/              harnesses and analysers: hostcheck, loopsim, spansim, the tuner
+tools/              harnesses and analysers: hostcheck, loopsim, the tuner
 README.md           this file
 .gitignore
 ```
@@ -243,7 +163,6 @@ gpsdo_state.cpp             shared state and persistence wrappers
 gpsdo_dac.cpp               control-voltage output: PWM or external DAC
 gpsdo_dac_ext.cpp           external SPI DAC: AD5680 (18-bit), bit-banged
 gpsdo_pwm24.cpp             24-bit control voltage from dithered PWM
-gpsdo_span.cpp              EFC span jumper on PB14: one CT calibration per position
 gpsdo_backlight.cpp         TFT backlight dimming on PB5 (the BL command)
 gpsdo_health.cpp            correction statistics behind the CS command
 gpsdo_flash_ring.cpp        wear-levelled flash storage, settings and live data

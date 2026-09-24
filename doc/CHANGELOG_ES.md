@@ -13,7 +13,12 @@ Basado en **GPSDO v0.06c** de André Balsa
 **Qwen3.8-Max** como asistentes de programación, y diseño de PCB por Scrachi
 (foro EEVBlog).
 
-El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
+Desde el build 57 cada build se llama `GPSDO vX.YY.NNrt`: la versión, `NN` el
+número de build (`BUILD_SERIAL` en `gpsdo_build_id.h`) y `rt` por el linaje
+del port a FreeRTOS. El build 56, el primero con su número en el nombre, lo
+escribía `GPSDO v1.07-rt56`. Las versiones anteriores llevaban el sufijo
+`-rtos` — `v1.06-rtos` fue el build 42 — y conservan el nombre con que se
+publicaron.
 
 > **Nota sobre la traducción.** Las entradas desde v0.95 en adelante están
 > íntegramente en español y se mantienen al día. Las anteriores están traducidas
@@ -25,6 +30,1064 @@ El sufijo de versión `-rtos` marca el linaje del port a FreeRTOS.
 > (`CHANGELOG_EN.md`) es la referencia completa.
 
 ---
+
+## [v1.07] — publicado 2026-09-24 (build 57)
+
+Publicado como build 57, la primera versión que lleva su build en el nombre:
+`GPSDO v1.07.57rt`. Como antes, las entradas llegaron aquí cuando estaban
+medidas, no cuando estaban escritas.
+
+### Añadido
+- **`SPAN` — dos calibraciones `CT`, una por cada span del EFC, elegidas por
+  el puente de span en PB14 (build 55).** Una placa con el desplazador de nivel
+  del EFC gobierna el oscilador con el span de control completo o con uno
+  reducido, y son dos plantas distintas: en el prototipo V3 de Dan Wiering `CT`
+  midió 8209 LSB/Hz con el span completo y 40873–46711 con el reducido, entre
+  5,0 y 5,7 veces más — aunque la cifra del span completo es anterior al cambio
+  de una referencia de 5 V por una de 4,096 V, y con una misma referencia las
+  dos posiciones difieren en el divisor, 4,1–4,7 veces. De ese número sale cada
+  coeficiente del lazo, así que
+  hasta ahora una placa cuyo puente cambiaba de posición seguía con la
+  calibración de la otra hasta que alguien repetía `CT`. El segundo polo del
+  puente va ahora a **PB14** (puesto = a masa = REDUCED; quitado, o sin cablear
+  = FULL, de modo que una placa sin ese cable conserva su única calibración
+  como antes) y el firmware guarda una K por posición. Cuando el puente se
+  mueve — con antirrebote, medio segundo:
+
+  - cada coeficiente se vuelve a derivar de la K de esa posición — el mismo
+    conjunto que deriva `CT`, ahora en una sola función, `algo_coeffs_from_k()`,
+    que llaman ambos — y el estado aprendido en LSB (feed-forward de LRN,
+    tempco del algoritmo 9) se reescala con la razón entre las dos;
+  - **el código de control se reasigna para que el pin EFC conserve su
+    tensión**, y la frecuencia antes del cambio es la frecuencia después:
+    `c_B = p_B + (K_A/K_B)·(c_A − p_A)`, donde `(p_A, p_B)` es un par de
+    códigos que se sabe que dan la misma tensión en ambas posiciones. Los
+    offsets de las dos rutas los fijan la referencia, el divisor y el trimmer,
+    y ninguno es visible para el firmware, así que el par se mide en lugar de
+    modelarse — el código de la posición vieja en un cambio hecho con el lazo
+    enganchado, emparejado con el de la nueva en cuanto su propio lazo se
+    gana el enganche, o el nulo que encuentra `CT` — y se reancla en cada
+    cambio, para que un error de K pivote sobre el punto donde el lazo está de
+    verdad;
+  - el lazo se reinicia, como en un cambio de algoritmo.
+
+  Una posición sin calibración propia funciona con los coeficientes de la otra,
+  como siempre hizo una placa de una sola calibración, mientras `CT` arranca por
+  sí mismo — con fix de GPS, nunca en holdover, y hasta tres veces más, 10, 20 y
+  40 minutos después de un fallo; después se detiene y lo dice. Un puente
+  movido con la placa apagada se atiende al arrancar, antes de que arranque el
+  lazo. El primer arranque de este build asigna la calibración
+  existente a la posición que lee el pin; si luego `CT` en la otra posición mide
+  la misma planta (dentro de 1,5×), la más antigua se da por medida en el sitio
+  equivocado — el caso típico es una placa calibrada en REDUCED antes de
+  cablear PB14 — y se olvida. `SPAN` muestra el estado, `SPAN CLR FULL|REDUCED`
+  olvida una posición y el informe `DAC` lo imprime bajo la línea de la planta.
+  Las ganancias manuales en LSB (`LG`, `MG`, `LTK`) son del operador y no se
+  reescalan; un cambio de posición avisa de cada una que esté fijada.
+
+  **Simulado antes de publicarse.** `tools/spansim` (nuevo) compila sin
+  modificar este módulo, el almacén de ajustes, los algoritmos y la unidad de
+  salud, y los gobierna con un modelo de la placa V3 — divisor 4,083:1,
+  1,5967 Hz/V, envejecimiento 1,7e-10/día — bajo el algoritmo 11 con LTC 60,
+  cada ciclo de alimentación como un proceso aparte que comparte una imagen de
+  flash. Cada escenario se repite en un build sin detección de span, que es el
+  firmware tal como era:
+
+  | | con detección de span | una calibración |
+  |---|---|---|
+  | cambio entre dos posiciones calibradas: aterriza en | 3e-12 … 1,8e-11 | 3e-8 … 1,2e-7 |
+  | excursión de fase / reenganche | 13–49 ns / 399 s | 3,5–11,5 µs / 665–877 s |
+  | puente movido con la placa apagada: arranca en | 8,1e-12 | 1,2e-7 |
+  | arranque en frío, 3e-8 de retrace, luego REDUCED: aterriza en | 5,6e-10 | 3,3e-8 |
+
+  La cifra del arranque en frío es el error propio de la reasignación: los dos
+  `CT` se equivocaron un 2 % y un 10 % en sentidos opuestos, y el lazo estaba a
+  417 códigos del par.
+
+  Se guarda en 12 bytes añadidos al final del bloque de ajustes (380 → 392
+  bytes, cada campo anterior en su offset de siempre, comprobado con
+  `offsetof` bajo arm-none-eabi). Un registro más antiguo devuelve los campos
+  nuevos a 0, que significa «nunca registrado»; el build 54 leyendo un registro
+  del build 55 toma los primeros 380 bytes, así que volver atrás también es
+  seguro.
+- **`VS` — qué está midiendo el divisor de PA0 (build 49).** `VS VCC` o
+  `VS VREF`, se guarda solo junto al grupo de la ruta de salida. Desde la placa
+  V3 un puente en la parte alta de ese divisor de 4k7 + 4k7 selecciona la
+  **referencia de tensión** en lugar del raíl de 5 V: mismo pin, mismo divisor,
+  mismo escalado, objeto distinto. El firmware no ve un puente, así que se le
+  dice — el mismo arreglo que con `DV`, `AV` y la ruta del DAC, y por la misma
+  razón: la única huella que deja un puente es una tensión que no está donde el
+  firmware la esperaba, y eso solo sirve si al firmware se le dijo qué esperar.
+
+  Decírselo compra la comprobación. En `VREF` el informe `DAC` imprime la
+  lectura junto a lo que afirma `DV` y protesta pasado el 5 %, lo que caza una
+  referencia ausente, caída o sencillamente distinta de la que se montó. Esto
+  último no es un fallo sutil: una pieza de 5,000 V donde `DV` dice 4,096 deja
+  toda cifra de frecuencia que imprime la placa una quinta parte corta, en
+  silencio. La etiqueta del TFT sigue también al puente — llamar «Vcc» a una
+  referencia de 4,1 V se leería como una alimentación medio hundida.
+
+  Por qué un puente y no un pin propio: **no hay ningún canal de ADC libre**.
+  El convertidor alcanza PA0–PA7, PB0 y PB1 en este encapsulado, y con SPI1
+  llevando la pantalla los diez están ocupados. Liberar uno obligaría a mover el
+  reloj del AD5680 fuera de PB0: un pin comprado al precio de romper las placas
+  ya construidas.
+- **`BL` — atenuación de la retroiluminación del TFT (build 48).** 30..100 %,
+  se guarda solo junto con las banderas de pantalla. Gobierna un MOSFET de
+  canal P en **PB5** (TIM3 CH2, 20 kHz) entre el raíl de 3,3 V y el ánodo de
+  los LED del panel: puerta a través de ~47 Ω, 100 kΩ a masa para que el estado
+  esté definido mientras el pin está en alta impedancia tras el reset, y
+  10-47 µF de capacidad local en el drenador.
+
+  La etapa **invierte** — puerta baja es brillo máximo — así que el firmware
+  escribe el complemento, lo que convierte `BL 100` en una comparación igual a
+  cero: el pin queda estáticamente bajo y la etapa no conmuta en absoluto. Ese
+  es justamente el objetivo. El raíl de 3,3 V alimenta VDDA y con él la
+  referencia del ADC, la lectura de fase y el monitor de Vctl, de modo que el
+  brillo máximo es el ajuste *más silencioso*, no el más ruidoso; atenuar
+  cambia un poco de ruido en el raíl por carga y por calor en una caja acoplada
+  térmicamente al OCXO.
+
+  El suelo del 30 % existe por una razón que no es eléctrica: por debajo de un
+  tercio aproximadamente el panel deja de ser legible en vez de atenuarse de
+  forma útil, así que un `3` tecleado por error dejaría al operador sin poder
+  distinguir una pantalla tenue de una placa muerta. Se compila con cualquier
+  TFT y **cede PB5 al generador de prueba de 2 kHz** cuando este se ha
+  habilitado explícitamente: un ajuste por defecto no debe quitarle un pin a
+  una decisión deliberada. `TIM3` estaba libre: varios comentarios afirmaban
+  que allí vivía la captura de 1 PPS, pero esa es TIM2 canal 3 en PB10.
+
+  Se persiste en el **último byte de relleno del bloque de ajustes**, offset
+  319, junto a `dac_path` en 318 — `sizeof(SettingsBlock_t)` es 376 antes y
+  después y cada campo posterior conserva su offset, verificado con `offsetof`
+  bajo arm-none-eabi y no a ojo. Sin subir `SETTINGS_VER`, porque la recarga
+  exige coincidencia exacta de versión *y* tamaño, y subirla tiraría el PID, el
+  LC y la zona horaria de todo el mundo por un byte. Cero significa «sin
+  fijar», así que un registro escrito antes de que el campo existiera pide el
+  valor por defecto y no una pantalla apagada.
+- `DV` — voltios a código completo para el «ordenado» del informe `DAC`
+  (2,50..5,50 V, por defecto 3,30 = el modelo PWM). En un DAC externo de 5 V
+  el viejo modelo fijo de 3,3 V rebajaba el ordenado 1,5× y el informe
+  marcaba MISMATCH en cada lectura. Se guarda solo.
+- `AV` — ratio del divisor antes del pin ADC (1,00..10,00, por defecto
+  directo). Escala el «medido» y toda visualización de Vctl (línea de
+  telemetría, CSV, TFT). Se guarda solo. Con un divisor de medida en la
+  salida del DAC (10k+10k en las placas AD5680), `DV 5.00` + `AV 2.00`
+  hacen exacto el check de MISMATCH.
+- `SETTINGS_VER` 6: ambas escalas persisten con el bloque ALGO; los
+  registros v5 migran automáticamente con los campos nuevos por defecto.
+
+### Cambiado
+- **El número de build pasa dentro de la versión: `GPSDO v1.07.57rt` (build
+  57).** La versión, el build como tercer número y `rt` por el linaje
+  FreeRTOS, en lugar del `GPSDO v1.07-rt56` del build 56. Solo cambia la
+  escritura: el nombre sigue siendo `g_fw_version`, se compone solo en el
+  sketch, lo imprimen los mismos sitios y mide exactamente lo mismo, así que
+  toda pantalla que tenía sitio para `-rt56` lo tiene para `.57rt`. Las
+  cabeceras de los fuentes lo siguen (`Part of GPSDO v1.07.57rt`) — cambiarlas
+  fue una edición, así que por ahora todas dicen 57 — y también los títulos de
+  los documentos, incluido el README de v1.06 en la carpeta del sketch
+  (`v1.06.42rt`). El tuner lee las tres escrituras, `v1.06-rtos`,
+  `v1.07-rt56` y `v1.07.57rt`, compara solo la versión y omite el `build N`
+  aparte en la línea de estado cuando el nombre ya lo lleva.
+- **El nombre del firmware lleva su build: `GPSDO v1.07-rt56` (build 56).**
+  Sustituye a `GPSDO v1.07-rtos`. `rt` sigue marcando el linaje del port a
+  FreeRTOS; el número es `BUILD_SERIAL`, así que subir el build renombra el
+  firmware por sí solo, y una captura, una foto de la pantalla o una línea del
+  tuner dicen de qué build salieron. Se compone una sola vez en el sketch como
+  `g_fw_version` — el sketch es la única unidad que incluye
+  `gpsdo_build_id.h`, así que subir el build sigue recompilando solo el
+  sketch — y lo imprimen desde esa misma cadena el rótulo de arranque, `V`, la
+  cabecera de `H`, la cabecera del TFT y las pantallas de inicio del OLED y del
+  LCD, que tienen sitio para él hasta el build 999. La marca de compilación
+  sigue terminando en `build 56`, que es lo que leen los tuners anteriores a
+  este. `PROGRAM_VERSION` es ahora solo la versión, `v1.07`. La cabecera de
+  cada fichero fuente dice `Part of GPSDO v1.07-rt56`, y el número es el build
+  que cambió ese fichero por última vez (`gpsdo_flash_ring_core.c` todavía
+  decía v1.06). El build 57 pasó el número dentro de la versión — ver arriba.
+- **El tuner acepta ambos nombres y dice el build una sola vez (build 56).**
+  Su patrón de versión ya aceptaba cualquier sufijo tras la versión, así que
+  `v1.07-rt56` y `v1.06-rtos` se analizan los dos y solo se compara `1.07`; la
+  línea de estado omite el `build N` aparte cuando el nombre ya lo lleva.
+- **Tabla de zonas regenerada desde IANA 2026d, y el generador comprueba ahora
+  su propio trabajo (build 53).** 503 zonas, 88 reglas, ~3,34 KB de flash — la
+  misma huella que la tabla 2026c a la que sustituye.
+
+  **Las tres «filas rotas» reportadas contra la tabla anterior eran una falsa
+  alarma, y la razón merece quedar escrita.** La regla de cada zona es la cadena
+  POSIX del final de su fichero TZif, que es la regla que aplica *después de la
+  última transición que el fichero almacena* — no necesariamente la vigente el
+  día en que se genera la tabla. Para una zona con un cambio legislado por
+  delante ambas difieren, y si eso es un fallo depende por completo de la
+  pregunta que se haga.
+
+  Preguntado como *«¿es correcta esta regla para el año 2026?»*, seis zonas
+  parecen rotas: Columbia Británica, Alberta y los Territorios del Noroeste
+  dejan de aplicar horario de verano el **1 de noviembre de 2026**, así que
+  `America/Vancouver` lleva `MST7` y `America/Edmonton` lleva `CST6`, mientras
+  que los primeros diez meses de 2026 todavía tuvieron PDT y MDT. Preguntado
+  como *«¿es correcta para los años que esta tabla va a pasar en la flash?»*,
+  las seis son correctas, y el pie es exactamente la elección adecuada: una
+  tabla generada hoy debe llevar la era a la que *entra*, no la que deja.
+  Africa/Casablanca es la misma historia con ocho días de antelación: IANA
+  modela Marruecos como UTC+0 permanente desde el 20 de septiembre de 2026, que
+  es justo lo que dice `<+00>0`.
+
+  **Medido con el propio evaluador del firmware, no por argumento.** Cada
+  transición de cada zona de la tabla, desde hoy hasta finales de 2028, sondeada
+  dos minutos antes y un minuto después: **778 transiciones en 484 zonas, 1556
+  sondeos, y el firmware coincide en todos** salvo en los dos últimos minutos de
+  la era actual de Marruecos. Es además la prueba más dura que ha pasado la
+  corrección de DST del build 52.
+
+  El generador ya no depende de que alguien haga la pregunta correcta. Tras
+  escribir la tabla verifica cada regla contra el tzdata de la propia máquina
+  **dos años por delante** — la era en la que la tabla realmente vivirá — e
+  imprime o bien «todas coinciden» o las zonas que no. La comprobación compara
+  desfases en vez de reimplementar el motor de reglas del firmware, porque una
+  segunda implementación puede equivocarse en el mismo sitio y coincidir
+  consigo misma. Lee AMBOS desfases de una regla, no sólo el estándar, porque
+  Irlanda escribe su zona como `IST-1GMT0` — IST es el estándar y GMT un horario
+  de verano negativo, al revés que en todas partes y perfectamente legal. Una
+  comprobación que lee sólo el primer desfase declara Dublín roto en cada
+  ejecución, y una comprobación que grita con una zona correcta es peor que
+  ninguna: así es como se pasa de largo una queja real. Verificada en ambos
+  sentidos — callada sobre la tabla tal como se genera, y detecta un desfase
+  equivocado o una regla de DST ausente cuando se plantan.
+- **Nombres de archivo `gpsdo_` uniformes y una estructura de repositorio
+  legible (build 48).** Diecisiete archivos renombrados — `dac_ext`,
+  `flash_ring`, `flash_ring_core`, `live_store`, `settings_store`, `tz_table`,
+  `ubx_timtp`, `TeeSerial`, `build_id` y `GPSDO_algorithms` — de modo que todo
+  fuente propio del proyecto lleva el prefijo `gpsdo_` en minúsculas y un
+  listado de directorio separa el proyecto de aquello sobre lo que se apoya.
+  Los guardas de los encabezados siguen a los nombres.
+
+  **Cuatro archivos conservan su nombre a propósito**, cada uno porque el coste
+  de cambiarlo es silencio y no un error de compilación: `GPSDO_FreeRTOS.ino`
+  (Arduino exige que el archivo del sketch se llame como su carpeta),
+  `build_opt.h` (el compilador de Arduino busca ese nombre para recoger flags
+  adicionales: renombrado, las flags desaparecen y sigue compilando, solo que
+  distinto), `STM32FreeRTOSConfig.h` (la biblioteca lo incluye por ese nombre)
+  y `TM1637Display.*` (copia de una biblioteca ajena; el nombre de upstream es
+  lo que mantiene legible un futuro diff).
+
+  `doc/`, `tools/` y `README.md` salen de la carpeta del sketch al raíz del
+  repositorio, así que la carpeta del sketch contiene código y nada más, y con
+  ellos llega un `.gitignore`. Excluye la salida de compilación, las cachés de
+  Python y el directorio de trabajo de los PDF — y, deliberadamente, el
+  material de trabajo de `doc/`: la correspondencia, las auditorías y las
+  listas de tareas nombran personas y citan correo privado, y un `git add .`
+  descuidado no debería publicarlos.
+
+  De todo ello se encarga `tools/gpsdo_restructure.py`. Simulación por
+  defecto, idempotente, y **se niega a mover `tools/` mientras algún banco de
+  pruebas localice las fuentes contando directorios** — `hostcheck.sh`,
+  `loopsim/run.sh` y `algoswitch/run.sh` decían «dos niveles arriba», cierto
+  solo mientras `tools/` vive dentro de la carpeta del sketch; después apunta
+  al raíz, y hostcheck habría compilado un árbol vacío informando de éxito.
+  Los tres suben ahora hasta el `.ino`, que es correcto en ambas disposiciones.
+
+  Verificado ejecutando el script sobre un árbol v1.06 y luego sobre el árbol
+  v1.07 que hostcheck ya pasa 14/14 — donde informa de que no queda nada por
+  hacer, que es la forma de afirmar que su resultado y el árbol verificado son
+  lo mismo. Un fallo encontrado por el camino: el script recorre `tools/`, vive
+  en `tools/` y lleva todos los nombres antiguos en su propia tabla de cambios,
+  así que la primera ejecución convirtió esa tabla en una lista de identidades.
+  Ahora se excluye a sí mismo.
+- **La tensión de control ya no pasa por `analogWrite()` (build 48).** Ambas
+  rutas de salida son ahora dueñas de TIM4 mediante registros — `pwm24_begin()`
+  con la reproducción por DMA, el nuevo `pwm16_begin()` sin ella. La portadora
+  y la resolución quedan deliberadamente **sin cambios**: 100 MHz / 50 000 =
+  2,000 kHz, la misma cifra que producía `analogWriteFrequency(2000)`, de modo
+  que a ninguna placa se le mueve por esto el CT, el filtro ni la ganancia de
+  la planta.
+
+  Con ello desaparecen dos cosas. El `analogWrite()` del núcleo llama a
+  `pwm_start()`, que recalcula el preescalador y el auto-reload a partir de la
+  frecuencia pedida **en cada llamada** — la tensión de control se escribe una
+  vez por segundo durante toda la vida de la placa, así que eso era el
+  temporizador reconstruido una vez por segundo para cambiar un solo valor de
+  comparación: una oportunidad de perturbar la salida cada segundo, comprada a
+  cambio de nada. Y `analogWriteFrequency()` es una **global** del núcleo: se
+  aplica al pin que se escriba a continuación, así que en cuanto existe un
+  segundo PWM — la retroiluminación de arriba — ambos se pelean en silencio por
+  un único ajuste.
+
+  La ruta simple mapea además ahora **fondo de escala a fondo de escala**, la
+  misma regla que ya siguen la tabla de dither y el DAC externo: el código
+  65535 es una comparación igual al periodo. El núcleo dividía por 65 536, con
+  lo que el LSB superior quedaba inalcanzable; la diferencia de 15 ppm en mitad
+  del rango queda muy por debajo de lo que el CT resuelve.
+- CT en dos pasadas con plantas suaves: cuando la K de la primera pasada
+  baja de 0,12 mHz/LSB, una segunda tura de tres puntos vuelve a medir sobre
+  un reparto de códigos más ancho (objetivo ~0,8 Hz de excursión, centrado en
+  el código de 10 MHz deducido, nunca más estrecho que la primera y nunca a
+  menos de 1000 LSB de cualquiera de los dos extremos de escala). En esas
+  placas el barrido fijo de 20 480 LSB mueve el oscilador bastante menos de
+  un hercio y el ajuste de pendiente se desviaba un 10-50% hacia arriba
+  frente a la verdad del DMM. El suelo de plausibilidad de la K final pasa
+  de 0,02 → 0,01 mHz/LSB — defendible ahora que una puerta gruesa caza la
+  basura sin señal antes de creer cualquier K.
+
+### Corregido
+- **`CT` y `C` reinician el lazo en todos los builds (build 57).** El build
+  55 hizo que `CT` reiniciara el lazo tras centrarlo, pero puso el reinicio en
+  el gancho de `CT` del módulo de span, que un build sin `GPSDO_SPAN_SENSE`
+  compila vacío — así que allí la copia del código que guarda el lazo, todavía
+  la de antes del barrido, seguía tirando hacia ella. El reinicio está ahora en
+  el propio `CT`, y `C`, la calibración de dos puntos, recibe la misma línea,
+  porque también escribe un código nuevo y deja al lazo la misma copia
+  obsoleta. En el build de una sola calibración de `spansim`
+  (`GPSDO_SPAN_SENSE` desactivado), un `CT` justo después de mover el puente
+  de span: sin el reinicio el lazo tiró de vuelta hacia el código que `CT`
+  acababa de dejar, 3,1e-8 en el peor momento, volvió a enganchar 1416 s
+  después del cambio y anduvo a 1,1e-9 RMS en las dos horas siguientes; con
+  él, 5,0e-9, 1190 s y 2,2e-10. Un build con la detección de span activada se
+  comporta exactamente igual que antes: la mitad de span de la salida de
+  `spansim` es idéntica byte a byte. `tools/spansim` hace la llamada donde
+  ahora la hace `CT`.
+- **`DV` perdía su tercer decimal en cada reinicio (build 57).** Se guardaba
+  en centivoltios, así que `DV 4.096` — el ADR4540 de la V3 de Dan Wiering —
+  volvía de un reinicio como 4.10, un sesgo del 0,1 % en la columna
+  «ordenado» del informe `DAC`; y la consulta y el eco imprimían dos
+  decimales, así que `DV` mostraba 4.10 tanto si guardaba 4.096 como 4.10.
+  `DV` se guarda ahora también en milivoltios, en un campo añadido al final
+  del bloque de ajustes (392 → 396 bytes, sin cambio de versión), y `DV` y el
+  informe `DAC` lo imprimen con tres decimales. El campo en centivoltios se
+  sigue escribiendo con el mismo valor, así que un build anterior que lea un
+  registro nuevo conserva el `DV` de dos decimales de siempre, y un registro
+  de un build anterior se recupera exactamente como antes. Probado en el host
+  contra el almacén de ajustes real: todo `DV` de 2.500 a 5.500 en pasos de
+  0,1 mV vuelve al milivoltio; un registro de 392 bytes cae al valor en
+  centivoltios; el almacén del build 56 lee el registro de 396 bytes (4.10) y
+  el build 57 relee lo que el build 56 guardó después.
+- **`CT` reinicia el lazo después de centrarlo (build 55).** `CT` pone un
+  código nuevo en el pin, pero cada lazo guarda su propia copia de dónde
+  debería estar el pin — el integrador del algoritmo 11, el objetivo absoluto
+  del algoritmo 10 — y esa copia seguía teniendo el código de antes del
+  barrido, así que los primeros pasos del lazo tras `CT` volvían hacia él y
+  deshacían el centrado. `CT` pide ahora el mismo reinicio que un cambio de
+  algoritmo. Medido en `spansim` con un `CT` que acierta mientras el lazo ya
+  estaba trabajando: sin el reinicio el código quedaba veinte minutos después a
+  42 LSB del nulo de `CT`, en 1,0e-10, y el siguiente cambio de span,
+  reasignado desde ahí, aterrizaba a 1,1e-10; con él, 1,2e-11 y 3,7e-12. El
+  reinicio vive en el gancho de `CT` del módulo de span, así que un build
+  compilado sin `GPSDO_SPAN_SENSE` — desactivado solo por elección, la
+  configuración que se entrega lo trae activo — conserva el comportamiento
+  antiguo. El build 57 lo movió al propio `CT`, para todos los builds — ver
+  arriba.
+- **`tools/loopsim/run.sh` imprimía la sd de seguimiento bajo un encabezado de
+  sd de fase (build 55).** La línea del informe lleva un segundo `sd` desde que
+  se añadieron las estadísticas de seguimiento (`track sd 0.71 LSB`), y el
+  `.*sd` voraz de la tabla cogía ese: cada tabla que el script ha impreso desde
+  entonces era la sd de seguimiento en LSB bajo un encabezado que promete sd de
+  fase en ns, y nada parecía mal porque ambos son números pequeños y
+  positivos. Anclado en el campo anterior, la tabla del README vuelve a
+  reproducirse (ventana algo-12, `MG 0`: 3,70 / 2,93 ns frente a los 3,57 /
+  2,95 registrados, con el árbol cambiado desde entonces). Las conclusiones
+  sacadas de tablas de `run.sh` desde que aparecieron las cifras de seguimiento
+  merecen una segunda mirada; el programa loopsim en sí siempre acertó.
+- **`hostcheck` no veía una función `span_`, `algo_` o `health_` que faltara
+  (build 55).** Su comprobación de símbolos sin definir mira solo los nombres
+  con los prefijos del propio firmware, y esos tres no estaban en la lista: con
+  la definición de `span_poll` renombrada, cada fila seguía diciendo «clean».
+  Añadidos — junto con una lista `DEFAULT_ON` para los interruptores que la
+  configuración entregada trae activos (`GPSDO_SPAN_SENSE`), para que las filas
+  existentes sigan compilando las placas cuyo nombre llevan, y dos filas nuevas
+  que compilan sin él. 18 filas, todas limpias bajo arm-none-eabi.
+- **El algoritmo 11 martilleaba el EFC durante cinco minutos después de estar ya
+  en casa (build 54).** `s_locked` controlaba el prefiltro de fase — `if
+  (!s_locked) filt = 1u;` — y `s_locked` no es una afirmación sobre la fase. Es
+  un cronómetro: la prueba de enganche exige que fase Y frecuencia estén dentro
+  de sus ventanas *de forma continua* durante `LPF × LTC` segundos, cinco
+  minutos con los valores por defecto, así que un lazo que ya está en casa sigue
+  formalmente desenganchado cinco minutos más y pasaba cada uno de esos segundos
+  en modo rápido, sin suavizado, respondiendo a cada muestra de ruido del
+  detector con ganancia plena.
+
+  Encontrado en la captura de banco del 11.09, en el momento en que el algoritmo
+  13 cedió el paso al 11 con la fase en 2,4 ns: **299 segundos de `PLL` durante
+  los cuales la fase filtrada nunca salió de ±6,7 ns frente a una ventana de
+  100 ns — y el PWM se movió una media de 4,5 LSB por segundo, hasta 17 en un
+  segundo, y más de 4 en 145 de esos 298 segundos.** Diecisiete LSB son 5,4e-10
+  en esta placa. El mismo lazo, enganchado, durante 14,6 horas: 0 o 1 LSB cada
+  segundo, 2 LSB cuarenta veces, nunca más. Un orden de magnitud de ruido de
+  salida salido de una bandera que sólo significaba «cuánto tiempo lleva esto
+  bien».
+
+  El prefiltro sigue ahora a la fase y no al cronómetro: rápido mientras la fase
+  está fuera de la ventana, suavizado en cuanto está dentro **y lleva ahí tanto
+  tiempo como el que el filtro va a promediar**. Esa segunda mitad no sobra — la
+  prueba de ventana sola empeoraba las cosas, porque una fase que va *de salida*
+  también pasa por la ventana, y suavizarla ahí es como un lazo se entera tarde
+  de una perturbación (el banco de conmutación midió una excursión de 600 s
+  acabando en 340 ns en vez de 241). La permanencia es el propio `filt`, que es
+  la única elección coherente consigo misma: promediar N segundos tiene sentido
+  exactamente cuando los últimos N segundos describían lo mismo.
+
+  **Reproducido sobre la planta medida del 26.08 con los ajustes de la propia
+  placa** (LTC 60, LFD 3, LPL 100, LPF 5, LG 2,130), sobre los 300 s que el lazo
+  pasa formalmente desenganchado con la fase ya en casa:
+
+  | | paso medio | peor segundo | segundos > 4 LSB |
+  |---|---|---|---|
+  | antes | 5,88 LSB | 22 LSB | 159 de 300 |
+  | después, ventana entera | 0,49 LSB | 13 LSB | 7 de 300 |
+  | después, cumplida la permanencia | **0,21 LSB** | **1 LSB** | **0** |
+
+  Los primeros veinte segundos conservan por construcción el comportamiento
+  rápido anterior: el lazo sigue siendo rápido hasta que tiene la evidencia para
+  permitirse suavizar. Todo lo demás queda igual y se comprobó en vez de
+  suponerse — tiempos de adquisición idénticos en los cuatro escenarios
+  (estabilizado, 800 ns fuera, 1500 ns fuera, detector contra el tope), sd de
+  fase idéntica en cinco semillas de ruido, algoritmo 12 bit a bit, y el banco de
+  conmutación de vuelta a las cifras que imprimía antes del cambio.
+
+- **El algoritmo 13 daba una patada al DAC un segundo después de cada reinicio
+  (build 54).** Medido en el banco en el relevo del algoritmo 11 en la captura
+  del 11.09 — PWM 40835 → 40978 → 40871, un **paso de 143 LSB en un segundo,
+  4,6e-9 de salida**, en una placa que estaba enganchada al nanosegundo un
+  segundo antes. Rastreado en el simulador hasta su causa real, que no era la
+  evidente:
+
+  La primera medida de frecuencia del filtro tras un reinicio es una EMA del
+  **contador de un segundo cuantizado a hercios enteros**, y `P[1][1]` sigue en
+  el prior ancho de arranque en frío, así que el estado de frecuencia se mueve
+  un 61 % del camino hacia un número que es sobre todo rizado de la EMA —
+  3,79 ns/s, que son 119 LSB de corrección en esta placa. El control la aplicó
+  entera; al segundo siguiente se llevó casi toda de vuelta. `lim_lsb` es toda
+  la banda del detector y nunca actúa en un lazo estabilizado, así que el
+  limitador se quedó mirando.
+
+  Dos cambios, y la medida dice que ambos se ganan su sitio. **El horizonte
+  corto de control ya no se engancha con la primera lectura en banda** — tras
+  una muestra la estimación *es* esa muestra — sino que espera a que el filtro
+  haya promediado un horizonte de medidas, que es la escala de tiempo propia del
+  lazo y no una constante nueva. Y **la corrección está ahora limitada en
+  velocidad de cambio** además de acotada: el límite dice hasta dónde puede ir,
+  éste dice con qué rapidez puede cambiar — la banda del detector repartida en
+  un horizonte de control. En una placa estabilizada `du` cambia mucho menos de
+  un LSB por segundo, así que nunca actúa; el resto va al mismo acarreo que usa
+  la vía sub-LSB, de modo que un segundo limitado se retrasa, no se pierde.
+
+  Peor paso de un segundo en el primer minuto, planta nocturna del 03.09, cinco
+  semillas de ruido:
+
+  | | s1 | s2 | s3 | s4 | s5 |
+  |---|---|---|---|---|---|
+  | antes | 48 | 78 | **175** | 120 | 16 |
+  | sólo límite de velocidad | 33 | 52 | 28 | 63 | 16 |
+  | ambos | **13** | **27** | **9** | **19** | **10** |
+
+  La sd de fase, dPWM, el peor paso de toda la tirada y el ADEV en cada tau
+  quedan sin cambios.
+
+- **La nota de `AP` recomendaba algoritmos que no pueden hacer lo que pide
+  (build 54).** Decía «use a PLL algorithm (LA 4/5/7) to keep phase locked
+  long-term» — un consejo anterior a los algoritmos 10–13. Esos tres actúan
+  desde el contador y no tienen detector de fase alguno, así que no pueden
+  sostener el divisor donde `AP` lo deja; los lazos LTIC sí pueden, y además se
+  rearman solos cuando el detector dice que el divisor ha perdido sincronismo.
+  Dan Wiering eligió el algoritmo 7 para una tirada nocturna y luego se preguntó
+  por qué veía eventos de rearme — los algoritmos 0–9 no rearman nunca, y esta
+  línea es la razón más probable de que estuviera ahí.
+
+- **`loopsim` aprendió a informar de lo que el lazo le hizo al pin (build 54).**
+  El estadístico del actuador era un RMS de toda la tirada, que promedia hasta
+  desaparecer un transitorio de un segundo — y un paso de un segundo es
+  exactamente lo que un analizador de fase dibuja como pico. Ahora imprime
+  además el peor segundo aislado y el peor segundo del primer minuto, donde
+  viven los transitorios de reinicio. Los mandos del algoritmo 11 — `LTC`,
+  `LFD`, `LPL`, `LPF` y `LG` — están expuestos como variables de entorno para
+  poder reproducir una captura con los ajustes que la placa tenía de verdad, y
+  el volcado lleva el control aplicado junto a la fase. Todos los números de las
+  dos entradas anteriores salieron de estas adiciones.
+- **Regenerar la tabla de zonas devolvía el guard de cabecera anterior al
+  renombrado (build 53).** El fichero pasó a ser `gpsdo_tz_table.h` en la
+  reestructuración de v1.07 y su guard pasó a `GPSDO_TZ_TABLE_H`, pero el
+  generador seguía escribiendo `TZ_TABLE_H` — de modo que cada pulsación del
+  botón lo deshacía en silencio, y `TZ_TABLE_H` es justo la clase de nombre
+  genérico que también elige otra biblioteca. Corregido en el generador y en la
+  tabla entregada.
+- **Cada cambio de horario de verano ocurría en el momento equivocado, por el
+  tamaño del propio desfase (build 52).** `tz_offset_now()` comparaba las horas
+  de transición de la zona — que POSIX escribe en hora LOCAL — contra UTC, y un
+  comentario llamaba a esa diferencia irrelevante para un reloj de pared. No es
+  irrelevante, y no es «una hora más o menos» como afirmaba el comentario: el
+  error es exactamente el desfase vigente en la frontera. Medido contra los
+  instantes reales de 2026, antes del cambio:
+
+  | zona | primavera | otoño |
+  |---|---|---|
+  | Europe/London | exacto | **1 h tarde** |
+  | Europe/Berlin, Warsaw | 1 h tarde | 2 h tarde |
+  | Europe/Athens | 2 h tarde | 3 h tarde |
+  | America/New_York | **5 h ANTES** | 4 h antes |
+  | America/Denver | 7 h antes | 6 h antes |
+
+  El cambio de primavera de Londres salía exacto sólo porque GMT *es* UTC, y esa
+  coincidencia es lo que mantuvo oculto el fallo: la zona que el autor habría
+  probado primero es la única en la que media falta se cancela. Nueva York es el
+  caso que nadie podría haber pasado por alto — el reloj saltaba a las 21:00 del
+  sábado por la noche, cinco horas antes que el país.
+
+  Nunca hubo el problema del huevo y la gallina que temía el comentario
+  antiguo. Una regla de inicio POSIX se escribe en hora local ESTÁNDAR y una de
+  fin en hora local de verano; el desfase de cada una se conoce antes de la
+  comparación, así que cada frontera se convierte a UTC restando el suyo. Sin
+  iteración y sin conjeturas. La comparación corre ahora sobre un ordinal de día
+  del año en vez de una fecha empaquetada, porque la resta puede cruzar la
+  medianoche — Australia/Sydney empieza a las 02:00 AEST, que son las 16:00 UTC
+  del día *anterior* — y las fronteras se envuelven dentro del año.
+
+  **Verificado contra los datos IANA de esta máquina, no por argumento.** Cada
+  zona de la tabla integrada se recorrió minuto a minuto durante 2026 y sus
+  transiciones se compararon con `zoneinfo` de Python: **416 zonas coinciden
+  ahora al minuto**, mientras que antes del cambio la misma prueba fallaba en
+  los instantes de frontera en todo lo que no fuera UTC. Las cinco restantes son
+  las tres filas malas de la tabla descritas en la entrada siguiente, más
+  Casablanca y El Aaiún, cuyo horario de verano sigue el Ramadán y no puede
+  escribirse como regla POSIX — algo que el firmware ya dice en voz alta al
+  seleccionarlas.
+
+  Encontrado porque Dave (Solder_Junkie) en EEVblog preguntó si `TZ London`
+  cambiaría solo a finales de octubre. Lo hacía, una hora tarde, y la pregunta
+  bastó para que alguien por fin lo midiera.
+
+- **El brillo del TM1637 estaba puesto en 1 de 7 bajo un comentario que decía
+  5/7 (build 52).** Un `setBrightness(1)` pelado enterrado en la tarea de
+  pantalla, sin manera de que quien monta la placa sepa si un módulo apagado es
+  el firmware o la pieza. Ahora es `TM1637_BRIGHTNESS` en `gpsdo_config.h`, por
+  defecto 4, junto a `HT16K33_BRIGHTNESS`, donde uno lo buscaría, y documentado
+  en la sección del reloj LED del manual.
+
+  **Las dos configuraciones TM1637 las compila ahora `hostcheck`, y nunca lo
+  hizo.** Así sobrevivió esto, y no es lo único que sobrevivió en ese bloque: la
+  máscara de dos puntos de seis dígitos sigue llevando al lado un comentario que
+  dice que el valor que usa el código no enciende ningún dos puntos. Una
+  configuración que nadie compila es una configuración que nadie lee. Dieciséis
+  configuraciones, frente a catorce. (El LCD 20x4 sigue sin fila — necesita
+  stubs de `hd44780` que aún no existen. Un hueco declarado, no silencioso.)
+
+- **El tuner dibujaba una estimación de fase sólo para el algoritmo 13; ahora la
+  dibuja cada lazo LTIC que tiene una (build 52).** El algoritmo 11 mantiene una
+  fase filtrada (`s_phase_filt`, un suavizador exponencial cuya constante es
+  `time_const/filter_div` una vez enganchado y 1 mientras adquiere) y la ha
+  impreso como `phase=` desde siempre — el tuner simplemente nunca la dibujó,
+  porque los algoritmos 10 y 11 compartían una familia de gráficas y es la
+  familia la que elige la superposición. Ahora son familias distintas.
+
+  El panel del algoritmo 12 estaba peor que vacío: mostraba `ph`, que *parece*
+  el campo correcto y es la lectura cruda del detector convertida a `int16_t` —
+  la medida cuantizada a nanosegundos enteros, etiquetada «error de fase». El
+  panel superior muestra ahora `dph`, la misma medida con su decimal, y la
+  estimación va encima.
+
+  Esa estimación hubo que exponerla, porque el algoritmo nunca publicó ninguna:
+  `mlacc_stats_t` gana `est_ns`, la propia respuesta del acumulador —
+  `last_phase` normalizada como la normaliza la corrección misma — impresa en la
+  línea Learn como `est=`, añadida al FINAL de los campos del algoritmo 12 para
+  que ninguna expresión regular existente se desplace. Comprobado sobre la
+  reproducción del 26.08 en vez de supuesto: en 35 correcciones la estimación
+  sigue a la fase verdadera con correlación 0,992 y una pendiente de ajuste de
+  **1,048** (un error de nivel habría dado 0,5 o 2,0), y su desviación RMS
+  respecto de la verdad es 0,70 ns frente a 2,45 ns de ruido del detector. Esa
+  razón es toda la tesis del algoritmo, y es lo que mostrará la separación entre
+  las dos trazas.
+
+  **El algoritmo 10 no recibe superposición, a propósito.** El lazo de tres
+  etapas trabaja sobre la lectura cruda y no guarda fase filtrada en ninguna
+  parte; su suavizado vive en el integrador del PID, que es un estado de control
+  y no una estimación de nada. Dibujarlo sería inventar un estimador que el
+  algoritmo no tiene.
+
+  El retardo de la superposición es de 1 muestra en los tres. Para el algoritmo
+  13 se midió por correlación cruzada sobre una captura de 7,5 h; para el 11 y
+  el 12 se toma por estructura — el mismo productor, el mismo consumidor, la
+  misma carrera — y así lo dice el código. Unos minutos de telemetría `RH` bajo
+  cada uno lo confirmarían.
+- **Dos indicadores leían memoria sin inicializar, y un tercero pasaba un
+  puntero nulo a `strncpy` (build 51).** Ambos fallos eran alcanzables en una
+  placa corriente; ninguno requería una combinación rara de opciones.
+
+  `set_trend(0)` — el algoritmo 11 y el algoritmo 13 se niegan a funcionar sin
+  la calibración TIC, y ambos lo decían llamando a `set_trend(0)`, es decir
+  `strncpy(dest, NULL, 4)`. Eso es comportamiento indefinido, no un indicador
+  en blanco, y el camino que llega ahí es el ordinario: es lo que hace toda
+  placa nueva en su primer arranque, antes de haber ejecutado `LC` alguna vez.
+  Ahora ambos ponen `NoCT`, la palabra que el algoritmo 13 ya usaba una línea
+  más abajo para el otro coeficiente que falta — de modo que el estado tiene
+  nombre y al operador se le dice *por qué* el lazo espera, en lugar de mirar
+  un indicador que puede ser el residuo de lo último que se escribió ahí.
+
+  `snap_c` — la tarea de pantalla toma una instantánea de tres estructuras
+  compartidas bajo un tiempo de espera de 5 ms del mutex. Dos se limpiaban
+  primero; la de control no. Agotar ese tiempo no es un error — ocurre siempre
+  que la tarea de control está a mitad de su propia actualización — y cuando
+  ocurría, todos los consumidores de abajo leían un marco de pila sin
+  inicializar: el LED amarillo tomaba de ahí su estado de holdover, la barra de
+  estado el número de algoritmo y el veredicto de enganche, y `trendstr`
+  llegaba al informe serie y al LCD **sin terminador alguno**, de modo que la
+  función que concatena cadenas copiaba lo que siguiera en la pila hasta topar
+  con un byte cero. Ahora se conserva la última copia buena y se recurre a
+  ella, que es la única respuesta a la vez segura y verdadera: poner todo a
+  cero sería seguro y seguiría afirmando algoritmo 0, PWM 0, sin holdover y
+  tendencia vacía, al azar, que es la clase de error que se acaba creyendo.
+
+- **El algoritmo 13 no tenía veredicto de enganche, así que la pantalla juzgaba
+  un filtro de Kalman por una media de frecuencia (build 51).**
+  `tft_loop_locked()` enumera los algoritmos que publican un estado de enganche
+  vivo y les pregunta; el 13 no estaba en la lista, así que caía en la rama
+  escrita para los algoritmos 0–9, que prueba la media de 10 000 s (o de
+  1000 s) — exactamente lo que esa función se extrajo para que la barra dejara
+  de hacer. Añadirlo a la lista tampoco habría servido: **el lazo de Kalman
+  nunca emite `LOCK`.** Todo su vocabulario es `KAL` / `REJ` / `NOPH` / `ARM` /
+  `WAIT` / `NoCT` / `NoPL`, de modo que una prueba sobre la cadena de tendencia
+  no podía coincidir.
+
+  El veredicto viene ahora del filtro, calculado donde el filtro lo sabe, a
+  partir de tres términos que ningún otro algoritmo aquí puede ofrecer:
+
+  - **el detector habló en este segundo** (`s_kf_holdover == 0`, que también
+    cumple una lectura rechazada — un `REJ` es la puerta de innovación haciendo
+    su trabajo, no el lazo perdiendo su entrada). Sin este término, un filtro
+    que vuela perfectamente sobre su propio modelo se lee como enganchado
+    indefinidamente, que es la diferencia entre gobernar y planear;
+  - **la fase estimada está dentro de la banda** — la estimación, no la lectura
+    de este segundo, que es justamente para lo que sirve tener un filtro. Un
+    lazo que se acerca desde 400 ns dice `KAL` cada segundo mientras lo hace;
+  - **y el filtro lo sabe** — `sqrt(P[0][0])` dentro de la misma banda. Esto es
+    lo que vuelve honesto al veredicto en los dos momentos que importan y no
+    cuesta nada en ningún otro: en un arranque en frío `P[0][0]` parte de
+    `(range/2)²`, y tras un armado del picDIV se reinicia a propósito al mismo
+    valor, porque el cero al que se refería la estimación ya no existe.
+
+  La banda es `LAT` (`g_ltic.acq_threshold_ns`), que mide `LC` y que este
+  algoritmo ya usa para `s_kf_ctl_fast`, para su prueba de seguimiento y para
+  la puerta de paciencia previa al armado. Nada se inventa y nada queda fijado
+  en tiempo de compilación: una placa cuyo detector resuelva mejor recibe un
+  `LAT` menor de `LC` y el veredicto se estrecha con él.
+
+  **Reproducido, seis escenarios, la planta de la noche del 03.09 (28 680 s,
+  `LAT` 200 ns, ruido de detector 2,45 ns).** El nuevo veredicto no declaró
+  enganche ni una sola vez con la fase verdadera fuera de la banda, en ningún
+  escenario. Lo que cambia:
+
+  | escenario | la regla antigua dice enganche | el nuevo veredicto dice enganche | verde falso |
+  |---|---|---|---|
+  | estabilizado desde el inicio | t+1000 s | **t+10 s** | 0 s / 0 s |
+  | arranque en frío, 800 ns fuera | t+1000 s | t+193 s (hasta ahí sigue acercándose) | 0 s / 0 s |
+  | detector contra el tope | t+1000 s | t+201 s | 0 s / 0 s |
+  | detector congelado en +1295 ns | t+1189 s | **nunca** | **14 459 s** / 0 s |
+
+  La última fila es el fallo por el que valía la pena hacer esto, y no es
+  hipotético — un detector congelado en +1295 ns es la avería para la que
+  existe la lógica de armado, tomada de una captura real. La media de
+  frecuencia no puede verlo, porque la *frecuencia* del oscilador está bien: lo
+  que murió es la referencia de fase. Durante cuatro horas de una sola noche la
+  barra habría mostrado `DISCIPLINED  FIX OK` en verde de enganche con el
+  detector de fase clavado 1,3 µs fuera. El nuevo veredicto no se enciende ni
+  una vez.
+
+  `LOOPSIM_TRACE13` imprime ahora ambos veredictos en paralelo (`lock` y
+  `ofrq`), para que el próximo cambio en cualquiera de ellos se pueda contar en
+  vez de discutir.
+
+- **El LED amarillo se apagaba en holdover manual al perderse el fix (build
+  51).** La prueba de OFF decía `(!fix && !hold_auto)`, que atrapa la única
+  combinación que nunca debe estar a oscuras: el operador congeló la salida con
+  `MH`, el LED parpadeaba despacio para decirlo, y en cuanto cayó el fix se
+  apagó — indistinguible de una placa que jamás vio un satélite, justo en el
+  momento en que la salida congelada es lo único que sostiene el oscilador. El
+  holdover manual manda aquí sobre el fix, como ya manda en la barra de estado.
+  Cambia exactamente una de las ocho combinaciones de entrada; las otras siete
+  se comprobaron y no se mueven.
+
+- **`LPOL 0` se describía como «auto» en tres sitios, y es lo contrario (build
+  51).** Los tres lazos LTIC tratan la polaridad 0 como *me niego a actuar y
+  espero*, e imprimen una línea pidiendo que se fije. Llamar a eso auto le
+  decía al operador que el firmware lo deduciría — lo único que no va a hacer.
+  El «auto» que existe es `LC`, y hay que ejecutarlo. `LPOL`, `LL` y el texto
+  de ayuda dicen ahora `not set - loop holds`.
+
+- **Las correcciones nunca se contaron en los algoritmos 12 y 13, y `CS` daba
+  un motivo falso (build 51).** `counting_now()` sabía preguntar a los
+  algoritmos 10 y 11 si estaban enganchados; el 12 y el 13 caían por el
+  `default:` junto con los 0–9, así que en los dos lazos más nuevos — los dos
+  con más probabilidad de estar corriendo en una placa cuyo dueño se interesa
+  por ese número — la estadística no contaba nada, y `CS` explicaba el hueco
+  diciendo que la placa estaba «corriendo un algoritmo por debajo de 10», lo
+  que para el 12 y el 13 no es cierto.
+
+  Ambos algoritmos siempre supieron responder; a ninguno se le preguntaba.
+  Ahora publican el veredicto donde lo deciden (`mlacc_locked()`,
+  `kf_locked()`), y `CS` nombra los algoritmos que de verdad no tienen estado
+  de enganche: 0–9. La bandera del algoritmo 12 sobrevive a propósito a un
+  segundo `CORR` (una corrección hecha por un lazo estabilizado es justo lo que
+  mide esa estadística) y cae a propósito durante el único segundo de un salto
+  `ZC`, que cancela una deriva que el propio algoritmo aplicó y es una orden,
+  no una corrección.
+
+- **`LL` imprimía el estado del algoritmo 10 bajo todos los algoritmos (build
+  51).** El `state=ACQ|DPLL|LOCK` de tres etapas se guarda, así que bajo los
+  algoritmos 11, 12 o 13 la línea informaba de dónde se detuvo el lazo de tres
+  etapas la última vez que corrió — posiblemente en una sesión anterior, ya que
+  el valor se recupera de la flash — impreso sin matices entre los parámetros
+  LTIC vivos. Ahora se imprime solo bajo el algoritmo 10, y `state=- (algo N
+  running…)` en los demás casos. El operador ternario detrás era la segunda
+  mitad del fallo: todo valor que no fuera `ACQ` ni `DPLL` se imprimía como
+  `LOCK`, de modo que un byte jamás escrito reclamaba el más tranquilizador de
+  los tres estados en lugar del menos.
+
+- **El consejo impreso tras `CT` nombraba una tendencia que no puede aparecer
+  (build 51).** «arm picDIV (AP) after the loop locks (trend `hit`)» — `hit` lo
+  emiten solo los algoritmos 0 y 3–8, nunca los 10–13, y quien acaba de
+  ejecutar `CT` está en uno de estos últimos. Quien lo siguió al pie de la
+  letra esperó una palabra que no podía llegar. El consejo dice ahora *cuando
+  el lazo informe de enganche* y deja la indicación a la pantalla y a `CS`, que
+  saben por algoritmo qué significa.
+
+- **La tendencia de holdover del algoritmo 13 pasa de `HOLD` a `NOPH` (build
+  51).** Tres estados sin relación compartían una palabra en una misma
+  pantalla: este (el detector no dijo nada *en este segundo*), el modo de
+  holdover manual o automático impreso al lado como `[HOLDOVER]`, y el
+  «holdover — MCU crystal» de `SW` para un reloj de sistema corriendo sin PPS.
+  El algoritmo 12 ya lo llamaba `NOPH`; no había razón para que el 13 lo
+  llamara de otro modo, y todas las razones para no hacerlo. La lista de
+  palabras de tendencia del manual nunca contuvo `HOLD`, así que la
+  documentación queda más exacta, no menos.
+
+- **El informe con tabuladores imprimía 0.0 para medias que aún no existían
+  (build 51).** `gpsdo_calc_averages()` calcula cada ventana solo cuando se ha
+  llenado; antes de eso los campos conservan su 0.0 inicial. El informe legible
+  siempre los filtró con esas mismas banderas — el de tabuladores no, así que
+  los primeros 10, 100, 1000, 10 000 y 20 000 segundos de cada registro
+  llevaban un `0.0` duro en la columna correspondiente. Al graficarlo eso no es
+  un hueco: es un oscilador marcando cero hercios, y reescala el eje de modo
+  que todo lo posterior queda como una línea plana.
+
+  Esos campos se dejan ahora **vacíos** hasta que su ventana se llena. Los
+  separadores se siguen escribiendo, así que el número de columnas no cambia
+  (22 campos, verificado) y cualquier cosa que ya analice el fichero sigue
+  funcionando; gnuplot, pandas y cualquier hoja de cálculo leen un campo vacío
+  entre dos tabuladores como dato ausente, que es lo que es. Un valor centinela
+  — `nan`, `-1`, `99999` — habría sido un número más que explicar a quien lo
+  grafique después.
+- **La barra de estado afirmaba un enganche que no tenía forma de conocer
+  (build 50).** La regla era: hay fix de posición y no hay holdover, luego
+  `DISCIPLINED  FIX OK`, en verde de enganche. Eso es una afirmación sobre el
+  receptor GPS vestida con los colores de una afirmación sobre el lazo. Una
+  placa calentando, una placa ejecutando `CT` con su salida barrida a
+  propósito y una placa treinta segundos después de empezar la adquisición con
+  microsegundos de error de fase mostraban la misma barra verde que una que
+  llevaba una hora dentro de un nanosegundo: el elemento más grande y visible
+  de la pantalla era lo único que no podía equivocarse, y se equivocaba.
+
+  El veredicto que necesitaba ya existía. `tft_loop_locked()` — extraído de las
+  cifras de frecuencia, donde sus umbrales se midieron sobre una tirada de tres
+  horas en lugar de adivinarse — lo consultan ahora las dos, así que la barra y
+  las cifras no pueden contradecirse: verde aquí significa verde allí, por
+  construcción y no porque la misma regla esté escrita dos veces.
+
+  Cuatro estados que la barra antes no sabía expresar: `ACQUIRING  FIX OK`
+  (fix bueno, lazo aún no convergido), `OCXO WARMUP`, `CALIBRATING`, y el verde
+  de siempre significando ahora lo que dice. El holdover sigue por encima de
+  todo, porque una salida congelada es el hecho más importante.
+
+  **Ambas direcciones están amortiguadas, de forma asimétrica.** El veredicto
+  del enganche es cosa de un segundo y puede parpadear por una sola cuenta del
+  contador — el mismo motivo por el que el umbral de las propias cifras se
+  amplió a 0,15 Hz. La respuesta instantánea se probó primero y aquí es un
+  error por la misma razón: una cuenta de jitter no es una avería, y una barra
+  que alterna entre verde y naranja es peor que cualquiera de los dos colores.
+  Cinco segundos consecutivos de enganche antes de ponerse verde, dos de
+  pérdida antes de soltarlo. `tools/gpsdo_statusbar.py` reproduce la máquina
+  sobre un escenario que va del arranque en frío a la antena desconectada; en
+  él la regla antigua afirmaba `DISCIPLINED` durante 18 de 33 segundos sin que
+  fuera cierto.
+- **Un campo nuevo en los ajustes ya no cuesta a todos sus ajustes
+  (build 49).** `settings_recall()` exigía que el registro guardado tuviera
+  exactamente el tamaño actual, así que añadir un byte obligaba a subir
+  `SETTINGS_VER`, y subirla significa rechazar el registro entero — PID, LC,
+  zona horaria, todo, a cambio de un byte. El archivo lo sorteó dos veces
+  tallando campos en bytes de relleno, y dos más con un `else if` escrito a mano
+  por versión, cada uno atado a su propio `offsetof`.
+
+  Ahora acepta cualquier registro desde `SETTINGS_V6_BYTES` (376, el tamaño al
+  que se congeló la disposición) hasta el `sizeof` actual. La estructura se pone
+  a cero antes de leer, así que todo campo añadido desde entonces se lee como 0
+  — que cada uno de ellos ya define como «sin fijar». `VS` es el primer campo
+  que lo usa, y detrás quedan tres bytes de alineación para los dos siguientes.
+  La ruta de guardado parcial recibe la misma regla, porque sembrar desde un
+  registro corto es ahora seguro por el mismo motivo.
+
+  Verificado con el compilador de destino y no a ojo: `dac_path` sigue en 318,
+  `bl_pct` 319, `a12_gain` 320, `dac_vref_cv` 372, `adc_vdiv_h` 374,
+  `vsense_src` en 376, `sizeof` 380. Un registro escrito por el build 48 carga,
+  y su byte ausente se lee como el raíl de 5 V — que es lo que el build 48
+  hacía.
+- **`DV` y `AV` no se guardaban solos, aunque todo lo escrito sobre ellos decía
+  que sí (build 48).** El changelog de v1.07, los tres manuales y las notas
+  enviadas a quienes montan placas con AD5680 lo prometían; el código llamaba a
+  `cli_manual_save("ES ALGO")`. Un `DV 5.00` tecleado y no seguido de un `ES`
+  volvía a 3,30 tras un reset, y con él volvía el aviso MISMATCH — lo que se
+  lee como un fallo de hardware y no como un ajuste perdido. Estos dos
+  describen la etapa de salida de la placa y se teclean una sola vez, cuando se
+  construye, así que la promesa era la correcta y el código la ha alcanzado.
+
+- **El informe `DAC` exageraba en un tercio la ruta de PWM simple (build 48).**
+  `gpsdo_dac_output_bits()` devolvía 16 para esa ruta, pero en una compilación
+  sin motor de dither el temporizador resuelve **50 000** valores de ciclo de
+  trabajo, no 65 536 — la portadora es de 2 kHz a partir de un reloj de
+  100 MHz, y 50 000 no es potencia de dos. La función es ahora
+  `gpsdo_dac_output_steps()` y devuelve un recuento; el informe imprime
+  `N-bit` donde eso es exactamente cierto y `N steps` donde no lo es. La misma
+  clase de defecto que los 0,094 µHz que el informe llegó a ofrecer en una
+  pieza de 18 bits, y la misma corrección: decir lo que hace el hardware.
+- **La segunda pasada de CT podía llegar al código completo (build 47,
+  corrigiendo la segunda pasada añadida antes en esta misma versión).** La
+  parte baja de ese barrido siempre guardó un margen de 1000 LSB; la alta no
+  guardaba ninguno — el tope superior impedía que el centro pasara *más allá*
+  de `65535 - half`, no que lo alcanzara, así que un cero deducido alto ponía
+  el punto de medida superior justo en el extremo de escala. La placa AD5680
+  de Dan Wiering lo hizo el 10-09-2026: cero en 45 577, medio reparto 20 654,
+  centro arrastrado a `65535 - half`, tercer punto en 65 535. Allí midió
+  limpiamente — sus tres puntos eran lineales hasta el dígito — pero el búfer
+  de salida de un conversor es menos lineal justo contra su propio extremo, y
+  la calibración que fija la ganancia de la planta para todos los algoritmos
+  es el último sitio donde gastar el último LSB de rango.
+
+  `CT_RAIL_GUARD` (1000 LSB) se aplica ahora en **ambos** extremos; en esa
+  placa el barrido pasa a ser 23 227 / 43 881 / 64 535. No cuesta nada en
+  excursión — el reparto sigue siendo `CT_TARGET_SWING / K` y solo se mueve
+  el centrado — y el tope de 60 000 en el reparto es lo que garantiza que los
+  dos límites nunca choquen (solo se encontrarían pasado
+  `65535 - 2·CT_RAIL_GUARD` = 63 535). La línea de la segunda pasada dice
+  ahora cuál de los dos casos ocurrió, en vez de afirmar «centrado en el
+  código de 10 MHz deducido» precisamente cuando el tope acababa de moverlo.
+  Verificado sobre 271 076 combinaciones de K y cero deducido: acercamiento
+  mínimo al extremo de 0 LSB antes, 1000 después, reparto sin cambios en
+  todos los casos.
+
+- **El informe `DAC` citaba un paso que el conversor no puede dar (build 46).**
+  Imprimía una cifra de 16 bits y otra de 24 en todas las rutas, y detrás de ese
+  puente hay tres conversores de tres anchuras distintas. En la placa AD5680 de
+  Dan Wiering ambas líneas estaban mal a la vez y en sentidos opuestos: ofrecía
+  **0,094 µHz** como paso, cuando 64 cuentas del valor de control hacen un
+  movimiento en un pin de 18 bits y el menor real es **5,99 µHz** — mientras la
+  otra línea citaba una cifra de 16 bits, cuatro veces más gruesa de lo que la
+  pieza puede.
+
+  El valor de control es de 24 bits en todas las rutas; lo que la SALIDA mueve
+  en una escritura es la anchura del driver vivo, y `gpsdo_dac_output_bits()`
+  dice ahora cuál: **24** en DITH (la tabla de dither promedia el valor de 24
+  bits exactamente, por construcción), **18** en el AD5680, **16** en el PWM
+  simple, que es la misma propiedad que ya reportaba
+  `gpsdo_dac_fine_available()`. El informe imprime ambos números y los nombra:
+
+  ```
+    step: control 24-bit 1 LSB = 0.094 uHz = 9.36e-15
+          output 18-bit 1 LSB = 5.987 uHz = 5.99e-13
+          (EXT resolves 18 bits; finer requests reach the pin as a
+           time average, not as one step)
+  ```
+
+  La columna de frecuencia fraccional tuvo que aprender un exponente para ello.
+  Un `e-15` fijo servía mientras el informe citaba dos anchuras codificadas; a
+  través de 16, 18 y 24 bits la misma línea lleva desde 2,4e-12 hasta 9,4e-15, y
+  «2394.9e-15» no es un número que nadie lea. `cli_frac_exp()` normaliza la
+  mantisa — este fichero no imprime ningún float por `printf`, porque Float
+  printf hay que habilitarlo en el IDE y sin él emite «?».
+
+- **Una pendiente de calibración que la rampa no puede tener, y los ocho
+  armados que costó (build 45).** `LC` produce dos números ns/V y uno acota al
+  otro, cosa que nada comprobaba. `range_ns/span` es el dφ/dV **medio** sobre la
+  banda barrida; el ajuste del ancla mide el dφ/dV **local** en 0,632·Vsat. En la
+  rampa que este detector realmente es — `V = Vsat(1 − e^(−φ/τ))` —
+  `dφ/dV = (τ/Vsat)·e^(φ/τ)` crece con φ, así que una media tomada sobre un
+  tránsito que llega por encima del ancla se evalúa por encima de ella y es por
+  tanto **mayor**. Para la geometría de esta placa (Vsat 3,29 V, tránsito
+  0,80…3,22 V) el valor en el ancla debería ser en torno al **0,55×** de la
+  media. Una pendiente local por encima de la media no es una pendiente que la
+  rampa pueda tener.
+
+  Dos calibraciones del mismo detector, con tres días de diferencia:
+
+  | | LNV | LZO | LRN | LNV ÷ media del tránsito |
+  |---|---|---|---|---|
+  | builds 16–41 | 1252,0 | 2,0809 | 3000,00 | **1,01** |
+  | build 42 | 1837,7 | 2,0797 | 2958,75 | **1,50** |
+
+  LZO coincide en 1,2 mV y LRN en un 1,4 %, así que la rampa no se movió — sólo
+  la pendiente, y es el único número ajustado a partir del puñado de puntos
+  dentro de `±LTIC_ANCHOR_WIN_V`. Se midió con la fase inestable.
+
+  **Lo que se rompió no fue la pendiente.** Fue la guardia de saturación de
+  `ltic_phase_error_ns()`, que dimensiona la banda útil como
+  `range_ns / ns_per_volt`, mezclando un numerador de tránsito completo con un
+  denominador local. La banda se encogió de **±1,318 V a ±0,886 V** en torno al
+  cero. El picDIV aterriza la fase de esta placa **1,06…1,28 V por debajo del
+  cero**, un desfase físico fijo que no se movió — pero ahora quedaba fuera de
+  la banda: cada aterrizaje se leía como raíl. El puente de captura de fase del
+  algoritmo 11 rearmaba entonces el divisor cada 20 s — 15 s de espera más 5 s
+  de encallamiento — ocho veces, en t = 122, 142, 162, 178, 198, 218, 238, 258 s,
+  hasta que un aterrizaje cayó a sólo 0,67 V y fue aceptado. El lazo pasó a PLL
+  de inmediato y treinta segundos después estaba enganchado. **Ocho
+  interrupciones de la salida de 1 PPS por un artefacto de calibración.**
+
+  LC compara ahora ambas antes de guardar ninguna: una pendiente de ancla por
+  encima de la media del tránsito se reporta y se sustituye por la media. El
+  ancla se conserva — el ajuste de Vsat recorre todo el tránsito y es robusto,
+  que es justo lo que muestra la coincidencia de 1,2 mV en LZO. En la
+  calibración buena la guardia mueve LNV un 1 % (1252,0 → 1239); en la mala, un
+  33 %, que es la falta entera.
+
+  No arreglado aquí: la guardia de `ltic_phase_error_ns()` sigue dimensionando
+  su banda a partir de `range_ns / ns_per_volt`, dos magnitudes medidas con
+  definiciones distintas. La banda pertenece al ancla — `Vsat = LZO / 0,63212`
+  dio 3,290 V y 3,292 V en las dos calibraciones, es decir el mismo número antes
+  y después — y llevarla ahí exige antes enseñar al simulador que la rampa es
+  exponencial y no lineal, para poder elegir cualquier constante.
+
+- **El registro imprimía una fase que el panel se negaba a mostrar (build 44).**
+  Ambas rutas de visualización derivan dph del mismo voltaje enclavado, pero cada
+  una lo hacía con su propia copia de la aritmética, y ya se habían separado una
+  vez por el diente de sierra. Esta vez fue por la **banda**.
+
+  `ns_per_volt` es una pendiente *local*: LC la mide en una ventana estrecha
+  alrededor del ancla que sitúa en 0,632·Vsat, porque la rampa es
+  `V = Vsat(1 − e^(−t/τ))` y una exponencial no tiene una sola pendiente. Fuera
+  de la ventana 15–85 % la curva ya se ha aplanado y una lectura lineal es
+  errónea. El panel lleva tiempo negándose a imprimir ahí — muestra `ovf` — y el
+  informe serie seguía imprimiendo un número.
+
+  **Medido en la captura del 04.09 11:41**, tomada para una pregunta muy otra.
+  Al pasar del algoritmo 13 al 7, la fase se aparcó en lo que el registro llamó
+  **+1085 ns** con Vphase en **2,946 V**, por encima de los 2,798 V del techo de
+  la banda de este detector. El panel llevaba casi una hora diciendo `ovf`
+  mientras el registro decía +1085 ns — y no era meramente «cerca de un raíl».
+  Primeras diferencias de la misma placa en las dos posiciones:
+
+  | dónde estaba la lectura | Vphase | suelo blanco | p99 de \|Δ\| |
+  |---|---|---|---|
+  | mitad de banda (algoritmo 13) | 2,08 V | **2,6 ns** | 5,2 ns |
+  | aparcada cerca del techo (algoritmo 7) | 2,94 V | **7,7 ns** | 20,6 ns |
+
+  **Tres veces el ruido**, sólo por la posición en la rampa — y el sesgo va en la
+  dirección que halaga, porque la compresión significa que la fase verdadera era
+  *mayor* que el número impreso. Nada en el registro lo decía.
+
+  Ambas rutas llaman ahora a una sola función, `ltic_display_phase()`, que lleva
+  juntos el cero, la pendiente medida, el diente de sierra enclavado y la banda.
+  Fuera de banda la línea serie imprime `dph:ovf`, la misma palabra que usa el
+  panel. Todo script que lee estos registros busca `dph:` seguido de dígitos, así
+  que fuera de banda ya no encuentran lectura — que es la verdad — en lugar de un
+  número plausible y equivocado en una dirección conocida. El `Vphase:` en bruto
+  queda justo a su izquierda y dice por qué extremo se salió.
+
+  El mismo fallo consta dos veces desde el otro extremo: un «+1561 ns» inmóvil y
+  un «+1295 ns» inmóvil, ambos tomados por buenos, ambos costando una medida
+  antes de que nadie lo notara. **Una lectura equivocada es recuperable; una
+  lectura equivocada que parece tranquila no lo es.**
+
+  No arreglado aquí, y merece su propia revisión: la guardia del propio lazo
+  (`railed_now`) prueba unos 3,28 V codificados, de modo que en un detector que
+  satura cerca de 2,9 V no dispara nunca y el filtro sigue actuando sobre
+  lecturas que las pantallas ya declaran fuera de banda.
+
+- Manual: la fila de `GPSDO_DAC_EXT` en la tabla de opciones de compilación
+  seguía diciendo que el define era mutuamente excluyente con
+  `GPSDO_PWM_DITHER` — redacción anticuada de antes de la selección de ruta en
+  tiempo de ejecución. Se compilan juntos; el comando `DAC` elige la ruta
+  activa y el puente conduce la señal.
+
+### Rechazado
+- **Retener la salida del lazo mientras una posición de span no tiene
+  calibración propia.** Lo hacía la primera versión del módulo de span, con la
+  teoría de que la ganancia de la otra posición — 5× desviada — era el mal
+  mayor. Medido en lugar de supuesto (`loopsim` con el nuevo `LOOPSIM_KALL`,
+  tres plantas, cinco semillas cada una, algoritmos 10–13, con LTC 100 y 60):
+  con la quinta parte de la ganancia correcta cada lazo fue 2,2–6,4× peor en sd
+  de fase; con 4–5,7× la ganancia correcta el algoritmo 11 salió 3,6–6×
+  *mejor*, el 13 entre 0,6× y 2,2× con picos de 100–250 ns, el 12 de tres a
+  siete veces peor, y el 10 bien a 4× y con excursiones de 500–870 ns en dos
+  pasadas de quince a 5,7×. Ninguno divergió. Y `spansim` mostró lo que cuesta
+  la retención cuando `CT` no puede acertar: movida a REDUCED al arrancar, con
+  `CT` fallando durante tres horas, la placa retenida se quedó en 3e-8 más de
+  cinco horas y recorrió 570 µs de fase, mientras la misma placa dejada con los
+  coeficientes de FULL se enganchó en 58 minutos. En el caso normal ambas
+  variantes son idénticas — `CT` arranca enseguida y el lazo no trabaja
+  mientras barre —, así que la retención solo importaba justo donde hacía daño.
+  Los algoritmos 3–7 no los puede mover loopsim y no se midieron; la cabecera
+  del módulo lo dice.
+
+- **Subir la portadora del PWM simple de 16 bits a los 12,2 kHz del dither.**
+  Permitiría subir con ella la frecuencia de corte del filtro — seis veces, con
+  dos polos — y en una placa de rango reducido eso merece la pena. Solo que
+  donde importa ya ocurre: con `GPSDO_PWM_DITHER` compilado, `dac_emit()` lleva
+  la ruta simple por `pwm24_write(code24 & 0x00FFFF00)`, de modo que ambas
+  rutas ya comparten una sola portadora de TIM4 a 12,2 kHz y conmutar entre
+  ellas cambia únicamente la tabla. El `analogWrite()` a 2 kHz solo sobrevivía
+  en la compilación sin dither — y esa es precisamente la configuración en la
+  que el cambio sale mal, porque allí la anchura del propio PWM **es** toda la
+  salida: 15,6 → 13 bits lleva el paso de 5,0e-11 a 3,0e-10 en una placa de
+  3,3 V. Dirección equivocada. Anotado en el propio código, en
+  `gpsdo_dac.cpp`, para que no se vuelva a proponer; `tools/carrier.py` tiene
+  las cifras de ambas placas y de las tres portadoras, incluidas las líneas de
+  6-18 Hz de la propia tabla de dither, que pasan a ser el caso limitante por
+  encima de un corte de ~16 Hz y no se mueven cuando se mueve la portadora.
+
+- **Armar el picDIV bajo los algoritmos 3–9 para mostrar dph ahí.** Casi todo
+  funciona ya — `ltic_read_fast()` corre en cada pulso sea cual sea el
+  algoritmo, y ambas rutas de visualización dependen de LC y no del lazo — así
+  que la pregunta era sólo si armar el divisor y rearmarlo según la fase se
+  escapa. La captura del 04.09 responde, y la respuesta es no.
+
+  Enganchado en el algoritmo 13 y conmutado luego al 7: la fase salió de ±100 ns
+  en diez minutos, llegó a **2,2 ns/s (2,2e-9)** mientras el LRN aún recogía y el
+  PWM osciló 353 LSB, y después **se aparcó en +1085 ns y ahí se quedó**. En los
+  últimos 27 minutos su deriva fue `+3,1e-13 ± 1,5e-12`: el algoritmo 7 mantiene
+  la frecuencia magníficamente y no tiene mecanismo alguno para el desfase que un
+  transitorio deja atrás.
+
+  La cadencia no la fija, pues, la deriva: desde un aterrizaje fresco a 3e-13 la
+  rampa duraría semanas. La fijan los **sucesos** — cada conmutación, reaprendizaje
+  o perturbación puede gastar un tercio de la banda en minutos — y cada rearmado
+  detiene la salida picPPS durante `PICDIV_ARM_MS` y la devuelve desplazada por el
+  desfase de aterrizaje, que en esta placa es de −900…−1650 ns.
+
+  Ése es el argumento que lo zanja: **la fase en la que se aparca un lazo
+  puramente de frecuencia es un recuerdo del último sobresalto, no una propiedad
+  del oscilador, y un monitor que se rearmara para mantenerla en pantalla la
+  convertiría en un recuerdo del último armado.** Estaría cambiando la misma
+  salida cuya fase dice informar. Bajo 10/11/13 eso se paga porque el lazo posee
+  la fase; bajo 3–9 no la posee nadie.
+
+  El valor diagnóstico es real y se obtiene sin nada de esto: engancha en 13,
+  conmuta, registra y lee la pendiente. Costó 52 minutos y midió lo que ningún
+  contador de esta placa puede — el error en régimen del algoritmo 7 está tres
+  décadas por debajo del propio cuanto de la media de 1 ks, y al final de esa
+  captura la media de 10 ks aún marcaba −0,0041 Hz porque arrastraba un
+  transitorio de cuarenta minutos antes.
+
+### Documentación
+- Manual: nuevo bloque «Tres rutas, un nodo» en la sección Salida — cómo
+  coexisten `PWM`/`DITH`/`EXT`, el comando único de 24 bits con la vista de
+  16 bits, y la relación de los 18 bits del AD5680 con la trama SPI de 24 bits
+  (`code18 = code24 × 262143 / 16777215`, escalado para que los coeficientes
+  pasen entre rutas). A raíz de preguntas de compilación de Dan Wiering.
+- Manual: `SPAN` en la referencia de comandos, `GPSDO_SPAN_SENSE` en la tabla
+  de interruptores y un bloque «Dos spans, dos calibraciones» en la sección
+  Salida. `tools/loopsim`: `LOOPSIM_KALL`, todo el conjunto derivado por `CT`
+  a partir de una K errónea.
+- Pestaña **Help** del tuner: `SPAN` y `SPAN CLR` (build 56), y en
+  README_TUNER `SPAN` entre los comandos que describen la placa. El nombre nuevo
+  en el ejemplo del rótulo del manual, en el esquema de la cabecera del TFT y en
+  el ejemplo de la línea de estado del tuner.
+- Manual y pestaña **Help** del tuner: `DV` conserva tres decimales (build
+  57). La escritura `v1.07.57rt` en el ejemplo del rótulo del manual, en el
+  esquema de la cabecera del TFT, en el ejemplo de la línea de estado del
+  tuner y en los títulos de los documentos.
 
 ## [v1.06-rtos] — publicado 2026-09-05 (build 42)
 

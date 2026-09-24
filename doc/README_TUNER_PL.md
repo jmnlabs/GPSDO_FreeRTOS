@@ -26,7 +26,7 @@ pip install PySide6 pyqtgraph pyserial tzdata
 | PySide6 | interfejs użytkownika Qt |
 | pyqtgraph | wykresy na żywo |
 | pyserial | komunikacja z płytką |
-| tzdata | wyłącznie przycisk **Generate tz_table.h** |
+| tzdata | wyłącznie przycisk **Generate gpsdo_tz_table.h** |
 
 `tzdata` jest opcjonalne, jeśli nigdy nie używasz tego przycisku, a na Linuksie
 i macOS system dostarcza te same dane stref. Na Windows to jedyne źródło, bo
@@ -46,12 +46,13 @@ połączeniu odczytuje wersję z płytki i porównuje:
 - **zgodność** — pasek stanu pokazuje całą tożsamość płytki, na ile ją podała:
 
   ```
-  connected — firmware v1.06-rtos  build 27  2026-09-02 09:46  CRC 78B08D26
+  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
   ```
 
   Te trzy fakty odpowiadają na różne pytania. **Wersja** mówi, jakim protokołem
-  tuner rozmawia. **Build** i czas kompilacji mówią, z którego drzewa źródeł to
-  pochodzi. **CRC** mówi, który binarny obraz naprawdę działa, i jako jedyne nie
+  tuner rozmawia. **Build** — od builda 56 w samej nazwie, `.57rt` (sam build
+  56 pisał `-rt56`); starszy firmware (`v1.07-rtos`) podaje go osobno i linia pokazuje `build N` — i czas
+  kompilacji mówią, z którego drzewa źródeł to pochodzi. **CRC** mówi, który binarny obraz naprawdę działa, i jako jedyne nie
   może być nieaktualne — płytka liczy je z własnego flasha przy starcie, więc
   pozostaje uczciwe nawet wtedy, gdy builder Arduino użyje ponownie starego
   pliku obiektowego, a znacznik czasu tego nie odnotuje. Wszystko poza wersją
@@ -70,17 +71,19 @@ nigdy nie widziała. Używaj pary, która przyszła razem.
 
 | Zakładka | Przeznaczenie |
 |----------|---------------|
-| **LTIC (algo 10)** | PID per stan trójstopniowej pętli fazowej oraz kalibracja detektora |
-| **LTIC-Lars (algo 11)** | Parametry ciągłej pętli PI (`LG`, `LD`, `LTC`, …) |
-| **Multi-level (algo 12)** | Dwa skalary (`MG`, `MR`) i jedenaście limitów fazy per poziom |
-| **FA damping** | Okno uśredniania członu tłumiącego, per stan |
 | **PID algo 3-9** | Kp / Ki / Kd / I_LIMIT dla algorytmów częstotliwościowych |
+| **LTIC (algo 10)** | PID per stan trójstopniowej pętli fazowej, kalibracja detektora oraz okno uśredniania członu tłumiącego (`FAD` / `FAL`, per stan) |
+| **LTIC-Lars (algo 11)** | Parametry ciągłej pętli PI (`LG`, `LD`, `LTC`, …) |
+| **LTIC-MLA (algo 12)** | Dwa skalary (`MG`, `MR`) i jedenaście limitów fazy per poziom |
 | **Calibration** | `LC`, `CT` i stałe detektora |
 | **Raw monitor** | Wszystko, co wysyła płytka, bez parsowania |
 | **Help** | Pełny wykaz komend firmware |
 
 Każda grupa parametrów jest odczytywana przy połączeniu, więc panele startują
-wypełnione, a nie puste.
+wypełnione, a nie puste. Zakładki idą wg numerów algorytmów. Komendy opisujące
+płytkę, nie pętlę — skale toru wyjściowego (`DV`, `AV`, `VS`), zworka zakresu
+EFC (`SPAN`), podświetlenie (`BL`) — nie mają własnej zakładki: przechodzą
+przez pole komend, a zakładka **Help** dokumentuje je razem z resztą.
 
 ---
 
@@ -217,8 +220,8 @@ log jest albo w całości zanonimizowany, albo w całości nie; plik zanonimizow
 częściowo wygląda na bezpieczny, a nie jest. Tak czy inaczej log sam mówi, który
 to przypadek, w swojej drugiej linii.
 
-**Generate tz_table.h** przebudowuje tablicę stref czasowych firmware'u z danych
-IANA na tej maszynie i zapisuje `tz_table.h` obok skryptu. Zastępuje dawny
+**Generate gpsdo_tz_table.h** przebudowuje tablicę stref czasowych firmware'u z danych
+IANA na tej maszynie i zapisuje `gpsdo_tz_table.h` obok skryptu. Zastępuje dawny
 `gen_tz_table.py`, więc tuner jest teraz jedynym skryptem do utrzymania.
 
 Dane stref pochodzą z bazy systemowej na Linuksie/macOS albo z pakietu `tzdata`

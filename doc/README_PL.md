@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v1.06
+# GPSDO v1.07.57rt
 
 [English](README_EN.md) | **Polski** | [Español](README_ES.md)
 
@@ -33,7 +33,7 @@ z wykorzystaniem PCB udostępnionych przez użytkownika Scrachi na forum EEVBlog
 
 
 > **Konsola strojenia na PC:** zobacz [README_TUNER_PL](README_TUNER_PL.md) —
-> wykresy na żywo, zakładki parametrów i generator `tz_table.h`.
+> wykresy na żywo, zakładki parametrów i generator `gpsdo_tz_table.h`.
 
 ---
 
@@ -250,7 +250,7 @@ sposób renderowania tekstu, a ta różnica jest na tyle duża, że ma znaczenie
 
 ```
  ┌──────────────────────────────────────────────────┐
- │ GPSDO v1.06-rtos                LMT 14:32:45 Pon │   nagłówek: wersja + czas lokalny
+ │ GPSDO v1.07.57rt                LMT 14:32:45 Pon │   nagłówek: wersja + czas lokalny
  │                                                  │
  │          1 0 0 0 0 0 0 0 . 0 0 0 0  H z          │   częstotliwość, duży font
  │                                                  │
@@ -647,6 +647,7 @@ liter** (`LA`, `la` i `La` są równoważne), więc działa dowolna wielkość l
 | `T [baud]` | Tunel GPS na USB dla u-center — czysty dwukierunkowy NMEA/UBX (telemetria na Bluetooth jeśli jest, inaczej wyciszona); opcjonalny baud UART GPS, zachowany po wyjściu; wyłącza się po 300 s |
 | `SP <n>` | Ustaw PWM DAC bezpośrednio (1–65535), omija algorytm |
 | `DAC` | Wyjście napięcia sterującego: ścieżka, kod 24/16-bitowy i dokładny, zmierzone Vctl, wielkość kroku w µHz i df/f (liczby w Hz wymagają `CT`) |
+| `SPAN [CLR FULL\|REDUCED]` | Zworka zakresu EFC na PB14 (`GPSDO_SPAN_SENSE`): pozycja, w której jest, i kalibracja `CT` każdej pozycji — jedna na zakres, przełączana i przeliczana, gdy zworka się przestawi; `CLR` zapomina jedną |
 | `RH` | Tryb raportowania: czytelny (domyślny) |
 | `RD` | Tryb raportowania: rozdzielany tabulatorem |
 | `RP` | Wstrzymaj strumień danych serial/BT |
@@ -1367,7 +1368,7 @@ mówi, zamiast drukować liczbę z wartości domyślnej.
 
 `GPSDO_DAC_EXT` przełącza napięcie sterujące z 16-bitowego PWM na zewnętrzny
 przetwornik SPI. Włączenie tego dzisiaj daje celowo błąd kompilacji:
-`dac_ext.cpp` jest zaślepką bez wybranego układu.
+`gpsdo_dac_ext.cpp` jest zaślepką bez wybranego układu.
 
 PWM daje około 50 µV na krok przy 3,3 V, blisko 2,7×10⁻¹¹ względnie na
 oscylatorze 5,3 Hz/V. Układ 18-bitowy z odniesieniem zaprojektowanym do tego

@@ -26,7 +26,7 @@ pip install PySide6 pyqtgraph pyserial tzdata
 | PySide6 | the Qt user interface |
 | pyqtgraph | the live plots |
 | pyserial | talking to the board |
-| tzdata | the **Generate tz_table.h** button only |
+| tzdata | the **Generate gpsdo_tz_table.h** button only |
 
 `tzdata` is optional if you never press that button, and on Linux or macOS the
 system already provides the same zone data. On Windows it is the only source,
@@ -48,12 +48,13 @@ for. On connect it reads the board's own version and compares:
   offered one:
 
   ```
-  connected — firmware v1.06-rtos  build 27  2026-09-02 09:46  CRC 78B08D26
+  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
   ```
 
   The three facts answer different questions. The **version** says which
-  protocol the tuner is talking. The **build** and compile time say which source
-  tree it came from. The **CRC** says which binary is actually running, and it
+  protocol the tuner is talking. The **build** — in the name from build 56 on,
+  `.57rt` (build 56 itself wrote `-rt56`); older firmware (`v1.07-rtos`) sends
+  it separately and the line shows `build N` — and the compile time say which source tree it came from. The **CRC** says which binary is actually running, and it
   is the only one that cannot be stale — the board computes it from its own
   flash at boot, so it stays honest even when the Arduino builder reuses an
   object file and the timestamp does not. Everything past the version is
@@ -72,17 +73,19 @@ of. Use the pair that shipped together.
 
 | Tab | Purpose |
 |-----|---------|
-| **LTIC (algo 10)** | Per-stage PID for the three-stage phase loop, plus the detector calibration |
-| **LTIC-Lars (algo 11)** | The continuous-PI parameters (`LG`, `LD`, `LTC`, …) |
-| **Multi-level (algo 12)** | The two scalars (`MG`, `MR`) and the eleven per-level phase limits |
-| **FA damping** | Damping-average window, per stage |
 | **PID algo 3-9** | Kp / Ki / Kd / I_LIMIT for the frequency-domain algorithms |
+| **LTIC (algo 10)** | Per-stage PID for the three-stage phase loop, plus the detector calibration and the damping-average window (`FAD` / `FAL`, per stage) |
+| **LTIC-Lars (algo 11)** | The continuous-PI parameters (`LG`, `LD`, `LTC`, …) |
+| **LTIC-MLA (algo 12)** | The two scalars (`MG`, `MR`) and the eleven per-level phase limits |
 | **Calibration** | `LC`, `CT` and the detector constants |
 | **Raw monitor** | Everything the board sends, unparsed |
 | **Help** | The full firmware command reference, in the algorithms' own order |
 
 Every parameter group is read on connect, so the panels start populated rather
-than empty.
+than empty. The tabs follow the algorithm numbers. Commands that describe the
+board rather than a loop — the output-path scales (`DV`, `AV`, `VS`), the EFC
+span jumper (`SPAN`), the backlight (`BL`) — have no tab of their own: they
+go through the command box, and the **Help** tab documents them with the rest.
 
 ---
 
@@ -219,8 +222,8 @@ out until logging stops, so a log is wholly redacted or wholly not; a file
 redacted in parts reads as safe at a glance and is not. Either way the log says
 which it is, on its second line.
 
-**Generate tz_table.h** rebuilds the firmware's timezone table from this
-machine's IANA data and writes `tz_table.h` next to the script. It replaces the
+**Generate gpsdo_tz_table.h** rebuilds the firmware's timezone table from this
+machine's IANA data and writes `gpsdo_tz_table.h` next to the script. It replaces the
 old `gen_tz_table.py`, so the tuner is now the only script to keep.
 
 Zone data comes from the system database on Linux/macOS, or from the `tzdata`

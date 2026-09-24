@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v1.06
+# GPSDO v1.07.57rt
 
 **English** | [Polski](README_PL.md) | [Español](README_ES.md)
 
@@ -33,7 +33,7 @@ v0.06c schematic, using PCBs shared by the user Scrachi on the EEVBlog forum.
 
 
 > **PC tuning console:** see [README_TUNER_EN](README_TUNER_EN.md) for the
-> desktop tuner — live plots, parameter tabs and the `tz_table.h` generator.
+> desktop tuner — live plots, parameter tabs and the `gpsdo_tz_table.h` generator.
 
 ---
 
@@ -281,7 +281,7 @@ matter.
 
 ```
  ┌──────────────────────────────────────────────────┐
- │ GPSDO v1.06-rtos                LMT 14:32:45 Mon │   header: version + local time
+ │ GPSDO v1.07.57rt                LMT 14:32:45 Mon │   header: version + local time
  │                                                  │
  │          1 0 0 0 0 0 0 0 . 0 0 0 0  H z          │   frequency, large font
  │                                                  │
@@ -659,6 +659,7 @@ Commands terminated by `\r\n` or `\n`. Command names are **case-insensitive**
 | `T [baud]` | GPS tunnel on USB for u-center — clean bidirectional NMEA/UBX (telemetry moves to Bluetooth if present, else muted); optional GPS-UART baud, kept after exit; exits after 300 s |
 | `SP <n>` | Set PWM DAC directly (1–65535), bypasses algorithm |
 | `DAC` | Control-voltage output: path, 24/16-bit/exact code, measured Vctl, step size in µHz and df/f (needs `CT` for the Hz figures) |
+| `SPAN [CLR FULL\|REDUCED]` | EFC span jumper on PB14 (`GPSDO_SPAN_SENSE`): the position it is in and the `CT` calibration each position carries — one per span, switched and remapped when the jumper moves; `CLR` forgets one |
 | `RH` | Report mode: human-readable (default) |
 | `RD` | Report mode: tab-delimited |
 | `RP` | Pause serial/BT data stream |
@@ -1384,7 +1385,7 @@ number from a default.
 ## External SPI DAC — planned, not implemented
 
 `GPSDO_DAC_EXT` switches the control voltage from the 16-bit PWM to an external
-SPI DAC. Enabling it today is a compile error by design: `dac_ext.cpp` is a stub
+SPI DAC. Enabling it today is a compile error by design: `gpsdo_dac_ext.cpp` is a stub
 with no device chosen.
 
 The PWM gives about 50 uV per step at 3.3 V, near 2.7e-11 fractional on a

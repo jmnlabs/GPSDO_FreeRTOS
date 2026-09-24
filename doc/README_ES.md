@@ -1,4 +1,4 @@
-# GPSDO FreeRTOS v1.06
+# GPSDO v1.07.57rt
 
 [English](README_EN.md) | [Polski](README_PL.md) | **Español**
 
@@ -34,7 +34,7 @@ foro EEVBlog.
 
 
 > **Consola de ajuste en PC:** véase [README_TUNER_ES](README_TUNER_ES.md) —
-> gráficas en vivo, pestañas de parámetros y el generador de `tz_table.h`.
+> gráficas en vivo, pestañas de parámetros y el generador de `gpsdo_tz_table.h`.
 
 ---
 
@@ -279,7 +279,7 @@ es lo bastante grande como para importar.
 
 ```
  ┌──────────────────────────────────────────────────┐
- │ GPSDO v1.06-rtos                LMT 14:32:45 Lun │   cabecera: versión + hora local
+ │ GPSDO v1.07.57rt                LMT 14:32:45 Lun │   cabecera: versión + hora local
  │                                                  │
  │          1 0 0 0 0 0 0 0 . 0 0 0 0  H z          │   frecuencia, fuente grande
  │                                                  │
@@ -653,6 +653,7 @@ funciona cualquier combinación de mayúsculas/minúsculas.
 | `T [baud]` | Túnel GPS por USB para u-center — NMEA/UBX bidireccional limpio (la telemetría pasa a Bluetooth si existe, si no se silencia); baud opcional de la UART GPS, conservado al salir; sale tras 300 s |
 | `SP <n>` | Fijar el DAC PWM directamente (1–65535), omite el algoritmo |
 | `DAC` | Salida de tensión de control: ruta, código de 24/16 bits y exacto, Vctl medido, tamaño de paso en µHz y df/f (las cifras en Hz necesitan `CT`) |
+| `SPAN [CLR FULL\|REDUCED]` | Puente de span del EFC en PB14 (`GPSDO_SPAN_SENSE`): la posición en que está y la calibración `CT` de cada posición — una por span, conmutada y reasignada cuando el puente se mueve; `CLR` olvida una |
 | `RH` | Modo de informe: legible por humanos (por defecto) |
 | `RD` | Modo de informe: delimitado por tabuladores |
 | `RP` | Pausar el flujo de datos serie/BT |
@@ -1387,7 +1388,7 @@ en lugar de imprimir un número por defecto.
 ## DAC SPI externo — planeado, no implementado
 
 `GPSDO_DAC_EXT` cambia la tensión de control del PWM de 16 bits a un DAC SPI
-externo. Activarlo hoy da un error de compilación deliberado: `dac_ext.cpp` es un
+externo. Activarlo hoy da un error de compilación deliberado: `gpsdo_dac_ext.cpp` es un
 esqueleto sin dispositivo elegido.
 
 El PWM da unos 50 µV por paso a 3,3 V, cerca de 2,7e-11 fraccional en un oscilador

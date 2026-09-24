@@ -13,9 +13,1032 @@ algorytmy sterowania autorstwa autora, **Claude Opus 5** (Anthropic),
 **GLM-5.3 Max** (Z.ai) i **Qwen3.8-Max** jako asystenci programowania,
 projekt PCB — Scrachi (forum EEVBlog).
 
-Sufiks `-rtos` oznacza linię portu na FreeRTOS.
+Od builda 57 build nazywa się `GPSDO vX.YY.NNrt`: wydanie, `NN` — numer
+builda (`BUILD_SERIAL` w `gpsdo_build_id.h`) — i `rt` dla linii portu na
+FreeRTOS. Build 56, pierwszy z numerem w nazwie, zapisywał ją jako
+`GPSDO v1.07-rt56`. Wydania sprzed tej zmiany miały sufiks `-rtos` —
+`v1.06-rtos` to był build 42 — i zachowują nazwy, pod którymi wyszły.
 
 ---
+
+## [v1.07] — wydane 2026-09-24 (build 57)
+
+Wydane jako build 57, pierwsze wydanie z numerem builda w nazwie:
+`GPSDO v1.07.57rt`. Jak poprzednio, wpisy trafiały tutaj wtedy, gdy zostały
+zmierzone, a nie wtedy, gdy zostały napisane.
+
+### Dodane
+- **`SPAN` — dwie kalibracje `CT`, po jednej na każdy zakres EFC, wybierane
+  zworką zakresu na PB14 (build 55).** Płytka z przesuwnikiem poziomu EFC
+  steruje oscylatorem w pełnym zakresie napięcia albo w zawężonym, a to są dwa
+  różne obiekty: na prototypie V3 Dana Wieringa `CT` zmierzyło 8209 LSB/Hz w
+  pełnym zakresie i 40873–46711 w zawężonym, 5,0–5,7 razy więcej — choć wynik
+  dla pełnego zakresu pochodzi sprzed wymiany referencji 5 V na 4,096 V, a przy
+  jednej referencji obie pozycje różnią się o dzielnik, 4,1–4,7 razy. Z tej liczby
+  wyprowadzany jest każdy współczynnik pętli, więc do tej pory płytka po
+  przestawieniu zworki jechała na kalibracji z drugiej pozycji, dopóki ktoś
+  nie powtórzył `CT`. Drugi biegun zworki idzie teraz na **PB14** (założona =
+  do masy = REDUCED; zdjęta albo w ogóle niepodłączona = FULL, więc płytka bez
+  tego przewodu zachowuje swoją jedną kalibrację jak dotąd), a firmware trzyma
+  osobne K dla każdej pozycji. Gdy zworka się przestawi — po odfiltrowaniu
+  drgań styku, pół sekundy:
+
+  - każdy współczynnik jest wyliczany od nowa z K tej pozycji — ten sam
+    zestaw, który wylicza `CT`, teraz w jednej funkcji `algo_coeffs_from_k()`,
+    wołanej przez oba miejsca — a wyuczony stan liczony w LSB (feed-forward
+    LRN, tempco algorytmu 9) jest przeskalowany stosunkiem obu K;
+  - **kod sterujący jest przeliczany tak, żeby pin EFC zachował napięcie**, a
+    częstotliwość przed przestawieniem była częstotliwością po nim:
+    `c_B = p_B + (K_A/K_B)·(c_A − p_A)`, gdzie `(p_A, p_B)` to jedna para
+    kodów, o której wiadomo, że daje to samo napięcie w obu pozycjach. Offsety
+    obu torów ustawiają referencja, dzielnik i trymer, a żadnego z nich
+    firmware nie widzi, więc para jest mierzona, a nie modelowana — kod starej
+    pozycji przy przestawieniu z zablokowaną pętlą, sparowany z kodem nowej
+    pozycji, gdy jej własna pętla wypracuje lock, albo zero znalezione przez
+    `CT` — i przy każdym przestawieniu kotwiczona na nowo, żeby błąd K obracał
+    się wokół punktu, w którym pętla faktycznie jest;
+  - pętla startuje od nowa, jak przy zmianie algorytmu.
+
+  Pozycja bez własnej kalibracji jedzie na współczynnikach drugiej — jak zawsze
+  jechała płytka z jedną kalibracją — a `CT` startuje samo: przy fixie GPS,
+  nigdy w holdoverze, i jeszcze do trzech razy, 10, 20 i 40 minut po nieudanej
+  próbie; potem przestaje i mówi o tym. Zworka przestawiona przy wyłączonym
+  zasilaniu jest obsłużona przy starcie, zanim ruszy pętla.
+  Pierwszy start tego builda przypisuje istniejącą kalibrację pozycji, którą
+  czyta pin; jeśli `CT` w drugiej pozycji zmierzy potem ten sam obiekt (w
+  granicach 1,5×), starsza kalibracja zostaje uznana za zmierzoną w złym
+  miejscu — typowo płytka skalibrowana na REDUCED, zanim podłączono PB14 — i
+  zapomniana. `SPAN` pokazuje stan, `SPAN CLR FULL|REDUCED` zapomina jedną
+  pozycję, a raport `DAC` wypisuje to pod linią obiektu. Ręczne wzmocnienia w
+  LSB (`LG`, `MG`, `LTK`) należą do operatora i nie są przeskalowywane;
+  przestawienie zworki ostrzega o każdym, które jest ustawione.
+
+  **Zasymulowane przed wydaniem.** `tools/spansim` (nowe) kompiluje ten
+  moduł, magazyn ustawień, algorytmy i moduł zdrowia bez zmian i steruje nimi
+  modelem płytki V3 — dzielnik 4,083:1, 1,5967 Hz/V, starzenie 1,7e-10/dobę —
+  pod algorytmem 11 przy LTC 60, każdy cykl zasilania jako osobny proces ze
+  wspólnym obrazem flasha. Każdy scenariusz jest powtarzany na buildzie bez
+  czujnika zworki, czyli na firmware sprzed zmiany:
+
+  | | z czujnikiem zworki | jedna kalibracja |
+  |---|---|---|
+  | przestawienie między dwiema skalibrowanymi pozycjami: ląduje przy | 3e-12 … 1,8e-11 | 3e-8 … 1,2e-7 |
+  | wychylenie fazy / ponowny lock | 13–49 ns / 399 s | 3,5–11,5 µs / 665–877 s |
+  | zworka przestawiona przy wyłączonym zasilaniu: start przy | 8,1e-12 | 1,2e-7 |
+  | zimny start, 3e-8 retrace'u, potem REDUCED: ląduje przy | 5,6e-10 | 3,3e-8 |
+
+  Liczba dla zimnego startu to własny błąd przeliczenia: oba `CT` myliły się o
+  2 % i 10 % w przeciwne strony, a pętla była 417 kodów od pary.
+
+  Zapisane jako 12 bajtów dopisanych na końcu bloku ustawień (380 → 392
+  bajty, każde wcześniejsze pole pod starym offsetem, sprawdzone `offsetof`
+  pod arm-none-eabi). Starszy rekord czyta nowe pola jako 0, co znaczy „nigdy
+  nie zapisane"; build 54 czytający rekord builda 55 bierze pierwsze 380
+  bajtów, więc powrót też jest bezpieczny.
+- **`VS` — co mierzy dzielnik na PA0 (build 49).** `VS VCC` albo `VS VREF`,
+  zapisuje się samo razem z grupą ścieżki wyjściowej. Od płytki V3 zworka na
+  górze tego dzielnika 4k7 + 4k7 wybiera **referencję napięcia** zamiast szyny
+  5 V: ten sam pin, ten sam dzielnik, to samo skalowanie, inny obiekt pomiaru.
+  Firmware nie widzi zworki, więc się mu ją podaje — tak samo jak przy `DV`,
+  `AV` i ścieżce DAC, i z tego samego powodu: jedynym śladem, jaki zworka
+  zostawia, jest napięcie nie tam, gdzie firmware się go spodziewał, a to
+  pomaga wyłącznie wtedy, gdy firmware'owi powiedziano, czego ma się
+  spodziewać.
+
+  Podanie tego kupuje kontrolę. Przy `VREF` raport `DAC` drukuje odczyt obok
+  tego, co twierdzi `DV`, i protestuje powyżej 5 % — co łapie referencję
+  brakującą, zapadniętą albo po prostu nie tę, którą wlutowano. To ostatnie nie
+  jest subtelną awarią: kość 5,000 V tam, gdzie `DV` mówi 4,096, sprawia, że
+  każda liczba częstotliwości drukowana przez płytkę jest o piątą część za
+  mała, w całkowitej ciszy. Etykieta na TFT też idzie za zworką — nazwanie
+  referencji 4,1 V „Vcc" czytałoby się jak zasilanie, które w połowie siadło.
+
+  Dlaczego w ogóle zworka, a nie własny pin: **nie ma wolnego kanału ADC**.
+  Przetwornik sięga na tej obudowie PA0–PA7, PB0 i PB1, a przy SPI1 obsługującym
+  wyświetlacz wszystkie dziesięć jest zajętych. Uwolnienie jednego oznaczałoby
+  przeniesienie zegara AD5680 z PB0 — pin kupiony kosztem zepsucia płytek, które
+  już istnieją.
+- **`BL` — ściemnianie podświetlenia TFT (build 48).** 30..100 %, zapisuje się
+  samo razem z flagami wyświetlania. Steruje tranzystorem MOSFET z kanałem P na
+  **PB5** (TIM3 CH2, 20 kHz), włączonym między szynę 3,3 V a anodę LED panelu:
+  bramka przez ~47 Ω, 100 kΩ do masy, żeby stan był określony, gdy pin jest w
+  stanie wysokiej impedancji po resecie, i 10-47 µF pojemności przy drenie.
+
+  Stopień **odwraca** — niski stan bramki to pełna jasność — więc firmware
+  zapisuje dopełnienie, przez co `BL 100` wypada na porównaniu równym zeru: pin
+  stoi statycznie nisko i stopień w ogóle nie przełącza. O to właśnie chodzi.
+  Szyna 3,3 V zasila VDDA, a więc referencję ADC, odczyt fazy i monitor Vctl —
+  pełna jasność jest zatem ustawieniem *najcichszym*, nie najgłośniejszym, a
+  ściemnianie wymienia odrobinę szumu na szynie na obciążenie i ciepło w
+  obudowie sprzężonej termicznie z OCXO.
+
+  Dolna granica 30 % istnieje z powodu, który nie jest elektryczny: poniżej
+  mniej więcej jednej trzeciej panel przestaje być czytelny, zamiast stawać się
+  użytecznie przyciemniony, więc omyłkowe `3` zostawiłoby operatora bez
+  możliwości odróżnienia przyciemnionego ekranu od martwej płytki. Kompiluje
+  się z każdym TFT i **oddaje PB5 generatorowi testowemu 2 kHz**, jeśli ten
+  został jawnie włączony — domyślne ustawienie nie może odbierać pinu świadomej
+  decyzji. `TIM3` był wolny: kilka komentarzy twierdziło, że mieszka tam
+  przechwytywanie 1 PPS, ale to TIM2 kanał 3 na PB10.
+
+  Zapisane w **ostatnim bajcie wyrównania bloku ustawień**, offset 319, obok
+  `dac_path` na 318 — `sizeof(SettingsBlock_t)` wynosi 376 przed i po, a każde
+  późniejsze pole zachowuje swój offset; sprawdzone przez `offsetof` pod
+  arm-none-eabi, a nie na oko. Bez podbicia `SETTINGS_VER`, bo odczyt wymaga
+  dokładnej zgodności wersji *i* rozmiaru, a podbicie wyrzuciłoby wszystkim PID,
+  LC i strefę czasową za jeden bajt. Zero znaczy „nieustawione", więc rekord
+  zapisany zanim to pole istniało prosi o wartość domyślną, a nie o ciemny
+  ekran.
+- `DV` — napięcie przy pełnym kodzie dla „zadane" w raporcie `DAC`
+  (2,50..5,50 V, domyślnie 3,30 = model PWM). Na zewnętrznym DAC-u 5 V stary
+  zahardkodowany model 3,3 V zaniżał „zadane" 1,5× i raport flagował MISMATCH
+  przy każdym odczycie. Zapisuje się samo.
+- `AV` — stosunek dzielnika przed pinem ADC (1,00..10,00, domyślnie
+  bezpośrednio). Skaluje „zmierzone" i każde wyświetlenie Vctl (linia
+  telemetrii, CSV, TFT). Zapisuje się samo. Przy dzielniku pomiarowym na
+  wyjściu DAC (10k+10k na płytkach AD5680) para `DV 5.00` + `AV 2.00` czyni
+  check MISMATCH dokładnym.
+- `SETTINGS_VER` 6: obie skale persystują z blokiem ALGO; rekordy v5
+  migrują automatycznie, nowe pola startują z domyślnymi.
+
+### Zmienione
+- **Numer builda przechodzi do wersji: `GPSDO v1.07.57rt` (build 57).**
+  Wydanie, build jako trzecia liczba i `rt` dla linii FreeRTOS, w miejsce
+  `GPSDO v1.07-rt56` z builda 56. Zmienia się tylko zapis: nazwa to nadal
+  `g_fw_version`, składana wyłącznie w szkicu, drukowana w tych samych
+  miejscach i dokładnie tak samo długa, więc każdy wyświetlacz, który miał
+  miejsce na `-rt56`, ma je na `.57rt`. Nagłówki źródeł idą za nią
+  (`Part of GPSDO v1.07.57rt`) — zmiana ich zapisu była edycją, więc na razie
+  każdy mówi 57 — podobnie tytuły dokumentów, łącznie z README v1.06 w
+  folderze szkicu (`v1.06.42rt`). Tuner czyta wszystkie trzy zapisy,
+  `v1.06-rtos`, `v1.07-rt56` i `v1.07.57rt`, porównuje tylko wydanie i
+  pomija osobne `build N` w linii stanu, gdy nazwa już je zawiera.
+- **Nazwa firmware niesie numer builda: `GPSDO v1.07-rt56` (build 56).**
+  Zastępuje `GPSDO v1.07-rtos`. `rt` nadal oznacza linię portu na FreeRTOS;
+  liczba to `BUILD_SERIAL`, więc podbicie builda samo zmienia nazwę firmware,
+  a zapis, zdjęcie wyświetlacza czy linia z tunera mówią, z którego builda
+  pochodzą. Składana raz w szkicu jako `g_fw_version` — szkic jest jedyną
+  jednostką, która dołącza `gpsdo_build_id.h`, więc podbicie nadal
+  przekompilowuje tylko szkic — i drukowana z tego jednego napisu przez baner,
+  `V`, nagłówek `H`, nagłówek TFT oraz ekrany startowe OLED i LCD, które mają
+  na nią miejsce aż do builda 999. Znacznik kompilacji nadal kończy się na
+  `build 56`, bo czytają go tunery starsze od tego. `PROGRAM_VERSION` to
+  teraz samo wydanie, `v1.07`. Nagłówek każdego pliku źródłowego brzmi
+  `Part of GPSDO v1.07-rt56`, a liczba to build, który ostatnio zmienił dany
+  plik (`gpsdo_flash_ring_core.c` wciąż mówił v1.06). Build 57 przeniósł
+  numer do wersji — patrz wyżej.
+- **Tuner przyjmuje obie nazwy i podaje build raz (build 56).** Jego wzorzec
+  wersji już przyjmował dowolny przyrostek po numerze wydania, więc
+  `v1.07-rt56` i `v1.06-rtos` parsują się oba, a porównywane jest tylko
+  `1.07`; linia stanu pomija osobne `build N`, gdy nazwa już je zawiera.
+- **Tablica stref przegenerowana z IANA 2026d, a generator sprawdza teraz to, co
+  zapisał (build 53).** 503 strefy, 88 reguł, ~3,34 KB flasha — dokładnie tyle
+  samo, co tablica 2026c, którą zastępuje.
+
+  **Trzy „błędne wiersze", które zgłosiłem przy poprzedniej tablicy, były
+  fałszywym alarmem, i powód warto zapisać.** Reguła każdej strefy to łańcuch
+  POSIX z końca jej pliku TZif, czyli reguła obowiązująca *po ostatnim
+  przejściu zapisanym w pliku* — niekoniecznie ta z dnia generowania. Dla strefy
+  z ustawową zmianą przed sobą te dwie rzeczy się różnią, a to, czy jest to
+  usterka, zależy wyłącznie od zadanego pytania.
+
+  Zapytane jako *„czy ta reguła jest poprawna dla roku kalendarzowego 2026?"*,
+  sześć stref wygląda na zepsute: Kolumbia Brytyjska, Alberta i Terytoria
+  Północno-Zachodnie przestają stosować czas letni **1 listopada 2026**, więc
+  `America/Vancouver` niesie `MST7`, a `America/Edmonton` `CST6`, podczas gdy
+  pierwsze dziesięć miesięcy 2026 miało jeszcze PDT i MDT. Zapytane jako *„czy
+  jest poprawna dla lat, przez które ta tablica będzie siedzieć we flashu?"* —
+  wszystkie sześć jest poprawnych, a stopka jest dokładnie właściwym wyborem:
+  tablica generowana dziś powinna nieść epokę, *w którą* wchodzi, a nie tę,
+  którą opuszcza. Africa/Casablanca to ta sama historia z wyprzedzeniem ośmiu
+  dni: IANA modeluje Maroko jako trwałe UTC+0 od 20 września 2026, czyli
+  dokładnie to, co mówi `<+00>0`.
+
+  **Zmierzone, ewaluatorem samego firmware'u, a nie wywodem.** Każde przejście
+  każdej strefy z tablicy, od dziś do końca 2028, sondowane dwie minuty przed i
+  minutę po: **778 przejść w 484 strefach, 1556 sond, i firmware zgadza się z
+  każdą** poza dwiema ostatnimi minutami obecnej epoki Maroka. To zarazem
+  najostrzejszy test, jaki przeszła poprawka DST z builda 52.
+
+  Generator nie polega już na tym, że ktoś zada właściwe pytanie. Po zapisaniu
+  tablicy sprawdza każdą regułę względem tzdata tej maszyny **dwa lata do
+  przodu** — w epoce, w której tablica naprawdę będzie żyć — i drukuje albo
+  „wszystkie się zgadzają", albo listę stref, które nie. Sprawdzenie porównuje
+  offsety, zamiast powtarzać silnik reguł firmware'u, bo druga implementacja
+  potrafi mylić się w tym samym miejscu i zgadzać się sama ze sobą. Czyta OBA
+  offsety reguły, nie tylko standardowy, bo Irlandia zapisuje swoją strefę jako
+  `IST-1GMT0` — IST jest standardem, a GMT ujemnym czasem letnim, odwrotnie niż
+  wszędzie indziej i całkowicie zgodnie z POSIX. Sprawdzenie czytające tylko
+  pierwszy offset uznaje Dublin za zepsuty przy każdym uruchomieniu, a
+  sprawdzenie, które krzyczy na poprawną strefę, jest gorsze niż żadne: tak
+  właśnie przewija się obok prawdziwego zgłoszenia. Zweryfikowane w obie strony
+  — milczy na tablicy tak jak wygenerowana i łapie podłożony zły offset albo
+  brakującą regułę DST.
+- **Jednolite nazwy `gpsdo_` i struktura repozytorium, którą da się czytać
+  (build 48).** Siedemnaście plików zmieniło nazwę — `dac_ext`, `flash_ring`,
+  `flash_ring_core`, `live_store`, `settings_store`, `tz_table`, `ubx_timtp`,
+  `TeeSerial`, `build_id` i `GPSDO_algorithms` — więc każdy plik źródłowy
+  należący do tego projektu nosi prefiks `gpsdo_` małymi literami, a listing
+  katalogu oddziela projekt od tego, na czym stoi. Strażniki nagłówków poszły
+  za nazwami plików.
+
+  **Cztery pliki celowo zachowują nazwy**, każdy dlatego, że kosztem zmiany
+  byłaby cisza, a nie błąd kompilacji: `GPSDO_FreeRTOS.ino` (Arduino wymaga,
+  by plik szkicu nazywał się jak folder), `build_opt.h` (builder szuka tej
+  nazwy, żeby pobrać flagi kompilatora — po zmianie flagi znikają, a kod dalej
+  się buduje, tylko inaczej), `STM32FreeRTOSConfig.h` (biblioteka włącza go po
+  nazwie) i `TM1637Display.*` (kopia obcej biblioteki; nazwa z upstreamu jest
+  tym, co utrzymuje czytelność przyszłego diffa).
+
+  `doc/`, `tools/` i `README.md` wychodzą z folderu szkicu do korzenia
+  repozytorium, więc folder szkicu trzyma kod i nic więcej, a razem z nimi
+  pojawia się `.gitignore`. Wyklucza wyjście builda, cache Pythona i katalog
+  roboczy PDF-ów — oraz, celowo, materiał roboczy w `doc/`: korespondencja,
+  audyty i listy zadań wymieniają ludzi z nazwiska i cytują prywatną pocztę, a
+  nieuważne `git add .` nie powinno ich opublikować.
+
+  Robi to wszystko `tools/gpsdo_restructure.py`. Domyślnie sucha próba,
+  idempotentny, i **odmawia przeniesienia `tools/`, dopóki którykolwiek
+  harness lokalizuje źródła licząc katalogi** — `hostcheck.sh`,
+  `loopsim/run.sh` i `algoswitch/run.sh` mówiły „dwa poziomy wyżej", co jest
+  prawdą tylko dopóki `tools/` siedzi w folderze szkicu; potem wskazuje na
+  korzeń, a hostcheck skompilowałby puste drzewo i zgłosił sukces. Wszystkie
+  trzy idą teraz w górę do `.ino`, co jest poprawne w obu układach.
+
+  Sprawdzone przez uruchomienie skryptu na drzewie v1.06, a potem na drzewie
+  v1.07, które hostcheck już przechodzi 14/14 — gdzie raportuje, że nie ma nic
+  do zrobienia, co jest stwierdzeniem, że jego wynik i zweryfikowane drzewo to
+  to samo. Jeden błąd znaleziony przy okazji: skrypt chodzi po `tools/`, mieszka
+  w `tools/` i nosi wszystkie stare nazwy we własnej tablicy zmian, więc
+  pierwsze uruchomienie przepisało tę tablicę na listę tożsamości. Teraz
+  wyklucza sam siebie.
+- **Napięcie sterujące nie przechodzi już przez `analogWrite()` (build 48).**
+  Obie ścieżki wyjściowe posiadają teraz TIM4 na własność, przez rejestry —
+  `pwm24_begin()` z odtwarzaniem DMA, nowe `pwm16_begin()` bez. Nośna i
+  rozdzielczość są celowo **bez zmian**: 100 MHz / 50 000 = 2,000 kHz, dokładnie
+  to, co dawało `analogWriteFrequency(2000)`, więc żadnej płytce nie przesuwa
+  się przez to CT, filtr ani wzmocnienie obiektu.
+
+  Znikają przy tym dwie rzeczy. `analogWrite()` z rdzenia wywołuje
+  `pwm_start()`, które przelicza preskaler i auto-reload z żądanej
+  częstotliwości **przy każdym wywołaniu** — napięcie sterujące zapisywane jest
+  raz na sekundę przez całe życie płytki, więc był to timer przebudowywany raz
+  na sekundę po to, by zmienić jedną wartość porównania: okazja do zakłócenia
+  wyjścia co sekundę, kupiona za nic. A `analogWriteFrequency()` jest w rdzeniu
+  **globalne**: stosuje się do pinu zapisanego jako następny, więc w chwili, gdy
+  pojawia się drugi PWM — powyższe podświetlenie — oba po cichu biją się o jedno
+  ustawienie.
+
+  Zwykła ścieżka mapuje teraz również **pełną skalę na pełną skalę**, zgodnie z
+  tą samą regułą, którą stosują już tablica ditheru i zewnętrzny DAC: kod 65535
+  to porównanie równe okresowi. Rdzeń dzielił przez 65 536, przez co najwyższy
+  LSB był nieosiągalny; różnica 15 ppm w środku zakresu leży daleko poniżej
+  tego, co CT jest w stanie rozróżnić.
+- CT dwuprzebiegowy przy łagodnym obiekcie regulacji: gdy K z pierwszego
+  przebiegu spada poniżej 0,12 mHz/LSB, druga trójpunktowa tura mierzy
+  ponownie na szerszym rozstawie kodów (cel ~0,8 Hz wychylenia,
+  wycentrowanym na wyprowadzonym kodzie 10 MHz, nigdy węższym niż przebieg
+  pierwszy i nigdy bliżej niż 1000 LSB od któregokolwiek krańca zakresu). Na
+  takich płytkach stały sweep 20 480 LSB wychyla oscylator wyraźnie poniżej
+  herca, a dopasowanie nachylenia rozbiegało się o 10-50% w górę wobec
+  prawdy z DMM. Podłoga wiarygodności finalnego K przesunięta
+  0,02 → 0,01 mHz/LSB — obroniona, bo wstępna brama łapie śmieci bez
+  sygnału zanim jakiekolwiek K zostanie uwierzone.
+
+### Naprawione
+- **`CT` i `C` restartują pętlę w każdym buildzie (build 57).** Build 55
+  kazał `CT` restartować pętlę po wycentrowaniu, ale umieścił restart w haku
+  `CT` modułu zakresu, który build bez `GPSDO_SPAN_SENSE` kompiluje pusty —
+  tam więc własna kopia kodu w pętli, wciąż ta sprzed przemiatania, dalej
+  ciągnęła z powrotem ku niemu. Restart jest teraz w samym `CT`, a `C`,
+  kalibracja dwupunktowa, dostaje tę samą linię, bo także wpisuje nowy kod i
+  zostawia pętli tę samą nieaktualną kopię. W buildzie `spansim` z jedną
+  kalibracją (`GPSDO_SPAN_SENSE` wyłączony), `CT` zaraz po przestawieniu
+  zworki zakresu: bez restartu pętla ciągnęła z powrotem ku kodowi, który
+  `CT` właśnie opuścił, najgorzej o 3,1e-8, odzyskała lock 1416 s po
+  przestawieniu i przez następne dwie godziny miała 1,1e-9 RMS; z restartem
+  najgorzej 5,0e-9, 1190 s i 2,2e-10. Build z czujnikiem zakresu zachowuje
+  się dokładnie jak poprzednio: połowa wyniku `spansim` dotycząca zakresu jest
+  identyczna co do bajtu. `tools/spansim` robi to wywołanie tam, gdzie robi je
+  teraz `CT`.
+- **`DV` tracił trzecie miejsce po przecinku przy każdym restarcie (build
+  57).** Był zapisywany w centywoltach, więc `DV 4.096` — ADR4540 na V3 Dana
+  Wieringa — wracał po restarcie jako 4.10, co daje 0,1 % przesunięcia
+  kolumny „zadane" w raporcie `DAC`; a zapytanie i echo drukowały dwa
+  miejsca, więc `DV` pokazywał 4.10 niezależnie od tego, czy trzymał 4.096,
+  czy 4.10. `DV` jest teraz zapisywany także w miliwoltach, w polu dopisanym
+  na końcu bloku ustawień (392 → 396 bajtów, bez zmiany wersji), i drukowany
+  z trzema miejscami przez `DV` i raport `DAC`. Pole w centywoltach jest
+  nadal zapisywane z tej samej wartości, więc starszy build czytający nowszy
+  rekord zachowuje dwumiejscowe `DV` jak zawsze, a rekord ze starszego builda
+  wczytuje się dokładnie jak przedtem. Sprawdzone na hoście na prawdziwym
+  magazynie ustawień: każde `DV` od 2.500 do 5.500 co 0,1 mV wraca z
+  dokładnością do miliwolta; rekord 392-bajtowy wraca do wartości w
+  centywoltach; magazyn builda 56 czyta rekord 396-bajtowy (4.10), a build 57
+  odczytuje to, co build 56 potem zapisał.
+- **`CT` restartuje pętlę po wycentrowaniu (build 55).** `CT` wystawia na pin
+  nowy kod, ale każda pętla trzyma własną kopię tego, gdzie pin powinien być
+  — integrator algorytmu 11, absolutny cel algorytmu 10 — i ta kopia wciąż
+  miała kod sprzed przemiatania, więc pierwsze kroki pętli po `CT` sterowały z
+  powrotem ku niemu i psuły wycentrowanie. `CT` prosi teraz o ten sam restart,
+  co zmiana algorytmu. Zmierzone w `spansim` na `CT` udanym, gdy pętla już
+  pracowała: bez restartu kod stał dwadzieścia minut później 42 LSB od zera
+  `CT`, przy 1,0e-10, a następne przestawienie zworki, przeliczone od tego
+  miejsca, wylądowało 1,1e-10 obok; z restartem 1,2e-11 i 3,7e-12. Restart
+  siedzi w haku `CT` modułu zakresu, więc build skompilowany bez
+  `GPSDO_SPAN_SENSE` — wyłączonego tylko z wyboru, w dostarczanej konfiguracji
+  jest włączony — zachowuje stare zachowanie. Build 57 przeniósł restart do
+  samego `CT`, dla każdego builda — patrz wyżej.
+- **`tools/loopsim/run.sh` drukował odchylenie śledzenia pod nagłówkiem
+  odchylenia fazy (build 55).** Linia raportu ma drugie `sd`, odkąd doszły
+  statystyki śledzenia (`track sd 0.71 LSB`), a zachłanne `.*sd` w tabeli
+  łapało właśnie je: każda tabela wydrukowana przez skrypt od tamtej pory
+  pokazywała sd śledzenia w LSB pod nagłówkiem obiecującym sd fazy w ns, i nic
+  nie wyglądało źle, bo obie liczby są małe i dodatnie. Po zakotwiczeniu na
+  polu przed nim tabela z README znów się odtwarza (okno algo-12, `MG 0`:
+  3,70 / 2,93 ns wobec zapisanych 3,57 / 2,95 — drzewo od tego czasu się
+  zmieniło). Wnioski wyciągnięte z tabel `run.sh`, odkąd pojawiły się liczby
+  śledzenia, warto sprawdzić jeszcze raz; sam program loopsim zawsze liczył
+  dobrze.
+- **`hostcheck` nie widział brakującej funkcji `span_`, `algo_` ani `health_`
+  (build 55).** Kontrola niezdefiniowanych symboli patrzy tylko na nazwy z
+  prefiksami firmware'u, a tych trzech nie było na liście: przy definicji
+  `span_poll` przemianowanej na inną nazwę każdy wiersz nadal mówił „clean".
+  Dodane — razem z listą `DEFAULT_ON` dla przełączników włączonych w
+  dostarczanej konfiguracji (`GPSDO_SPAN_SENSE`), żeby istniejące wiersze dalej
+  budowały płytki, od których mają nazwy, i dwoma nowymi wierszami, które
+  budują bez niego. 18 wierszy, wszystkie czyste pod arm-none-eabi.
+- **Algorytm 11 łomotał w EFC przez pięć minut po tym, jak już był w domu
+  (build 54).** `s_locked` bramkował przedfiltr fazy — `if (!s_locked) filt =
+  1u;` — a `s_locked` nie jest zdaniem o fazie. To stoper: test locka wymaga,
+  żeby faza I częstotliwość były w swoich oknach *nieprzerwanie* przez
+  `LPF × LTC` sekund, czyli pięć minut na wartościach domyślnych. Pętla, która
+  już jest w domu, pozostaje formalnie niezablokowana przez kolejne pięć minut i
+  spędzała każdą z tych sekund w trybie szybkim, bez wygładzania, odpowiadając
+  pełnym wzmocnieniem na każdą próbkę szumu detektora.
+
+  Znalezione w przechwycie z 11.09, w momencie przekazania z algorytmu 13 do 11
+  przy fazie 2,4 ns: **299 sekund `PLL`, przez które filtrowana faza nie
+  wyszła poza ±6,7 ns wobec okna 100 ns — a PWM ruszał się średnio o 4,5 LSB na
+  sekundę, aż do 17 LSB w jednej sekundzie, i o więcej niż 4 LSB w 145 z tych
+  298 sekund.** Siedemnaście LSB to 5,4e-10 na tej płytce. Ta sama pętla po
+  zablokowaniu, przez 14,6 godziny: 0 albo 1 LSB w każdej sekundzie, 2 LSB
+  czterdzieści razy, nigdy więcej. Rząd wielkości szumu wyjściowego z flagi,
+  która znaczyła tylko „jak długo to już jest dobre".
+
+  Przedfiltr idzie teraz za fazą, a nie za stoperem: szybko, dopóki faza jest
+  poza oknem, wygładzanie, gdy jest w oknie **i utrzymała się w nim tak długo,
+  jak długie jest okno uśredniania filtru**. Ta druga połowa nie jest zbędna —
+  sam test okna dawał gorszy wynik, bo faza *wychodząca* też przez okno
+  przechodzi, a wygładzanie jej tam to sposób, w jaki pętla dowiaduje się o
+  zaburzeniu za późno (harness przełączania zmierzył ekskursję 600 s kończącą
+  się na 340 ns zamiast 241). Czas trwania to samo `filt`, i to jedyny wybór
+  spójny sam ze sobą: uśrednianie po N sekundach ma sens dokładnie wtedy, gdy
+  ostatnie N sekund opisywało to samo.
+
+  **Odtworzone na zmierzonym obiekcie z 26.08 z ustawieniami tej płytki**
+  (LTC 60, LFD 3, LPL 100, LPF 5, LG 2,130), na tych 300 s, które pętla spędza
+  formalnie niezablokowana z fazą już w domu:
+
+  | | średni krok | najgorsza sekunda | sekundy > 4 LSB |
+  |---|---|---|---|
+  | przed | 5,88 LSB | 22 LSB | 159 z 300 |
+  | po, całe okno | 0,49 LSB | 13 LSB | 7 z 300 |
+  | po, gdy warunek czasu jest spełniony | **0,21 LSB** | **1 LSB** | **0** |
+
+  Pierwsze dwadzieścia sekund z założenia zachowuje stare, szybkie zachowanie:
+  pętla pozostaje szybka, dopóki nie ma dowodu, że stać ją na wygładzanie.
+  Reszta jest bez zmian i została sprawdzona, a nie założona — czasy akwizycji
+  identyczne we wszystkich czterech scenariuszach (ustabilizowany, 800 ns poza,
+  1500 ns poza, detektor na ograniczniku), sd fazy identyczne na pięciu ziarnach
+  szumu, algorytm 12 bit w bit, a harness przełączania wrócił do liczb, które
+  drukował przed zmianą.
+
+- **Algorytm 13 kopał DAC sekundę po każdym restarcie (build 54).** Zmierzone na
+  stole przy przekazaniu z algorytmu 11 w przechwycie z 11.09 — PWM 40835 →
+  40978 → 40871, czyli **krok 143 LSB w jednej sekundzie, 4,6e-9 na wyjściu**,
+  na płytce zablokowanej z dokładnością do nanosekundy sekundę wcześniej.
+  Prześledzone w symulatorze do prawdziwej przyczyny, która nie była tą
+  oczywistą:
+
+  Pierwszy pomiar częstotliwości po resecie to EMA **licznika
+  jednosekundowego kwantowanego do pełnych herców**, a `P[1][1]` stoi jeszcze
+  na szerokim priorze zimnego startu, więc stan częstotliwości przesuwa się o
+  61% drogi do liczby, która jest głównie tętnieniem EMA — 3,79 ns/s, czyli
+  119 LSB korekcji na tej płytce. Sterowanie zastosowało to w całości; w
+  następnej sekundzie zabrało większość z powrotem. `lim_lsb` to całe pasmo
+  detektora i na ustabilizowanej pętli nigdy nie ogranicza, więc ogranicznik
+  tylko się temu przyglądał.
+
+  Dwie zmiany, i pomiar mówi, że obie zarabiają na swoje miejsce. **Krótki
+  horyzont sterowania nie zatrzaskuje się już na pierwszym odczycie w paśmie**
+  — po jednej próbce estymata *jest* tą próbką — tylko czeka, aż filtr uśredni
+  horyzont pomiarów, co jest własną skalą czasu pętli, a nie nową stałą. Oraz
+  **korekcja jest teraz ograniczona co do szybkości zmian**, a nie tylko co do
+  wartości: ogranicznik mówi, jak daleko wolno pójść, ten mówi, jak szybko wolno
+  się zmienić — pasmo detektora rozłożone na jeden horyzont sterowania. Na
+  ustabilizowanej płytce `du` zmienia się o dużo mniej niż LSB na sekundę, więc
+  nigdy nie ogranicza; reszta idzie do tego samego carry, którego używa ścieżka
+  sub-LSB, więc ograniczona sekunda jest opóźniona, a nie stracona.
+
+  Najgorszy krok jednosekundowy w pierwszej minucie, obiekt z nocy 03.09, pięć
+  ziaren szumu:
+
+  | | z1 | z2 | z3 | z4 | z5 |
+  |---|---|---|---|---|---|
+  | przed | 48 | 78 | **175** | 120 | 16 |
+  | sam limit szybkości | 33 | 52 | 28 | 63 | 16 |
+  | obie | **13** | **27** | **9** | **19** | **10** |
+
+  Sd fazy, dPWM, najgorszy krok w całym przebiegu i ADEV przy każdym tau — bez
+  zmian.
+
+- **Notka przy `AP` polecała algorytmy, które nie umieją tego, o co prosi
+  (build 54).** Mówiła „use a PLL algorithm (LA 4/5/7) to keep phase locked
+  long-term" — rada starsza niż algorytmy 10–13. Tamte trzy sterują z licznika i
+  w ogóle nie mają detektora fazy, więc nie mogą utrzymać dzielnika tam, gdzie
+  postawi go `AP`; pętle LTIC mogą, i same zbroją ponownie, gdy detektor
+  powie, że dzielnik stracił synchronizację. Dan Wiering wybrał algorytm 7 na
+  nocny przebieg i potem zastanawiał się, skąd te zdarzenia zbrojenia —
+  algorytmy 0–9 nie zbroją wcale, a ta linia jest najbardziej prawdopodobnym
+  powodem, dla którego tam trafił.
+
+- **`loopsim` nauczył się raportować, co pętla zrobiła z pinem (build 54).**
+  Statystyka aktuatora była RMS-em po całym przebiegu, który uśrednia do zera
+  transjent trwający jedną sekundę — a jednosekundowy krok to dokładnie to, co
+  analizator fazy rysuje jako pik. Teraz drukuje też najgorszą pojedynczą
+  sekundę i najgorszą sekundę pierwszej minuty, gdzie mieszkają transjenty
+  restartu. Pokrętła algorytmu 11 — `LTC`, `LFD`, `LPL`, `LPF` i `LG` — są
+  wystawione jako nadpisania środowiskowe, żeby dało się odtworzyć przechwyt z
+  ustawieniami, które płytka naprawdę miała, a zrzut niesie zastosowane
+  sterowanie obok fazy. Każda liczba w dwóch powyższych wpisach wyszła z tych
+  dodatków.
+- **Przegenerowanie tablicy stref przywracało strażnik nagłówka sprzed zmiany
+  nazwy (build 53).** Plik stał się `gpsdo_tz_table.h` w restrukturyzacji v1.07,
+  a jego strażnik `GPSDO_TZ_TABLE_H`, ale generator nadal pisał `TZ_TABLE_H` —
+  więc każde naciśnięcie przycisku cicho to cofało, a `TZ_TABLE_H` to dokładnie
+  ten rodzaj ogólnej nazwy, którą bierze też druga biblioteka. Poprawione w
+  generatorze i w dostarczonej tablicy.
+- **Każde przejście czasu letniego wypadało w złym momencie, o wielkość samego
+  offsetu (build 52).** `tz_offset_now()` porównywał godziny przejść strefy —
+  które POSIX zapisuje w czasie LOKALNYM — z UTC, a komentarz nazywał tę
+  różnicę nieistotną dla zegara ściennego. Nie jest nieistotna i nie jest to
+  „mniej więcej godzina", jak twierdził komentarz: błąd równa się dokładnie
+  offsetowi obowiązującemu na granicy. Zmierzone względem prawdziwych momentów
+  2026, przed poprawką:
+
+  | strefa | wiosna | jesień |
+  |---|---|---|
+  | Europe/London | dokładnie | **godzinę za późno** |
+  | Europe/Berlin, Warsaw | godzinę za późno | dwie godziny za późno |
+  | Europe/Athens | dwie za późno | trzy za późno |
+  | America/New_York | **pięć godzin ZA WCZEŚNIE** | cztery za wcześnie |
+  | America/Denver | siedem za wcześnie | sześć za wcześnie |
+
+  Wiosenna zmiana w Londynie wyszła dokładnie tylko dlatego, że GMT *jest* UTC,
+  i ta zbieżność trzymała usterkę w ukryciu: strefa, którą autor sprawdziłby
+  jako pierwszą, jest jedyną, w której połowa błędu się skraca. Nowy Jork jest
+  tym przypadkiem, którego nie dałoby się przeoczyć — zegar przeskakiwał o
+  21:00 w sobotni wieczór, pięć godzin przed całym krajem.
+
+  Nigdy nie było tu błędnego koła, którego bał się stary komentarz. Reguła
+  początku jest w POSIX zapisana w lokalnym czasie STANDARDOWYM, a reguła końca
+  w lokalnym czasie letnim; offset każdej z nich jest znany przed porównaniem,
+  więc każda granica przelicza się na UTC przez odjęcie własnego offsetu. Bez
+  iteracji, bez zgadywania. Porównanie idzie teraz po numerze dnia w roku
+  zamiast po spakowanej dacie, bo odejmowanie potrafi przekroczyć północ —
+  Australia/Sydney startuje o 02:00 AEST, czyli 16:00 UTC dnia *poprzedniego* —
+  a granice zawijają się w obrębie roku.
+
+  **Sprawdzone na danych IANA tej maszyny, nie wywodem.** Każda strefa z
+  wbudowanej tablicy została przeskanowana minuta po minucie przez cały 2026, a
+  jej przejścia porównane z `zoneinfo` Pythona: **416 stref zgadza się teraz co
+  do minuty**, podczas gdy przed poprawką ten sam test przewracał się na
+  momentach granicznych wszędzie poza UTC. Pięć pozostałych to trzy błędne
+  wiersze tablicy opisane w następnym punkcie oraz Casablanca i El Aaiun,
+  których czas letni idzie za ramadanem i nie da się go zapisać regułą POSIX —
+  co firmware zresztą sam mówi przy wyborze tych stref.
+
+  Znalezione, bo Dave (Solder_Junkie) z EEVbloga zapytał, czy `TZ London`
+  przełączy się sam pod koniec października. Przełączał się — godzinę za
+  późno — i samo pytanie wystarczyło, żeby ktoś to wreszcie zmierzył.
+
+- **Jasność TM1637 ustawiona na 1 z 7 pod komentarzem mówiącym 5/7 (build
+  52).** Gołe `setBrightness(1)` zakopane w zadaniu wyświetlacza, bez żadnego
+  sposobu, żeby budujący odróżnił ciemny moduł od ciemnego firmware'u. Teraz
+  jest to `TM1637_BRIGHTNESS` w `gpsdo_config.h`, domyślnie 4, obok
+  `HT16K33_BRIGHTNESS`, czyli tam, gdzie ktoś będzie tego szukał, i opisane w
+  instrukcji w rozdziale o zegarze LED.
+
+  **Obie konfiguracje TM1637 są teraz też kompilowane przez `hostcheck`, a nie
+  były.** Tak właśnie ta usterka przetrwała, i nie ona jedna w tym bloku:
+  sześciocyfrowa maska dwukropka nadal ma przy sobie komentarz mówiący, że
+  wartość używana przez kod nie zapala żadnego dwukropka. Konfiguracja, której
+  nikt nie buduje, jest konfiguracją, której nikt nie czyta. Szesnaście
+  konfiguracji zamiast czternastu. (LCD 20x4 dalej nie ma wiersza — potrzebuje
+  zaślepek `hd44780`, których jeszcze nie ma. Luka jawna, a nie cicha.)
+
+- **Tuner rysował estymatę fazy tylko dla algorytmu 13; teraz rysuje ją każda
+  pętla LTIC, która ją ma (build 52).** Algorytm 11 prowadzi filtrowaną fazę
+  (`s_phase_filt`, wykładniczy uśredniacz o stałej `time_const/filter_div` po
+  zablokowaniu i 1 w akwizycji) i od zawsze drukował ją jako `phase=` — tuner
+  po prostu nigdy jej nie rysował, bo algorytmy 10 i 11 dzieliły jedną rodzinę
+  wykresów, a to rodzina wybiera nakładkę. Teraz są osobne.
+
+  Panel algorytmu 12 był gorszy niż pusty: pokazywał `ph`, które *wygląda* na
+  właściwe pole, a jest surowym odczytem detektora rzutowanym na `int16_t` —
+  pomiarem skwantowanym do pełnych nanosekund, podpisanym „błąd fazy". Górny
+  panel pokazuje teraz `dph`, ten sam pomiar z miejscem po przecinku, a estymata
+  idzie na wierzch.
+
+  Tę estymatę trzeba było najpierw wystawić, bo algorytm nigdy jej nie
+  publikował: `mlacc_stats_t` dostaje `est_ns` — własną odpowiedź akumulatora,
+  czyli `last_phase` znormalizowane tak, jak normalizuje je sama korekcja —
+  drukowane w linii Learn jako `est=`, dopisane na KOŃCU pól algorytmu 12, żeby
+  żaden istniejący regex się nie przesunął. Sprawdzone na odtworzeniu z 26.08, a
+  nie założone: na 35 korekcjach estymata idzie za prawdziwą fazą z korelacją
+  0,992 i nachyleniem dopasowania **1,048** (błąd poziomu dałby 0,5 albo 2,0), a
+  jej odchylenie RMS od prawdy to 0,70 ns przy 2,45 ns szumu detektora. Ten
+  stosunek jest całą tezą algorytmu i to właśnie pokaże odstęp między dwoma
+  przebiegami.
+
+  **Algorytm 10 nakładki nie dostaje, celowo.** Pętla trzystopniowa pracuje na
+  surowym odczycie i nigdzie nie trzyma filtrowanej fazy; jej wygładzanie
+  siedzi w integratorze PID, a to stan sterowania, nie estymata czegokolwiek.
+  Narysowanie go byłoby wymyśleniem estymatora, którego ten algorytm nie ma.
+
+  Opóźnienie nakładki to 1 próbka dla wszystkich trzech. Dla algorytmu 13 było
+  zmierzone korelacją wzajemną na 7,5-godzinnym przechwycie; dla 11 i 12 wzięte
+  ze struktury — ten sam producent, ten sam odbiorca, ten sam wyścig — i tak to
+  jest w kodzie napisane. Kilka minut telemetrii `RH` pod każdym z nich by to
+  potwierdziło.
+- **Dwa wskaźniki czytały niezainicjalizowaną pamięć, a trzeci przekazywał
+  wskaźnik pusty do `strncpy` (build 51).** Obie usterki były osiągalne na
+  zwykłej płytce; żadna nie wymagała nietypowej kombinacji przełączników.
+
+  `set_trend(0)` — algorytm 11 i algorytm 13 odmawiają pracy bez kalibracji
+  TIC i obydwa mówiły to wywołaniem `set_trend(0)`, czyli
+  `strncpy(dest, NULL, 4)`. To zachowanie niezdefiniowane, a nie pusty
+  wskaźnik, i ścieżka do niego jest zwyczajna: robi to każda nowa płytka przy
+  pierwszym uruchomieniu, zanim `LC` zostało kiedykolwiek wykonane. Obydwa
+  ustawiają teraz `NoCT` — słowo, którego algorytm 13 używał już linijkę niżej
+  dla drugiego brakującego współczynnika. Stan ma nazwę, a operator dowiaduje
+  się, *dlaczego* pętla czeka, zamiast patrzeć na wskaźnik, który może być
+  pozostałością po tym, co ostatnio tam zapisano.
+
+  `snap_c` — zadanie wyświetlacza robi migawkę trzech współdzielonych struktur
+  pod 5-milisekundowym timeoutem muteksu. Dwie były najpierw czyszczone,
+  migawka sterowania nie. Przekroczenie timeoutu nie jest błędem — zdarza się
+  zawsze, gdy zadanie sterujące jest w połowie własnej aktualizacji — a gdy się
+  zdarzyło, każdy odbiorca poniżej czytał niezainicjalizowaną ramkę stosu:
+  żółta dioda brała stąd stan holdoveru, pasek statusu numer algorytmu i
+  werdykt lock, a `trendstr` trafiał do raportu szeregowego i na LCD **w ogóle
+  bez terminatora**, więc funkcja doklejająca łańcuch kopiowała to, co leżało
+  za nim na stosie, aż trafiła na bajt zerowy. Teraz trzymana jest ostatnia
+  dobra kopia i to ona jest używana — jedyna odpowiedź zarazem bezpieczna i
+  prawdziwa. Wyzerowanie byłoby bezpieczne i dalej twierdziłoby: algorytm 0,
+  PWM 0, brak holdoveru, pusty trend — losowo, czyli dokładnie taki rodzaj
+  nieprawdy, w który się wierzy.
+
+- **Algorytm 13 nie miał w ogóle werdyktu lock, więc ekran oceniał filtr
+  Kalmana po średniej częstotliwości (build 51).** `tft_loop_locked()` wymienia
+  algorytmy publikujące żywy stan lock i pyta je; 13 nie było na liście, więc
+  spadał do gałęzi pisanej dla algorytmów 0–9, która bada średnią 10 000 s
+  (albo 1000 s) — dokładnie to, czego ta funkcja została wydzielona, żeby pasek
+  przestał robić. Dopisanie do listy też by nie pomogło: **pętla Kalmana nigdy
+  nie emituje `LOCK`.** Cały jej słownik to `KAL` / `REJ` / `NOPH` / `ARM` /
+  `WAIT` / `NoCT` / `NoPL`, więc test na łańcuchu trendu nie mógł się dopasować.
+
+  Werdykt pochodzi teraz z filtru i jest liczony tam, gdzie filtr go zna, z
+  trzech składników, których żaden inny algorytm tutaj nie ma:
+
+  - **detektor odezwał się w tej sekundzie** (`s_kf_holdover == 0`, co spełnia
+    również odczyt odrzucony — `REJ` to bramka innowacji wykonująca swoją
+    pracę, a nie utrata wejścia). Bez tego filtr bezbłędnie lecący na własnym
+    modelu czyta się jako zablokowany w nieskończoność, a to jest różnica
+    między sterowaniem a dryfowaniem;
+  - **estymowana faza mieści się w paśmie** — estymata, nie odczyt z tej
+    sekundy, bo po to właśnie jest filtr. Pętla ściągająca z 400 ns mówi `KAL`
+    w każdej sekundzie, przez którą to robi;
+  - **i filtr o tym wie** — `sqrt(P[0][0])` w tym samym paśmie. To jest
+    składnik, który czyni werdykt uczciwym w dwóch momentach, w których to się
+    liczy, i nie kosztuje nic w żadnym innym: przy zimnym starcie `P[0][0]`
+    startuje z `(range/2)²`, a po zbrojeniu picDIV jest celowo resetowane do
+    tej samej wartości, bo zero, do którego odnosiła się estymata, przestało
+    istnieć.
+
+  Pasmo to `LAT` (`g_ltic.acq_threshold_ns`), które mierzy `LC` i którego ten
+  algorytm już używa dla `s_kf_ctl_fast`, dla testu podążania i dla bramki
+  cierpliwości przed zbrojeniem. Nic nie jest wymyślone i nic nie jest
+  zakodowane na sztywno: płytka o lepiej rozdzielczym detektorze dostaje z `LC`
+  mniejsze `LAT` i werdykt zacieśnia się razem z nim.
+
+  **Odtworzone, sześć scenariuszy, obiekt z nocy 03.09 (28 680 s, `LAT`
+  200 ns, szum detektora 2,45 ns).** Nowy werdykt ani razu nie zgłosił locka,
+  gdy prawdziwa faza była poza pasmem — w żadnym scenariuszu. Co się zmienia:
+
+  | scenariusz | stara reguła mówi lock | nowy werdykt mówi lock | fałszywa zieleń |
+  |---|---|---|---|
+  | od początku ustabilizowany | t+1000 s | **t+10 s** | 0 s / 0 s |
+  | zimny start, 800 ns poza | t+1000 s | t+193 s (do tego czasu wciąż ściąga) | 0 s / 0 s |
+  | detektor na ograniczniku | t+1000 s | t+201 s | 0 s / 0 s |
+  | detektor zamrożony na +1295 ns | t+1189 s | **nigdy** | **14 459 s** / 0 s |
+
+  Ostatni wiersz jest tym, dla czego warto było to zrobić, i nie jest
+  hipotetyczny — detektor zamrożony na +1295 ns to awaria, dla której istnieje
+  logika zbrojenia, wzięta z prawdziwego przechwytu. Średnia częstotliwości nie
+  może tego zobaczyć, bo *częstotliwość* oscylatora jest w porządku: umarło
+  odniesienie fazy. Przez cztery godziny jednej nocy pasek pokazywałby
+  `DISCIPLINED  FIX OK` w zieleni locka, z detektorem fazy stojącym 1,3 µs
+  poza. Nowy werdykt nie zapala się ani razu.
+
+  `LOOPSIM_TRACE13` drukuje teraz oba werdykty obok siebie (`lock` i `ofrq`),
+  żeby następną zmianę któregokolwiek z nich dało się policzyć, a nie
+  przedyskutować.
+
+- **Żółta dioda gasła w ręcznym holdoverze po utracie fixa (build 51).** Test
+  na OFF brzmiał `(!fix && !hold_auto)`, a to łapie jedyną kombinację, która
+  nigdy nie może być ciemna: operator zamroził wyjście komendą `MH`, dioda
+  pulsowała wolno, żeby to powiedzieć, i w chwili utraty fixa gasła — nie do
+  odróżnienia od płytki, która nigdy nie widziała satelity, dokładnie w
+  momencie, w którym zamrożone wyjście jest jedyną rzeczą trzymającą oscylator.
+  Ręczny holdover ma tu pierwszeństwo przed fixem, tak jak ma je już w pasku
+  statusu. Dokładnie jedna z ośmiu kombinacji wejść zmienia zachowanie;
+  pozostałe siedem sprawdzono i nie ruszają się.
+
+- **`LPOL 0` był w trzech miejscach opisany jako „auto", a jest odwrotnie
+  (build 51).** Wszystkie trzy pętle LTIC traktują polaryzację 0 jako *odmawiam
+  pracy i trzymam* i drukują prośbę o jej ustawienie. Nazwanie tego auto mówiło
+  operatorowi, że firmware sam sobie to wyliczy — a to jedyna rzecz, której nie
+  zrobi. „Auto", które istnieje, to `LC`, i trzeba je uruchomić. `LPOL`, `LL` i
+  tekst pomocy mówią teraz `not set - loop holds`.
+
+- **Korekcje nigdy nie były liczone na algorytmach 12 i 13, a `CS` podawał
+  fałszywy powód (build 51).** `counting_now()` umiał zapytać algorytmy 10 i 11,
+  czy są zablokowane; 12 i 13 spadały przez `default:` razem z 0–9, więc na
+  dwóch najnowszych pętlach — dwóch najbardziej prawdopodobnych na płytce,
+  której właściciel dba o tę liczbę — statystyka nie policzyła niczego, a `CS`
+  tłumaczył pustkę zdaniem, że płytka „pracuje na algorytmie poniżej 10", co dla
+  12 i 13 nie jest prawdą.
+
+  Obydwa algorytmy zawsze umiały odpowiedzieć; żaden nie był pytany. Publikują
+  teraz werdykt tam, gdzie go podejmują (`mlacc_locked()`, `kf_locked()`), a
+  `CS` wymienia algorytmy, które naprawdę nie mają stanu lock — 0–9. Flaga
+  algorytmu 12 celowo przeżywa sekundę `CORR` (korekcja wykonana przez
+  ustabilizowaną pętlę to dokładnie to, co ta statystyka mierzy) i celowo
+  opada na jedną sekundę skoku `ZC`, który kasuje narzut zadany przez sam
+  algorytm i jest poleceniem, a nie korekcją.
+
+- **`LL` drukował stan algorytmu 10 pod każdym algorytmem (build 51).**
+  Trzystopniowy `state=ACQ|DPLL|LOCK` jest zapamiętywany, więc pod algorytmem
+  11, 12 czy 13 linia raportowała, gdzie trzystopniowa pętla skończyła ostatnim
+  razem — możliwe, że w poprzedniej sesji, bo wartość jest odczytywana z flasha
+  — i to bez żadnego zastrzeżenia, pośród żywych parametrów LTIC. Teraz drukuje
+  się tylko pod algorytmem 10, a poza nim `state=- (algo N running…)`. Stojący
+  za tym operator warunkowy był drugą połową usterki: każda wartość, która nie
+  była `ACQ` ani `DPLL`, drukowała się jako `LOCK`, więc bajt nigdy niezapisany
+  przyjmował najbardziej uspokajający z trzech stanów zamiast najmniej.
+
+- **Podpowiedź drukowana po `CT` wskazywała trend, który nie może się pojawić
+  (build 51).** „arm picDIV (AP) after the loop locks (trend `hit`)" — `hit`
+  emitują tylko algorytmy 0 i 3–8, nigdy 10–13, a kto właśnie wykonał `CT`,
+  pracuje na jednym z tych drugich. Kto potraktował to dosłownie, czekał na
+  słowo, które nie mogło nadejść. Podpowiedź mówi teraz *gdy pętla zgłosi lock*
+  i zostawia wskazanie wyświetlaczowi oraz `CS`, które wiedzą per algorytm, co
+  to znaczy.
+
+- **Trend holdoveru algorytmu 13 przemianowany `HOLD` → `NOPH` (build 51).**
+  Trzy niepowiązane stany dzieliły jedno słowo na jednym ekranie: ten (detektor
+  nie powiedział nic *w tej sekundzie*), tryb holdoveru operatora albo
+  automatyczny drukowany obok jako `[HOLDOVER]`, oraz „holdover — MCU crystal"
+  z `SW` dla zegara systemowego pracującego bez PPS. Algorytm 12 nazywał to już
+  `NOPH`; nie było powodu, żeby 13 nazywał to inaczej, i był każdy powód, żeby
+  nie. Lista słów trendu w instrukcji nigdy nie zawierała `HOLD`, więc
+  dokumentacja staje się dokładniejsza, a nie mniej dokładna.
+
+- **Raport tabulatorowy drukował 0.0 dla średnich, które jeszcze nie istniały
+  (build 51).** `gpsdo_calc_averages()` liczy każde okno dopiero, gdy się
+  napełni; wcześniej pola trzymają początkowe 0.0. Raport czytelny zawsze
+  bramkował je tymi samymi flagami — raport tabulatorowy nie, więc pierwsze 10,
+  100, 1000, 10 000 i 20 000 sekund każdego logu niosło twarde `0.0` w
+  odpowiedniej kolumnie. Na wykresie to nie jest przerwa: to oscylator
+  pokazujący zero herców, przeskalowujący oś tak, że wszystko po nim jest płaską
+  linią.
+
+  Te pola są teraz **zostawiane puste**, dopóki ich okno się nie napełni.
+  Separatory nadal są zapisywane, więc liczba kolumn się nie zmienia
+  (22 pola, sprawdzone) i wszystko, co już parsuje ten plik, działa dalej;
+  gnuplot, pandas i każdy arkusz czytają puste pole między dwoma tabulatorami
+  jako brak danych, czyli to, czym ono jest. Wartość zastępcza — `nan`, `-1`,
+  `99999` — byłaby jeszcze jedną liczbą do wytłumaczenia następnemu, kto to
+  narysuje.
+- **Pasek statusu twierdził, że jest lock, choć nie miał skąd o tym wiedzieć
+  (build 50).** Reguła brzmiała: jest fix pozycyjny i nie ma holdoveru, zatem
+  `DISCIPLINED  FIX OK`, w zieleni locka. To stwierdzenie o odbiorniku GPS
+  ubrane w barwy stwierdzenia o pętli. Płytka w rozgrzewaniu, płytka z
+  uruchomionym `CT`, której wyjście jest celowo przemiatane, i płytka trzydzieści
+  sekund po starcie akwizycji z mikrosekundami błędu fazy pokazywały ten sam
+  zielony pasek co płytka od godziny siedząca w nanosekundzie — największy i
+  najbardziej rzucający się w oczy element ekranu był jedyną rzeczą, która nie
+  mogła kłamać, i kłamał.
+
+  Potrzebny werdykt już istniał. `tft_loop_locked()` — wyciągnięty z cyfr
+  częstotliwości, gdzie jego progi zmierzono na trzygodzinnym przebiegu, a nie
+  zgadnięto — jest teraz pytany przez oba, więc pasek i cyfry nie mogą się
+  różnić: zielony tutaj znaczy zielony tam, z konstrukcji, a nie dlatego, że tę
+  samą regułę napisano dwa razy.
+
+  Cztery stany, których pasek wcześniej nie umiał wyrazić:
+  `ACQUIRING  FIX OK` (fix dobry, pętla jeszcze nie zbieżna), `OCXO WARMUP`,
+  `CALIBRATING` — oraz dotychczasowa zieleń, znacząca teraz to, co mówi.
+  Holdover dalej przebija wszystko, bo zamrożone wyjście jest ważniejszym
+  faktem.
+
+  **Oba kierunki są tłumione, niesymetrycznie.** Werdykt locka jest
+  jednosekundowy i potrafi mrugnąć na pojedynczym zliczeniu licznika — z tego
+  samego powodu próg samych cyfr poszerzono do 0,15 Hz. Natychmiastowa reakcja
+  była pierwszą próbą i jest tu błędem z tego samego powodu: jedno zliczenie
+  drgnięcia to nie awaria, a pasek migający między zielonym a pomarańczowym
+  jest gorszy od każdego z tych kolorów osobno. Pięć kolejnych sekund locka,
+  zanim pasek zzielenieje, dwie sekundy straty, zanim go odda.
+  `tools/gpsdo_statusbar.py` odtwarza automat na scenariuszu od zimnego startu
+  po wyciągniętą antenę; na tym scenariuszu stara reguła twierdziła
+  `DISCIPLINED` przez 18 z 33 sekund, kiedy to nieprawda.
+- **Nowe pole w ustawieniach nie kosztuje już wszystkich ich ustawień
+  (build 49).** `settings_recall()` wymagał, żeby zapisany rekord miał dokładnie
+  bieżący rozmiar, więc dopisanie jednego bajtu oznaczało podbicie
+  `SETTINGS_VER`, a podbicie oznacza odrzucenie rekordu w całości — PID, LC,
+  strefa czasowa, wszystko, za jeden bajt. Plik obchodził to dwukrotnie,
+  wykrawając pola z bajtów wyrównania, i jeszcze dwa razy ręcznie pisanym
+  `else if` na wersję, każdym przywiązanym do własnego `offsetof`.
+
+  Teraz przyjmuje każdy rekord od `SETTINGS_V6_BYTES` (376, rozmiar, przy którym
+  układ zamrożono) do bieżącego `sizeof`. Struktura jest zerowana przed
+  odczytem, więc każde pole dopisane od tamtej pory czyta się jako 0 — co każde
+  z nich już definiuje jako „nieustawione". `VS` jest pierwszym polem, które z
+  tego korzysta, a za nim zostają trzy bajty wyrównania na kolejne dwa. Ścieżka
+  zapisu częściowego dostała tę samą regułę, bo zasiew z krótkiego rekordu jest
+  teraz bezpieczny z tego samego powodu.
+
+  Sprawdzone kompilatorem docelowym, a nie na oko: `dac_path` dalej na 318,
+  `bl_pct` 319, `a12_gain` 320, `dac_vref_cv` 372, `adc_vdiv_h` 374,
+  `vsense_src` na 376, `sizeof` 380. Rekord zapisany przez build 48 wczytuje
+  się, a jego brakujący bajt czyta się jako szyna 5 V — czyli to, co build 48
+  robił.
+- **`DV` i `AV` nie zapisywały się same, choć wszystko, co o nich napisano,
+  twierdziło inaczej (build 48).** Changelog v1.07, wszystkie trzy instrukcje i
+  notatki wysłane osobom budującym płytki z AD5680 obiecywały autozapis; kod
+  wołał `cli_manual_save("ES ALGO")`. Wpisane `DV 5.00`, po którym nie
+  nastąpiło `ES`, wracało po resecie jako 3,30, a razem z nim wracało
+  ostrzeżenie MISMATCH — co czyta się jak usterka sprzętowa, a nie jak
+  zgubione ustawienie. Te dwie wartości opisują stopień wyjściowy płytki i
+  wpisuje się je raz, przy jej budowie, więc obietnica była słuszna, a kod
+  właśnie ją dogonił.
+
+- **Raport `DAC` zawyżał zwykłą ścieżkę PWM o jedną trzecią (build 48).**
+  `gpsdo_dac_output_bits()` zwracało dla niej 16, ale na buildzie bez silnika
+  ditheru timer rozróżnia **50 000** wartości wypełnienia, a nie 65 536 —
+  nośna to 2 kHz z zegara 100 MHz, a 50 000 nie jest potęgą dwójki. Funkcja
+  nazywa się teraz `gpsdo_dac_output_steps()` i zwraca liczbę kroków; raport
+  drukuje `N-bit` tam, gdzie to dokładna prawda, i `N steps` tam, gdzie nie
+  jest. Ta sama klasa błędu co 0,094 µHz oferowane kiedyś na 18-bitowej kości
+  i ta sama poprawka: mówić, co robi sprzęt.
+- **Drugi przebieg CT mógł dojechać do pełnego kodu (build 47, poprawka do
+  drugiego przebiegu dodanego wcześniej w tej wersji).** Dół tego sweepu
+  zawsze miał zapas 1000 LSB, góra nie miała żadnego — górny clamp
+  powstrzymywał środek przed wyjściem *poza* `65535 - half`, a nie przed
+  dojściem do niego, więc wysoko wypadające zero stawiało górny punkt
+  pomiarowy dokładnie na krańcu zakresu. Płytka Dana Wieringa z AD5680
+  zrobiła to 10.09.2026: zero przy 45 577, połowa rozstawu 20 654, środek
+  ściągnięty do `65535 - half`, trzeci punkt na 65 535. Zmierzyło się tam
+  czysto — jego trzy punkty były liniowe co do cyfry — ale bufor wyjściowy
+  przetwornika jest najmniej liniowy właśnie przy własnym krańcu, a
+  kalibracja ustalająca wzmocnienie obiektu dla wszystkich algorytmów to
+  ostatnie miejsce, gdzie warto wydawać ostatni LSB zakresu.
+
+  `CT_RAIL_GUARD` (1000 LSB) obowiązuje teraz po **obu** stronach; na tamtej
+  płytce sweep staje się 23 227 / 43 881 / 64 535. Nie kosztuje to nic w
+  wychyleniu — rozstaw dalej wynosi `CT_TARGET_SWING / K`, przesuwa się samo
+  wycentrowanie — a limit rozstawu 60 000 gwarantuje, że oba clampy nigdy się
+  nie zderzą (spotkałyby się dopiero powyżej `65535 - 2·CT_RAIL_GUARD` =
+  63 535). Linia drugiego przebiegu mówi teraz, który z dwóch przypadków
+  zaszedł, zamiast twierdzić „centred on the fitted 10 MHz code" akurat
+  wtedy, gdy clamp właśnie ten środek przesunął. Sprawdzone na 271 076
+  kombinacjach K i wyprowadzonego zera: najmniejszy odstęp od krańca 0 LSB
+  przed zmianą, 1000 po, rozstaw w każdym przypadku bez zmian.
+
+- **Raport `DAC` podawał krok, którego przetwornik nie potrafi zrobić
+  (build 46).** Drukował liczbę 16-bitową i 24-bitową na każdej ścieżce, a za tą
+  zworką siedzą trzy przetworniki o trzech różnych szerokościach. Na płytce
+  Dana Wieringa z AD5680 obie linie były błędne naraz i w przeciwne strony:
+  oferowała **0,094 µHz** jako krok, podczas gdy 64 jednostki wartości sterującej
+  dają jeden ruch na 18-bitowym pinie i najmniejszy realny to **5,99 µHz** — a
+  druga linia podawała liczbę 16-bitową, czterokrotnie grubszą, niż ta kość
+  potrafi.
+
+  Wartość sterująca jest 24-bitowa na każdej ścieżce; to, co WYJŚCIE rusza
+  jednym zapisem, to szerokość żywego sterownika, i `gpsdo_dac_output_bits()`
+  mówi teraz która: **24** na DITH (tablica ditheru uśrednia wartość 24-bitową
+  dokładnie, z konstrukcji), **18** na AD5680, **16** na czystym PWM — czyli ta
+  sama własność, którą już raportowało `gpsdo_dac_fine_available()`. Raport
+  drukuje obie liczby i nazywa je:
+
+  ```
+    step: control 24-bit 1 LSB = 0.094 uHz = 9.36e-15
+          output 18-bit 1 LSB = 5.987 uHz = 5.99e-13
+          (EXT resolves 18 bits; finer requests reach the pin as a
+           time average, not as one step)
+  ```
+
+  Kolumna z częstotliwością ułamkową musiała się przy okazji nauczyć wykładnika.
+  Stałe `e-15` wystarczało, dopóki raport podawał dwie zakodowane szerokości;
+  przy 16, 18 i 24 bitach ta sama linia niesie wszystko od 2,4e-12 do 9,4e-15, a
+  „2394.9e-15" to nie jest liczba, którą ktokolwiek czyta. `cli_frac_exp()`
+  normalizuje mantysę — ten plik nie drukuje żadnych floatów przez `printf`, bo
+  Float printf trzeba włączyć w IDE, a bez tego wypisuje „?".
+
+- **Nachylenie kalibracji, którego rampa mieć nie może, i osiem armów, które
+  to kosztowało (build 45).** `LC` produkuje dwie liczby ns/V i jedna ogranicza
+  drugą, czego nic nie sprawdzało. `range_ns/span` to **średnie** dφ/dV po
+  przemiecionym paśmie; dopasowanie w kotwicy mierzy **lokalne** dφ/dV w
+  0,632·Vsat. Na rampie, którą ten detektor naprawdę jest —
+  `V = Vsat(1 − e^(−φ/τ))` — `dφ/dV = (τ/Vsat)·e^(φ/τ)` rośnie z φ, więc średnia
+  po tranzycie sięgającym powyżej kotwicy jest brana w punkcie nad nią i jest
+  przez to **większa**. Dla geometrii tej płytki (Vsat 3,29 V, tranzyt
+  0,80…3,22 V) wartość w kotwicy powinna wynosić około **0,55×** średniej.
+  Nachylenie lokalne powyżej średniej to nie jest nachylenie, które ta rampa
+  może mieć.
+
+  Dwie kalibracje tego samego detektora, w odstępie trzech dni:
+
+  | | LNV | LZO | LRN | LNV ÷ średnia z całego tranzytu |
+  |---|---|---|---|---|
+  | buildy 16–41 | 1252,0 | 2,0809 | 3000,00 | **1,01** |
+  | build 42 | 1837,7 | 2,0797 | 2958,75 | **1,50** |
+
+  LZO zgadza się co do 1,2 mV, LRN co do 1,4 %, więc rampa się nie ruszyła —
+  ruszyło się tylko nachylenie, i to jedyna liczba dopasowywana z garstki
+  punktów wewnątrz `±LTIC_ANCHOR_WIN_V`. Mierzona była przy niestabilnej fazie.
+
+  **Zepsuło się nie nachylenie.** Zepsuła się gwardia nasycenia w
+  `ltic_phase_error_ns()`, która wymiaruje użyteczne pasmo jako
+  `range_ns / ns_per_volt` — mieszając licznik z całego tranzytu z lokalnym
+  mianownikiem. Pasmo skurczyło się z **±1,318 V do ±0,886 V** wokół zera.
+  picDIV ląduje fazę tej płytki **1,06…1,28 V poniżej zera**, to jest stały
+  offset fizyczny i on się nie ruszył — ale teraz był poza pasmem: każde
+  lądowanie czytało się jako railed. Mostek przechwytywania fazy algorytmu 11
+  uzbrajał wtedy dzielnik co 20 s — 15 s hold-offu plus 5 s uwięzienia — osiem
+  razy, w t = 122, 142, 162, 178, 198, 218, 238, 258 s, aż jedno lądowanie
+  wypadło tylko 0,67 V od zera i zostało przyjęte. Pętla weszła w PLL
+  natychmiast i po trzydziestu sekundach była zablokowana. **Osiem przerw w
+  wyjściu 1 PPS za artefakt kalibracji.**
+
+  LC porównuje teraz obie, zanim którąkolwiek zapisze: nachylenie z kotwicy
+  powyżej średniej z całego tranzytu jest zgłaszane i zastępowane średnią. Sama
+  kotwica zostaje — dopasowanie Vsat biegnie po całym tranzycie i jest odporne,
+  co dokładnie pokazuje zgodność LZO co do 1,2 mV. Na dobrej kalibracji gwardia
+  przesuwa LNV o 1 % (1252,0 → 1239), na złej o 33 %, czyli o całą usterkę.
+
+  Nie naprawione tutaj: gwardia w `ltic_phase_error_ns()` nadal wymiaruje pasmo
+  z `range_ns / ns_per_volt`, czyli z dwóch wielkości mierzonych różnymi
+  definicjami. Pasmo należy do kotwicy — `Vsat = LZO / 0,63212` dało 3,290 V i
+  3,292 V na obu kalibracjach, czyli tę samą liczbę przed i po — a przeniesienie
+  go tam wymaga nauczenia symulatora, że rampa jest wykładnicza, a nie liniowa,
+  zanim wybierze się jakąkolwiek stałą.
+
+- **Log drukował fazę, której panel odmawiał pokazania (build 44).** Obie
+  ścieżki wyświetlania wyprowadzają dph z tego samego zatrzaśniętego napięcia,
+  ale każda robiła to własną kopią arytmetyki — i raz już się rozjechały, na
+  pile. Tym razem poszło o **pasmo**.
+
+  `ns_per_volt` to nachylenie *lokalne*: LC mierzy je w wąskim oknie wokół
+  kotwicy, którą stawia na 0,632·Vsat, bo rampa to `V = Vsat(1 − e^(−t/τ))`, a
+  wykładnicza nie ma jednego nachylenia. Poza oknem 15–85 % krzywa się już
+  wypłaszczyła i odczyt liniowy jest błędny. Panel od pewnego czasu odmawia tam
+  druku — pokazuje `ovf` — a raport szeregowy dalej drukował liczbę.
+
+  **Zmierzone na przebiegu 04.09 11:41**, zrobionym w zupełnie innej sprawie.
+  Po przełączeniu z algorytmu 13 na 7 faza zaparkowała na tym, co log nazwał
+  **+1085 ns**, przy Vphase **2,946 V** — powyżej 2,798 V, czyli górnej granicy
+  pasma tego detektora. Panel przez większość godziny pisał `ovf`, a log +1085
+  ns. I to nie było „blisko szyny". Pierwsze różnice tej samej płytki w dwóch
+  położeniach:
+
+  | gdzie siedział odczyt | Vphase | podłoga biała | p99 z \|Δ\| |
+  |---|---|---|---|
+  | środek pasma (algo 13) | 2,08 V | **2,6 ns** | 5,2 ns |
+  | zaparkowany przy górze (algo 7) | 2,94 V | **7,7 ns** | 20,6 ns |
+
+  **Trzy razy więcej szumu**, wyłącznie z położenia na rampie — a bias idzie w
+  stronę pochlebną, bo kompresja oznacza, że prawdziwa faza była *większa* niż
+  wydrukowana liczba. W logu nie było o tym ani słowa.
+
+  Obie ścieżki wołają teraz jedną funkcję, `ltic_display_phase()`, która niesie
+  zero, zmierzone nachylenie, zatrzaśniętą piłę i pasmo razem. Poza pasmem
+  linia szeregowa drukuje `dph:ovf`, tym samym słowem co panel. Każdy skrypt
+  czytający te logi dopasowuje `dph:` plus cyfry, więc poza pasmem nie znajdzie
+  odczytu — co jest prawdą — zamiast wiarygodnej liczby błędnej w znanym
+  kierunku. Surowe `Vphase:` stoi tuż obok i mówi, którym końcem wyszło.
+
+  Ta sama usterka jest w aktach dwa razy z drugiej strony: nieruchome
+  „+1561 ns" i nieruchome „+1295 ns", oba wzięte za dobre odczyty, oba kosztowały
+  pomiar, zanim ktokolwiek zauważył. **Odczyt błędny jest do odratowania; odczyt
+  błędny i wyglądający spokojnie nie jest.**
+
+  Nie naprawione tutaj i warte osobnego spojrzenia: własna gwardia pętli
+  (`railed_now`) testuje zakodowane 3,28 V, więc na detektorze saturującym przy
+  2,9 V nie odpala wcale i filtr nadal działa na odczytach, które wyświetlacze
+  właśnie nazwały spoza pasma.
+
+- Manual: wiersz `GPSDO_DAC_EXT` w tabeli opcji budowania nadal twierdził, że
+  define wyklucza się z `GPSDO_PWM_DITHER` — nieaktualne sformułowanie sprzed
+  wprowadzenia wyboru ścieżki w czasie działania. Kompilują się razem; żywą
+  ścieżkę wybiera komenda `DAC`, a sygnał prowadzi zworka.
+
+### Odrzucone
+- **Wstrzymywanie wyjścia pętli, dopóki pozycja zakresu nie ma własnej
+  kalibracji.** Tak robiła pierwsza wersja modułu zakresu, w przekonaniu, że
+  wzmocnienie z drugiej pozycji — 5× obok — jest większym złem. Zmierzone
+  zamiast założone (`loopsim` z nowym `LOOPSIM_KALL`, trzy obiekty, po pięć
+  ziaren, algorytmy 10–13, przy LTC 100 i 60): przy piątej części właściwego
+  wzmocnienia każda pętla była 2,2–6,4× gorsza w sd fazy; przy 4–5,7×
+  właściwego wzmocnienia algorytm 11 wypadł 3,6–6× *lepiej*, 13 od 0,6× do
+  2,2× z pikami 100–250 ns, 12 trzy do siedmiu razy gorzej, a 10 w porządku
+  przy 4× i z wychyleniami 500–870 ns w dwóch przebiegach z piętnastu przy
+  5,7×. Żaden się nie rozbiegł. A `spansim` pokazał, ile wstrzymanie kosztuje,
+  gdy `CT` nie może się udać: przestawiona na REDUCED przy starcie, z `CT`
+  zawodzącym przez trzy godziny, wstrzymana płytka stała przy 3e-8 ponad pięć
+  godzin i przeszła 570 µs fazy, a ta sama płytka zostawiona na
+  współczynnikach FULL złapała lock w 58 minut. W normalnym przypadku oba
+  warianty są identyczne — `CT` startuje od razu, a pętla nie pracuje, gdy ono
+  przemiata — więc wstrzymanie miało znaczenie tylko tam, gdzie szkodziło.
+  Algorytmów 3–7 loopsim nie napędza i nie zostały zmierzone; nagłówek modułu
+  mówi to wprost.
+
+- **Podniesienie nośnej zwykłego 16-bitowego PWM do 12,2 kHz ditheru.**
+  Pozwoliłoby to podnieść wraz z nią częstotliwość graniczną filtru — sześć
+  razy, przy dwóch biegunach — i na płytce ze zwężonym zakresem jest to warte
+  zachodu. Tyle że tam, gdzie ma to znaczenie, już tak jest: przy włączonym
+  `GPSDO_PWM_DITHER` `dac_emit()` prowadzi zwykłą ścieżkę przez
+  `pwm24_write(code24 & 0x00FFFF00)`, więc obie ścieżki dzielą już jedną nośną
+  TIM4 przy 12,2 kHz, a przełączenie między nimi zmienia wyłącznie tablicę.
+  `analogWrite()` przy 2 kHz przetrwało tylko w buildzie bez ditheru — i to
+  właśnie ta konfiguracja, w której ten interes jest zły, bo tam szerokość
+  samego PWM **jest** całym wyjściem: 15,6 → 13 bitów podnosi krok z 5,0e-11
+  do 3,0e-10 na płytce 3,3 V. Zły kierunek. Zapisane w miejscu kodu w
+  `gpsdo_dac.cpp`, żeby nie wracało; `tools/carrier.py` ma liczby dla obu
+  płytek i trzech nośnych, wraz z własnymi liniami 6-18 Hz tablicy ditheru,
+  które stają się przypadkiem wiążącym powyżej granicy ~16 Hz i nie przesuwają
+  się wraz z nośną.
+
+- **Uzbrajanie picDIV pod algorytmami 3–9, żeby pokazywać tam dph.** Większość
+  już działa — `ltic_read_fast()` chodzi przy każdym impulsie niezależnie od
+  algorytmu, a obie ścieżki wyświetlania są bramkowane na LC, nie na pętli —
+  więc pytanie brzmiało tylko, czy uzbrajać dzielnik i uzbrajać go ponownie, gdy
+  faza wychodzi. Przebieg 04.09 odpowiada, i odpowiedź brzmi nie.
+
+  Zablokowane w algorytmie 13, potem przełączone na 7: faza opuściła ±100 ns w
+  dziesięć minut, jechała do **2,2 ns/s (2,2e-9)**, kiedy LRN jeszcze zbierał, a
+  PWM machnęło 353 LSB — po czym **zaparkowała na +1085 ns i tam została**. Przez
+  ostatnie 27 minut jej dryf wynosił `+3,1e-13 ± 1,5e-12`: algorytm 7 trzyma
+  częstotliwość znakomicie i nie ma żadnego mechanizmu na offset fazy, który
+  zostawił po sobie transjent.
+
+  Kadencji nie ustala więc dryf — od świeżego lądowania przy 3e-13 rampa
+  starczyłaby na tygodnie. Ustalają ją **zdarzenia**: każde przełączenie,
+  ponowna nauka czy zaburzenie potrafi wydać trzecią część pasma w kilka minut —
+  a każdy re-arm zatrzymuje wyjście picPPS na `PICDIV_ARM_MS` i oddaje je
+  przesunięte o offset lądowania, czyli −900…−1650 ns na tej płytce.
+
+  To jest argument, który zamyka sprawę: **faza, na której parkuje pętla
+  wyłącznie częstotliwościowa, jest pamięcią po ostatnim zaburzeniu, a nie
+  własnością oscylatora — a monitor, który uzbraja się ponownie, żeby ją
+  utrzymać na ekranie, zmieniłby ją w pamięć po ostatnim armie.** Zmieniałby to
+  samo wyjście, o którego fazie twierdzi, że raportuje. Pod 10/11/13 płacimy to,
+  bo pętla posiada fazę; pod 3–9 nikt jej nie posiada.
+
+  Wartość diagnostyczna jest realna i da się ją mieć bez tego wszystkiego:
+  zablokuj w 13, przełącz, loguj, policz nachylenie. Zajęło 52 minuty i zmierzyło
+  to, czego żaden licznik na tej płytce nie umie — błąd algorytmu 7 w stanie
+  ustalonym jest trzy dekady poniżej kwantu średniej 1 ks, a na końcu tamtego
+  przebiegu średnia 10 ks czytała jeszcze −0,0041 Hz, bo niosła transjent sprzed
+  czterdziestu minut.
+
+### Dokumentacja
+- Manual: nowy blok „Trzy ścieżki, jeden węzeł" w sekcji Wyjście — jak
+  współistnieją `PWM`/`DITH`/`EXT`, jedna komenda 24-bit z widokiem 16-bit
+  oraz relacja 18 bitów AD5680 do 24-bitowej ramki SPI
+  (`code18 = code24 × 262143 / 16777215`, skalowanie, żeby współczynniki
+  przenosiły się między ścieżkami). Po pytaniach budowlanych Dana Wieringa.
+- Manual: `SPAN` w spisie komend, `GPSDO_SPAN_SENSE` w tabeli przełączników
+  i blok „Dwa zakresy, dwie kalibracje" w sekcji Wyjście. `tools/loopsim`:
+  `LOOPSIM_KALL` — cały zestaw wyliczany przez `CT` z błędnego K.
+- Zakładka **Help** tunera: `SPAN` i `SPAN CLR` (build 56), a w README_TUNER
+  `SPAN` wśród komend opisujących płytkę. Nowa nazwa w przykładzie baneru w
+  manualu, na szkicu nagłówka TFT i w przykładzie linii stanu tunera.
+- Manual i zakładka **Help** tunera: `DV` zachowuje trzy miejsca po przecinku
+  (build 57). Zapis `v1.07.57rt` w przykładzie baneru w manualu, na szkicu
+  nagłówka TFT, w przykładzie linii stanu tunera i w tytułach dokumentów.
 
 ## [v1.06-rtos] — wydane 2026-09-05 (build 42)
 

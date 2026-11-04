@@ -1,30 +1,35 @@
 /**
- * gpsdo_algorithms.h — Control loop algorithm declarations and tunable parameters
+ * gpsdo_algorithms.h — Control loop algorithm declarations and tunable
+ * parameters
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.69rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
  * AI:       Claude Opus 5 (Anthropic), GLM-5.3 Max (Z.ai), Qwen3.8-Max
  *
  *
- * Defines the PidParams_t structure and the global g_pid[10] array
- * holding runtime-tunable PID coefficients for algorithms 3-9.
+ * Declares all fourteen control-loop algorithms (0-13) and the
+ * tunable parameters behind them: PidParams_t and g_pid[10] for the
+ * PID-based algorithms 3-9, LticParams_t for algorithm 10, the
+ * LTIC-Lars parameters for algorithm 11, and the multi-level-
+ * accumulator and Kalman-filter structures, globals and stats
+ * accessors for algorithms 12 and 13. The CLI reads and writes these
+ * same tunables at runtime (KP/KI/KD/IL, BC/BS, NS, and the algorithm-
+ * specific commands), so this header is what ties the algorithms to
+ * their CLI commands.
  *
  * Physical system: 16-bit PWM DAC, ~48.8 uV/LSB, dual RC filter
- * (tau ~ 200 ms). The OCXO gain is NOT a constant of this firmware: it is
- * measured by CT, and this file must not name a figure that only ever applied
- * to one part. Measured on the two boards of this design: +319.5 and
- * -379.4 uHz/LSB, both with a Vectron C4550A1-0213 (5 V supply, 0-4 V EFC).
- * The header used to quote "~5 uHz/LSB (NDK ENE3311B typical)", which is a
- * different oscillator entirely and roughly seventy times off.
+ * (tau ~ 200 ms). The OCXO gain is NOT a constant of this firmware: it
+ * is measured by CT, and this file must not name a figure that only
+ * ever applied to one part. Measured on the two boards of this
+ * design: +319.5 and -379.4 uHz/LSB, both with a Vectron C4550A1-0213
+ * (5 V supply, 0-4 V EFC).
  * Error convention: e = avg_freq - 10 MHz; e > 0 -> decrease PWM.
  */
 #pragma once
 #include <Arduino.h>
 #include "gpsdo_state.h"
-/* Forward declaration — full definition in gpsdo_state.h */
-//struct FreqData_t;
 
 /* ---- Runtime-tunable PID parameters --------------------------------- */
 typedef struct {
@@ -34,17 +39,20 @@ typedef struct {
     double I_LIMIT;
 } PidParams_t;
 
-/* g_pid[3..7] hold the tunable coefficients for algorithms 3-7.
- * Indices 0-2, 8, 9 are unused placeholders.
- * Algorithms read these at runtime; CLI commands KP/KI/KD/IL modify them. */
+/* g_pid[3..7] hold Kp/Ki/Kd/I_LIMIT for algorithms 3-7. g_pid[8] and
+ * g_pid[9] use only I_LIMIT (hybrid algo 8's own anti-windup, and
+ * algo 9's normalisation bound); their Kp/Ki/Kd fields are unused —
+ * algo 8 reads its gains from g_pid[6]/g_pid[7], algo 9 has its own
+ * NN weights. g_pid[0..2] are unused: algorithms 0-2 carry no PID.
+ * CLI commands KP/KI/KD/IL modify these at runtime. */
 extern PidParams_t g_pid[10];
 
 /* Algo 8 (hybrid) blending parameters */
-extern double g_blend_crossover;   /* Hz — sigmoid centre, default 0.02       */
-extern double g_blend_scale;       /* Hz — sigmoid width,  default 0.01       */
+extern double g_blend_crossover;   /* Hz — sigmoid centre, default 0.024 */
+extern double g_blend_scale;       /* Hz — sigmoid width, default 0.012 */
 
 /* Algo 9 (NN) output scaling */
-extern double g_nn_max_step;       /* LSB — max PWM delta per step, default 200 */
+extern double g_nn_max_step;       /* LSB — max PWM delta per step, default 175 */
 
 /* ---- everything that follows from K, in one place ------------------------
  *
@@ -73,9 +81,6 @@ void algo_request_restart(void);
  * frequency+phase quickly with a wide-band PID, LOCK then updates slowly
  * (every lock_interval_s) with a narrow-band PID to approach minimum error.
  *
- * NOTE: the loop itself is not implemented yet (planned "phase A"); these
- * parameters, their CLI commands and EEPROM persistence exist now so the
- * configuration survives reboots and is ready when the loop is written.
  * Calibrate ns_per_volt / zero_offset / range_ns on real hardware first. */
 typedef struct {
     /* TIC calibration */
@@ -179,51 +184,52 @@ uint16_t forced_drift_Vctl(uint16_t pwm, uint32_t ppscount);
 /* 2 — Random walk: ±1 LSB / 5 s  (noise floor measurement) */
 uint16_t random_walk_Vctl(uint16_t pwm, uint32_t ppscount);
 
-/* 3 — FLL PID, manually tuned  Kp=80,  Ki=0.8,   Kd=200   */
+/* 3 — FLL PID, manually tuned: Kp=70, Ki=0.70, Kd=175 */
 uint16_t fll_pid_manual(uint16_t pwm, uint32_t ppscount);
 
-/* 4 — PLL PI,  manually tuned  Kp=30,  Ki=0.003            */
+/* 4 — PLL PI, manually tuned: Kp=1000, Ki=0.02, Kd=2.0 */
 uint16_t pll_pi_manual(uint16_t pwm, uint32_t ppscount);
 
-/* 5 — PLL PID, manually tuned  Kp=40,  Ki=0.01,  Kd=800   */
+/* 5 — PLL PID: same scheme as algo 4/7, own gain set g_pid[5] */
 uint16_t pll_pid_manual(uint16_t pwm, uint32_t ppscount);
 
-/* 6 — FLL PID, GA-optimised    Kp=234, Ki=0.301, Kd=17082 + filtered D */
+/* 6 — FLL PID, GA-optimised: Kp=205, Ki=0.264, Kd=14950, filtered D */
 uint16_t fll_pid_genetic(uint16_t pwm, uint32_t ppscount);
 
-/* 7 — PLL PID, GA-optimised    Kp=70,  Ki=0.181, Kd=2548  + filtered D */
+/* 7 — PLL PID: same scheme as algo 4/5, own gain set g_pid[7] */
 uint16_t pll_pid_genetic(uint16_t pwm, uint32_t ppscount);
 
-/* 8 — Hybrid FLL+PLL: sigmoid blend based on |error|, crossover at 20 mHz */
+/* 8 — Hybrid FLL+PLL: sigmoid blend on |error|, crossover ~24 mHz (BC) */
 uint16_t hybrid_fll_pll(uint16_t pwm, uint32_t ppscount);
 
-/* 9 — Neural network MLP (3→8→1, tanh), pre-trained weights embedded */
+/* 9 — Neural net MLP (5→8→1, tanh): analytic PID + online thermal tempco */
 uint16_t nn_mlp_ctl_loop(uint16_t pwm, uint32_t ppscount);
-/* The two loops that need the hardware phase detector. Only the FUNCTIONS are
- * guarded: everything below — the level count, the state and fit structs, the
- * globals and the accessors — is declared unconditionally, because the .cpp
- * defines all of it outside its own GPSDO_LTIC guard and the CLI reads it
- * unconditionally too.
+/* The two loops that need the hardware phase detector. Only the
+ * FUNCTIONS are guarded: everything below — the level count, the
+ * state and fit structs, the globals and the accessors — is declared
+ * unconditionally, because the .cpp defines all of it outside its own
+ * GPSDO_LTIC guard and the CLI reads it unconditionally too.
  *
- * That mismatch made the firmware impossible to BUILD with GPSDO_LTIC off:
- * gpsdo_algorithms.cpp:1437 onwards and the ML/MLP/MG/MF handlers in
- * gpsdo_cli.cpp all reference MLACC_LEVELS, mlacc_fit_t and the g_mlacc_*
- * globals, and every one of those declarations used to sit inside this block.
- * Nobody had hit it because every board of this design has the detector — the
- * first person to build without one was Dave (Solder_Junkie) on EEVblog, whose
- * M8N board has no TIC front end, and he got fourteen "was not declared in this
- * scope" errors for his trouble.
+ * Guarding the declarations as well would break a build with
+ * GPSDO_LTIC off: the ML/MLP/MG/MF handlers in gpsdo_cli.cpp and the
+ * mlacc code in the .cpp reference MLACC_LEVELS, mlacc_fit_t and the
+ * g_mlacc_* globals unconditionally. Every board of this design has
+ * the detector, so that build configuration is rarely exercised —
+ * a board without the TIC front end will fail to compile if these
+ * declarations move back inside the guard.
  *
- * A declaration costs nothing when the definition is absent, so the guard
- * belongs on the code, not on the vocabulary used to describe it. */
+ * A declaration costs nothing when the definition is absent, so the
+ * guard belongs on the code, not on the vocabulary used to describe
+ * it. */
 #ifdef GPSDO_LTIC
 uint16_t ltic_three_stage(uint16_t pwm, uint32_t ppscount);
 
 /* Algorithm 12: multi-level accumulator, after Alan Cashin (MIS42N).
  *
- * REQUIRES GPSDO_LTIC — it works on the detector's phase in nanoseconds. An early
- * version fed the TIM2 count error instead and was blind: a disciplined
- * oscillator sits far below 1 Hz, so that field reads zero. See the .cpp. */
+ * Requires GPSDO_LTIC — it works on the detector's phase in
+ * nanoseconds. Feeding the TIM2 count error instead would leave it
+ * blind: a disciplined oscillator sits far below 1 Hz, so that field
+ * reads zero. See the .cpp. */
 uint16_t multi_level_accum(uint16_t pwm, uint32_t ppscount);
 #endif
 
@@ -261,11 +267,11 @@ void mlacc_get_stats(mlacc_stats_t *out);
 
 /* ---- live lock verdicts, one per algorithm that can form one -------------
  *
- * Algorithms 10 and 11 have always published theirs as plain state
- * (g_ltic.state == LTIC_LOCK, g_lars_locked). These are the same statement for
- * 12 and 13, which had none — so the display invented a test of its own and
- * the correction statistics in gpsdo_health.cpp gave up and excluded both.
- * Decided inside the algorithm, at the one place it knows; read by the TFT
+ * Algorithms 10 and 11 publish theirs as plain state (g_ltic.state ==
+ * LTIC_LOCK, g_lars_locked). These are the same statement for 12 and
+ * 13, which have none — so the display invented a test of its own and
+ * the correction statistics in gpsdo_health.cpp excluded both. Decided
+ * inside the algorithm, at the one place it knows; read by the TFT
  * status bar, the frequency digits and health_note_output(). */
 bool mlacc_locked(void);
 bool kf_locked(void);
@@ -273,20 +279,27 @@ extern int16_t g_last_offset;
 extern int32_t g_mlacc_lim[MLACC_LEVELS];   /* per-level phase limits [ns] */
 extern float   g_mlacc_gain;                /* LSB per ns, 0 = auto from CT */
 extern uint8_t g_mlacc_run_level;
+/* MM: how a correction reaches the pin. CALM ramps it at 1 LSB/s and takes the
+ * frequency term whole from the 128 s level up (see MLACC_CALM_LEVEL in the
+ * .cpp); LEGACY is the original path, unchanged. */
+#define MLACC_MODE_LEGACY 0u
+#define MLACC_MODE_CALM   1u
+extern uint8_t g_mlacc_mode;
 
 /* ---- where the per-level limits come from (MF) --------------------------
  *
- * Until now this was not a choice: the limits and the gain lived in one
- * branch, so MG 0 meant "gain from CT AND limits from the noise formula" and
- * MG > 0 meant "gain by hand AND limits by hand". There is no reason those two
- * should be welded together — the gain belongs to the OSCILLATOR (it is LSB per
- * ns, and a different OCXO has a different Vctl sensitivity) while the limits
- * belong to the PHASE NOISE the board sees, which is a property of the site and
- * the receiver. A workshop board wants the measured gain with hand-set limits;
- * that combination could not be expressed.
+ * The gain and the per-level limits are independent choices: MF lets
+ * the limit source be picked separately from where MG points the
+ * gain, because the two belong to different things. The gain is a
+ * property of the OSCILLATOR (LSB per ns; a different OCXO has a
+ * different Vctl sensitivity), while the limits are a property of the
+ * PHASE NOISE the board sees — the site and the receiver, not the
+ * oscillator. A workshop board wants the measured gain with hand-set
+ * limits, a combination MG alone cannot express.
  *
- * MLACC_THR_FOLLOW is what every existing installation gets, so nothing moves
- * until someone asks for it. */
+ * MLACC_THR_FOLLOW keeps the two coupled as MG alone always has (MG 0
+ * -> formula, MG > 0 -> stored), so every existing installation is
+ * unaffected until MF is set to something else. */
 enum {
     MLACC_THR_FOLLOW   = 0,  /* as before: MG 0 -> formula, MG > 0 -> stored  */
     MLACC_THR_STORED   = 1,  /* the table in flash / MLP, whatever MG says    */
@@ -336,6 +349,7 @@ extern float    g_kf_r_ns;        /* KR: measurement noise [ns], 0 = measure  */
 extern float    g_kf_q;           /* KQ: process noise [(ns/s)^2/s], 0 = adapt */
 extern uint16_t g_kf_horizon_s;   /* KT: ESTIMATOR horizon [s] - Q ceiling    */
 extern uint16_t g_kf_ctl_s;       /* KC: CONTROLLER horizon [s], 0 = KT/3     */
+extern uint16_t g_kf_fast_s;      /* KF: horizon while disturbed [s], 0 = off */
 
 typedef struct {
     float    phase_ns;      /* estimated phase                                */
@@ -362,9 +376,10 @@ typedef struct {
     bool     r_pinned;      /* true when KR fixed R instead of measuring it    */
     uint32_t holdover_s;    /* seconds running on the model alone             */
     uint32_t arms;          /* picDIV re-arms this session                    */
+    bool     dist;          /* a disturbance: KF in force of KC (build 69)    */
 } kf_stats_t;
 void kf_get_stats(kf_stats_t *out);   /* kf_locked() is declared above */
-void kf_store_save(void);   /* write KR/KQ/KT to their own ring record */
+void kf_store_save(void);   /* write KR/KQ/KT/KC/KF to their ring record */
 bool kf_store_load(void);   /* read them back at boot                  */
 
 #ifdef GPSDO_LTIC

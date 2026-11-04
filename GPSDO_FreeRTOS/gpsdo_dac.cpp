@@ -1,7 +1,7 @@
 /*
  * gpsdo_dac.cpp — control-voltage output: PWM or sigma-delta.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.70rt
  * See gpsdo_dac.h for why this layer exists and what the two write widths mean.
  */
 #include <Arduino.h>
@@ -45,7 +45,7 @@ uint8_t g_vsense_src = VSENSE_VCC;
  * PLAIN PWM, WITHOUT THE CORE'S analogWrite()
  *
  * Only compiled when the dither engine is not. With GPSDO_PWM_DITHER the
- * "plain" path is already this timer, running at 12.2 kHz with every dither
+ * "plain" path is already this timer, running at 11.7 kHz with every dither
  * table entry equal (see dac_emit) — one carrier, one filter requirement, and
  * switching paths changes only the table. Nothing below applies there.
  *
@@ -59,20 +59,27 @@ uint8_t g_vsense_src = VSENSE_VCC;
  * backlight on PB5) the two silently fight over one setting.
  *
  * Configuring the timer once here and writing CCR4 thereafter removes both.
- * The carrier and the resolution are deliberately UNCHANGED — 100 MHz / 50 000
- * = 2.000 kHz, the same figure analogWriteFrequency(2000) produced — so no
- * board's CT, filter or plant gain moves because of this.
+ * The carrier and the resolution were meant to stay as they were — 2 kHz, the
+ * figure analogWriteFrequency(2000) produced — so that no board's CT, filter
+ * or plant gain would move because of this. The plant gain does not: a code
+ * is still the same duty. The other two moved by 4 %, unnoticed until build
+ * 67: the period was taken as 100 MHz / 2 kHz = 50 000, but the core clocks
+ * the BlackPill's F411 at 96 MHz, so this path runs 1.92 kHz with 50 000
+ * steps where the core's ran 2.000 kHz with 48 000 (it computed from the
+ * real clock). A carrier filtered a little less, a step a little finer, and
+ * nothing CT or the loop can see.
  *
  * Raising the carrier was considered and rejected. It would let the filter's
  * corner rise with it, but a PWM's resolution is (timer clock)/(carrier), and
  * this is the one configuration where the PWM's own width IS the whole output:
- * no dither, no external DAC. 12.2 kHz would buy a 6x faster filter for 15.6
+ * no dither, no external DAC. 11.7 kHz would buy a 6x faster filter for 15.6
  * -> 13 bits, which on a 3.3 V board takes the step from 5.0e-11 to 3.0e-10.
  * Wrong direction. See tools/carrier.py for the numbers on both boards.
  * ------------------------------------------------------------------------- */
 #if !defined(GPSDO_PWM_DITHER)
 
-/* 100 MHz / 50 000 = 2.000 kHz exactly. Also the number of distinct duty
+/* 96 MHz / 50 000 = 1.92 kHz on the BlackPill (2 kHz was meant, at an
+ * assumed 100 MHz - see above). Also the number of distinct duty
  * values, which is what gpsdo_dac_output_steps() has to report: 65 536 input
  * codes do NOT become 65 536 output levels here. */
 #define PWM16_PERIOD  50000u
@@ -96,7 +103,7 @@ static void pwm16_begin(void)
     HAL_GPIO_Init(GPIOB, &g);
 
     TIM4->CR1  = 0;
-    TIM4->PSC  = 0;                     /* TIM4 is on APB1: 100 MHz here */
+    TIM4->PSC  = 0;                     /* TIM4 is on APB1: 96 MHz on the BlackPill */
     TIM4->ARR  = PWM16_PERIOD - 1u;
     TIM4->CCR4 = 0;
 
@@ -170,8 +177,9 @@ bool gpsdo_dac_begin(void)
      * jumper decides which signal reaches the filter, and a path that is not
      * initialised until it is first selected would give a glitch — or a dead
      * output — at the moment of switching, which is the worst possible moment.
-     * The unselected drivers sit there holding their last code and nothing is
-     * connected to them. */
+     * An unselected AD5680 holds its last code, a DC level nothing is
+     * connected to. An unselected PWM is held low from the first write to
+     * EXT (pwm_park(), build 69): holding its last code, it was a carrier. */
     bool ok = true;
 #if defined(GPSDO_DAC_EXT)
     if (!dac_ext_begin()) ok = false;
@@ -202,6 +210,37 @@ void gpsdo_dac_write16(uint16_t v)
     dac_emit(s_code24, v);
 }
 
+#if defined(GPSDO_DAC_EXT)
+/* THE PWM PIN WHILE THE AD5680 IS LIVE: HELD LOW (build 69).
+ *
+ * Up to build 68 the path not selected went on doing what it was last told.
+ * For the AD5680 that is a DC level, which is harmless. For the PWM it is a
+ * carrier. Under EXT the engine kept the code written before the stored path
+ * was recalled at boot (127: at 13 bits a 0.16 us pulse every 85.3 us) or,
+ * after a `DAC EXT`, the last code the loop had sent it. The jumper keeps
+ * that carrier off the EFC, but the filter section is still on the board and
+ * still driven: on Dan's V3 (22.10) it showed as 11.71 kHz with a second
+ * harmonic at 23.4 kHz. (The glitches in his LTIC bursts, at about that
+ * rate, are not it: they stayed with the pin held low and come from outside
+ * the GPSDO - see LTIC_FIT_DROPS in gpsdo_tasks.cpp.) A compare of 0 keeps
+ * the pin low for the whole period. The timer and the DMA keep running, so
+ * `DAC DITH` or `DAC PWM` is still one write away, and that write re-issues
+ * the loop's code, as it always did.
+ *
+ * Under the dither engine a park refills both tables, so it is done only
+ * when needed: pwm24_last() is 0 exactly when the tables already hold
+ * nothing but 0. The plain timer is one register and is simply written each
+ * time. */
+static inline void pwm_park(void)
+{
+#if defined(GPSDO_PWM_DITHER)
+    if (pwm24_last() != 0u) pwm24_write(0);
+#else
+    TIM4->CCR4 = 0;
+#endif
+}
+#endif /* GPSDO_DAC_EXT */
+
 /* The one place a code reaches hardware. Both write widths funnel through it so
  * the runtime path is tested once rather than in two places that could drift
  * apart — which is the same argument that created this file. */
@@ -214,6 +253,7 @@ static void dac_emit(uint32_t code24, uint16_t code16)
          * and 16-bit full scale must still map to its full scale exactly or the
          * constants CT measured against the PWM path would all be off. */
         dac_ext_write((uint32_t)(((uint64_t)code24 * DAC_EXT_MAX) / 0x00FFFFFFu));
+        pwm_park();
         return;
 #endif
 #if defined(GPSDO_PWM_DITHER)
@@ -282,13 +322,14 @@ uint32_t gpsdo_dac_last24(void)  { return s_code24; }
 /* See the note in gpsdo_dac.h. A property of the ACTIVE path, like
  * gpsdo_dac_fine_available() and for the same reason.
  *
- * STEPS AND NOT BITS, because one of the four answers is not a power of two.
- * A bit width could only express the plain timer's 50 000 duty values by
- * rounding them to 65 536 or to 32 768 — the first overstates the part by a
- * third, the second throws away a third of it — and reporting a resolution
- * the hardware does not have is the exact bug build 46 fixed for the AD5680.
- * The CLI turns a power of two back into "N-bit" for the report and prints
- * the count itself when it is not one. */
+ * STEPS AND NOT BITS, because one of the four answers is not a power of
+ * two. A bit width could only express the plain timer's 50 000 duty
+ * values by rounding them to 65 536 or to 32 768 — the first overstates
+ * the part by a third, the second throws away a third of it, and
+ * reporting a resolution the hardware does not have is exactly the
+ * wrong way to describe the AD5680's step count. The CLI turns a power
+ * of two back into "N-bit" for the report and prints the count itself
+ * when it is not one. */
 uint32_t gpsdo_dac_output_steps(void)
 {
     switch (g_dac_path) {

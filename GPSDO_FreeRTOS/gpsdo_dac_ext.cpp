@@ -1,11 +1,11 @@
 /*
  * gpsdo_dac_ext.cpp — AD5680 external 18-bit DAC, bit-banged GPIO. No hardware SPI.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  *
- * Pins (Dan Wiering's PCB, chosen 2026-08): CS=PB4, SCK=PB0, MOSI=PB2.
- * PB2 doubles as BOOT1 — sampled only at reset, and the AD5680's DIN never
- * pulls it, so with no pull-up on the MOSI trace boot is unaffected.
+ * Pins: CS=PB4, SCK=PB0, MOSI=PB2. PB2 doubles as BOOT1 — sampled only at
+ * reset, and the AD5680's DIN never pulls it, so with no pull-up on the
+ * MOSI trace boot is unaffected.
  *
  * Word format (datasheet, cross-checked against the Arduino reference
  * library's updateDevice()): 24 bits, MSB first — four don't-care zeros,

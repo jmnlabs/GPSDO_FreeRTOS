@@ -1,14 +1,14 @@
 /* ======================================================================
  * gpsdo_ubx_timtp.h — UBX-TIM-TP sawtooth (quantization-error) correction
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.63rt
  *
  * See gpsdo_ubx_timtp.cpp for the full description. Passive UBX sniffer that
  * extracts qErr (quantization error) from UBX-TIM-TP and offers it as a
  * per-pulse correction to the TIC phase measurement. Works on LEA-6T,
  * LEA/NEO-M8T and ZED-F9T (qErr is I4 at payload offset 8, in ps, on all).
  *
- * PAIRING MODEL (v0.95 audit fix):
+ * PAIRING MODEL:
  * TIM-TP carries a `flags.mode` bit (byte 14, bit 3) that says whether qErr
  * describes the pulse AT towMS (mode=0, "this pulse") or the NEXT one after
  * towMS (mode=1, "next pulse" — the u-blox default for the TIMEPULSE output).
@@ -27,8 +27,8 @@
  *           PREVIOUS pulse. qErr(N) cannot exist yet in this mode — it is
  *           physically impossible to correct PPS N on time. We accept a
  *           1-PPS lag (qErr(N-1) applied to PPS N): imperfect, since qErr
- *           drifts ~1 ns/s, but far better than the random-skew pairing
- *           the unguarded code did.
+ *           drifts ~1 ns/s, but far better than the random-skew an
+ *           unguarded lookup would produce.
  * The mode bit is still captured and published (g_qerr_mode_next) so a
  * diagnostic can tell the user their receiver is in the lagging mode.
  * ====================================================================== */
@@ -90,20 +90,24 @@ extern volatile uint32_t g_qerr_latchlag[QERR_LAG_BINS];
 
 /* Latch the sawtooth for the pulse whose ramp has just been sampled.
  *
- * THE DISPLAY PATH WAS ALWAYS THE CORRECT ONE and the loop's was not. Measured
- * on 34 240 seconds of the 01/02.09 capture, taking the raw phase and putting
- * the sawtooth back in different places:
+ * The value belongs at the ramp sample, not the loop's later read.
+ * Taking the raw phase and putting the sawtooth back in different
+ * places gives this first-difference floor:
  *
- *     no correction at all ............ first-difference floor 7.57 ns
+ *     no correction at all ............ 7.57 ns
  *     qErr latched at this pulse ...... 2.55 ns
  *     qErr shifted by one pulse ....... 13.25 ns
  *     qErr shifted by two ............. 9.30 ns
  *
- * So the value latched at the ramp sample is right, everything else is worse
- * than nothing, and there is no argument left about pairing models: the loop
- * should use the number the sampler already holds. This records it with the
- * pulse it belongs to so the loop can ask for exactly that one. */
+ * So the value latched at the ramp sample is right, everything else is
+ * worse than nothing, and there is no argument left about pairing
+ * models: the loop should use the number the sampler already holds.
+ * This records it with the pulse it belongs to so the loop can ask for
+ * exactly that one. */
 void ubx_timtp_latch(uint32_t ppscount);
+/* The same latch, now for this pulse: the reading published for it is a kept
+ * one (ltic_read_fast), so the qErr latched with that reading stays. */
+void ubx_timtp_latch_keep(uint32_t ppscount);
 float ubx_timtp_correction_for_pps(uint32_t ppscount);
 
 #ifdef __cplusplus

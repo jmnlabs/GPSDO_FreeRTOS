@@ -48,12 +48,12 @@ for. On connect it reads the board's own version and compares:
   offered one:
 
   ```
-  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
+  connected — firmware v1.08.71rt  2026-10-29 23:34  CRC 8EED4610
   ```
 
   The three facts answer different questions. The **version** says which
   protocol the tuner is talking. The **build** — in the name from build 56 on,
-  `.57rt` (build 56 itself wrote `-rt56`); older firmware (`v1.07-rtos`) sends
+  `.71rt` (build 56 itself wrote `-rt56`); older firmware (`v1.07-rtos`) sends
   it separately and the line shows `build N` — and the compile time say which source tree it came from. The **CRC** says which binary is actually running, and it
   is the only one that cannot be stale — the board computes it from its own
   flash at boot, so it stays honest even when the Arduino builder reuses an
@@ -97,7 +97,7 @@ algorithm the board reports:
 | | Algorithms 10 / 11 (LTIC) | Algorithm 12 | Algorithm 13 | Algorithms 0-9 |
 |---|---|---|---|---|
 | Top | Phase `dph` (ns) | Phase error `ph` (ns) | Phase **estimate** `ph` (ns) | Learned drift (LSB) |
-| Middle | Detector `Vphase` (V), with band guides | Control voltage `Vctl` (V) | Detector `Vphase` (V), with band guides | Control voltage `Vctl` (V) |
+| Middle | Detector `Vphase` (V), with band guides | Commanded control voltage `Vcmd` (V) | Detector `Vphase` (V), with band guides | Commanded control voltage `Vcmd` (V) |
 | Bottom | Frequency error (Hz) | Frequency error (Hz) | Frequency error (Hz) | Frequency error (Hz) |
 
 Only the LTIC loops have a phase detector, so under any other algorithm those
@@ -109,6 +109,12 @@ does not use the self-learning feed-forward, so the drift trace would be flat,
 and its phase comes straight from the detector rather than through a loop
 filter, so it is not the same quantity `dph` plots. The detector band guides
 come down whenever the middle pane is showing a control voltage instead.
+
+The control voltage drawn is the one **commanded**: `Vcmd` = PWM code / 65536
+× `DV`, with `DV` read from the board at connect. The ADC read-back `Vctl`
+carries about 1 mV of noise — some twenty LSB of the code — while a settled
+loop moves the code by one or two, so a `Vctl` pane showed the ADC rather than
+the loop. `Vctl` is still in the live fields and the log.
 
 Algorithm 13 plots what the Kalman filter BELIEVES the phase to be rather than
 this second's reading — that estimate is the whole point of having a filter —
@@ -212,6 +218,15 @@ says.
 receiver's `Lat` / `Lon` / `Alt` with placeholders **in the saved file only** —
 the Raw monitor and the plots keep showing your real fix. Satellite count, HDOP
 and the TIME flag stay: they are diagnostic and say nothing about where you are.
+
+Since build 67 it also catches a position line damaged on the way — one that
+lost its first characters or ran into the next line (the serial link drops a
+byte now and then, and two such lines once went through whole): any number
+after a `Lat:` or `Lon:` label, even one that lost its integer digits, the
+numbers just before `Lon:` and `Alt:`, labels run onto the line before, and,
+on a line carrying the report's own words, every number shaped like a
+coordinate (four to seven decimals). `tools/redact_test.py` checks that, and
+that nothing else in the telemetry changes.
 
 A telemetry log is the thing that ends up on a forum or in the hands of whoever
 offered to measure your board, and every second of it carries a fix to six

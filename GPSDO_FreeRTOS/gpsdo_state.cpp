@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.cpp — Shared state instances and persistence wrappers
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -59,13 +59,15 @@ volatile int32_t  gMcuPpm  = INT32_MIN;
 bool        g_persist_valid = false;
 
 /* ---- persistence wrappers (delegating to the flash ring) ----------------
- * The CLI still calls persist_save/recall/erase/check_on_boot by those names
- * (commands ES/ER/EE/CR). Real persistence now lives in gpsdo_settings_store.cpp
- * via the flash ring (sector 7, REC_SETTINGS). These thin wrappers keep the
- * old call sites working without a sweep of every caller.
+ * The CLI still calls persist_save/recall/erase/check_on_boot by those
+ * names (commands ES/ER/EE/CR). Real persistence lives in
+ * gpsdo_settings_store.cpp via the flash ring (sector 7, REC_SETTINGS).
+ * These thin wrappers keep the old call sites working without a sweep
+ * of every caller.
  *
- * The ring is ALWAYS enabled in v0.96+, so there is no runtime toggle and
- * no STM32duino emulated-EEPROM dependency at all — persistence is 100%% flash ring. */
+ * The ring is always enabled, so there is no runtime toggle and no
+ * STM32duino emulated-EEPROM dependency at all — persistence is 100%
+ * flash ring. */
 void persist_save(void)
 {
     settings_save();

@@ -1,6 +1,6 @@
 /* =======================================================================
  * gpsdo_pwm24.cpp — 24-bit control voltage from a short PWM plus dithering
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.70rt
  *
  * See gpsdo_pwm24.h for what this does and why. This file is the hardware:
  * TIM4 CH4 on PB9, fed from a table by DMA1 Stream 6 Channel 2.
@@ -46,13 +46,15 @@ static void pwm24_unlock(bool locked)
 /* -----------------------------------------------------------------------
  * Fill one table with the dither pattern for a 24-bit code.
  *
- * The top N bits are the base duty; the low (24-N) bits say how many periods out
- * of the table should use base+1. Accumulating the low bits and taking the carry
- * spreads those periods as evenly as the arithmetic allows, which is what keeps
- * the dither out of the audio-frequency region where the filter is weakest.
+ * The top N bits are the base duty; the low (24-N) bits say how many
+ * periods out of the table should use base+1. Accumulating the low bits
+ * and taking the carry spreads those periods as evenly as the arithmetic
+ * allows, which is what keeps the dither out of the audio-frequency
+ * region where the filter is weakest.
  *
- * This is Alan's accumulator, unrolled into a table rather than run in an
- * interrupt — the sequence is identical, it is just computed ahead of time.
+ * This is Alan Cashin's accumulator, unrolled into a table rather than run
+ * in an interrupt — the sequence is identical, it is just computed ahead
+ * of time.
  * --------------------------------------------------------------------- */
 static void pwm24_fill(uint16_t *tbl, uint32_t code24)
 {
@@ -97,7 +99,8 @@ bool pwm24_begin(void)
 
     /* Timer: no prescaler, so the carrier is the timer clock divided by the
      * period. TIM4 sits on APB1; with an APB1 prescaler other than 1 the timer
-     * clock is doubled, giving 100 MHz on this board. */
+     * clock is doubled - 96 MHz on the BlackPill under the STM32duino core,
+     * not the 100 MHz this said up to build 66 (see pwm24_timer_hz()). */
     TIM4->CR1  = 0;
     TIM4->PSC  = 0;
     TIM4->ARR  = PWM24_PERIOD - 1u;
@@ -157,14 +160,13 @@ void pwm24_write(uint32_t code24)
     if (code24 > PWM24_MAX) code24 = PWM24_MAX;
     s_last24 = code24;
 
-    /* Fill BOTH tables. The first version filled only the buffer the DMA was
-     * not reading, but double buffering alternates every pass, so the other
-     * table — still holding the previous code — replayed until the next
-     * write: the output flipped between old and new code at ~3 Hz (one pass
-     * is 2^(24-N) carrier periods = 167.8 ms however N is chosen), a square
-     * wave the RC filter passes almost untouched. At the loop's one update
-     * per second that was a sub-LSB curiosity, but a module like this should
-     * be correct at any update rate, not just the one it shipped with.
+    /* Fill BOTH tables. Filling only the buffer the DMA is not reading would
+     * leave the other table — still holding the previous code — in play
+     * until the next write: the output would flip between old and new code
+     * at ~3 Hz (one pass is 2^(24-N) carrier periods = 167.8 ms however N is
+     * chosen), a square wave the RC filter passes almost untouched. At the
+     * loop's one update per second that is a sub-LSB curiosity, but a module
+     * like this should be correct at any update rate.
      *
      * Writing the table the DMA IS reading is safe by overtaking: the DMA
      * consumes one entry per PWM period (81.9 µs at N=13) while the fill
@@ -181,6 +183,32 @@ void pwm24_write(uint32_t code24)
 uint32_t pwm24_last(void)
 {
     return s_last24;
+}
+
+/* THE TIMER'S CLOCK, READ FROM THE RCC RATHER THAN ASSUMED (build 67).
+ *
+ * TIM4 counts the APB1 timer clock: PCLK1, doubled whenever the APB1
+ * prescaler is not 1 (the F4 clock tree; the TIMPRE bit that would change
+ * that rule is never set by this firmware or the core). Up to build 66 the
+ * DAC report divided a fixed 100 MHz, the F411's maximum - which the
+ * BlackPill does not run: the STM32duino core's BlackPill F411CE variant
+ * clocks it at 96 MHz (25 MHz crystal, PLL N 192, P 2), because USB needs
+ * 48 MHz and 100 MHz does not divide to it. So the 13-bit carrier printed as
+ * 12 207 Hz is 11 719 Hz, and the 12-bit 24 414 Hz is 23 438 Hz - 21.3 us
+ * between edges, about the spacing of the glitches in Dan's LB listings
+ * (14.10). Those are not this engine. Under EXT it did go on running until
+ * build 69 held the pin low (pwm_park() in gpsdo_dac.cpp; his scope found
+ * its 11 719 Hz on the PWM section, 22.10), but the glitches stayed: they
+ * come from outside the GPSDO (see LTIC_FIT_DROPS in gpsdo_tasks.cpp). Read
+ * here, the figure is the board's own whatever clock its core sets up.
+ * Nothing else depends on it: the dither averages duty, and duty does not
+ * care what the clock is. */
+uint32_t pwm24_timer_hz(void)
+{
+    /* PPRE1's top bit is the divider's on/off: 0xx = not divided, 1xx = /2../16 */
+    uint32_t clk = HAL_RCC_GetPCLK1Freq();
+    if ((RCC->CFGR & RCC_CFGR_PPRE1_2) != 0u) clk *= 2u;
+    return clk;
 }
 
 #endif /* GPSDO_PWM_DITHER */

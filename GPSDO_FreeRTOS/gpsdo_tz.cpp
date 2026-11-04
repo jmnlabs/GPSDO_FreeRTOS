@@ -1,7 +1,7 @@
 /**
  * gpsdo_tz.cpp — Timezone resolution: POSIX TZ rules, named zones, EU auto
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  *
@@ -174,42 +174,22 @@ int16_t tz_offset_now(const TzSpec *tz, uint8_t day, uint8_t mon,
 {
     if (!tz->has_dst || !tz->start.mon || !tz->end.mon) return tz->std_min;
 
-    /* THE RULE TIMES ARE LOCAL AND THIS FUNCTION IS GIVEN UTC.
+    /* The rule times are local; this function is given UTC.
      *
-     * The previous version compared them directly and called the difference
-     * immaterial for a wall-clock readout. It is not, and the error is not the
-     * "hour or so" the old comment claimed: it is exactly the offset in force
-     * at the boundary, which is the whole point of the boundary. Measured
-     * against the real 2026 instants, before this change:
+     * A POSIX start rule is written in local STANDARD time and an end
+     * rule in local DST time — the offset each is measured against is
+     * fixed and known before the comparison, so each boundary converts
+     * to UTC by subtracting its own offset. No iteration, no guess.
      *
-     *   Europe/London   spring exact, autumn  +1 h late
-     *   Europe/Berlin   spring +1 h late,     autumn +2 h late
-     *   Europe/Athens   spring +2 h late,     autumn +3 h late
-     *   America/New_York  spring FIVE HOURS EARLY — 02:00 UTC instead of
-     *                     07:00, so the clock jumps at 21:00 on the Saturday
-     *                     EVENING, which nobody could mistake for a rounding
-     *                     error
+     * The subtraction can cross midnight and the year end
+     * (Australia/Sydney starts at 02:00 AEST, which is 16:00 UTC on the
+     * previous day), so the comparison runs on a day-of-year ordinal
+     * rather than a packed date, and the boundaries wrap into the year.
      *
-     * London's spring change came out exact only because GMT is UTC; that
-     * coincidence is what let the fault sit here unnoticed. Found by Dave
-     * (Solder_Junkie) on EEVblog asking whether London would switch by itself
-     * at the end of October — it did, an hour late, and the question was
-     * enough to make somebody finally measure it.
-     *
-     * There is no chicken-and-egg to avoid, which is what the old comment
-     * feared. A POSIX start rule is written in local STANDARD time and an end
-     * rule in local DST time — the offset each is measured against is fixed
-     * and known before the comparison, so each boundary converts to UTC by
-     * subtracting its own offset. No iteration, no guess.
-     *
-     * The subtraction can cross midnight and the year end (Australia/Sydney
-     * starts at 02:00 AEST, which is 16:00 UTC on the PREVIOUS day), so the
-     * comparison runs on a day-of-year ordinal rather than a packed date, and
-     * the boundaries wrap into the year. Residual, stated rather than hidden:
-     * a boundary that wraps past 1 January keeps the weekday computed for THIS
-     * year, which could be a day out. No zone in the IANA table transitions
-     * within fourteen hours of New Year, so the branch is a guard and not a
-     * behaviour. */
+     * Residual, stated rather than hidden: a boundary that wraps past 1
+     * January keeps the weekday computed for that year, which could be a
+     * day out. No zone in the IANA table transitions within fourteen
+     * hours of New Year, so the branch is a guard and not a behaviour. */
     bool leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
     long ylen = (leap ? 366L : 365L) * 1440L;
 
@@ -286,13 +266,14 @@ const char *tz_lookup(const char *name)
 /* Legacy heuristic, unchanged in behaviour — see gpsdo_control.cpp for the
  * zone rules it encodes. Returns whole hours; tz_resolve scales to minutes.
  *
- * int8 range note (audit v0.95): the return type is int8_t (-128..127),
- * which overflows for UTC+14 (Kiribati). This is safe in practice because
- * the EU heuristic only ever classifies longitude bands inside UTC-12..+14
- * and every real offset it returns lies in [-12, +14] hours — but the type
- * would silently wrap if the heuristic were ever extended eastward. Kept
- * as int8_t for binary compatibility with gpsdo_control.cpp; the ×60 scale
- * in tz_resolve cannot overflow because int16_t covers ±840 min. */
+ * int8 range note: the return type is int8_t (-128..127), which
+ * overflows for UTC+14 (Kiribati). This is safe in practice because
+ * the EU heuristic only ever classifies longitude bands inside
+ * UTC-12..+14 and every real offset it returns lies in [-12, +14]
+ * hours — but the type would silently wrap if the heuristic were
+ * ever extended eastward. Kept as int8_t for binary compatibility
+ * with gpsdo_control.cpp; the ×60 scale in tz_resolve cannot overflow
+ * because int16_t covers ±840 min. */
 extern int8_t tz_auto_offset_eu(float lat, float lon, uint8_t day,
                                 uint8_t mon, uint16_t year, uint8_t hour_utc);
 

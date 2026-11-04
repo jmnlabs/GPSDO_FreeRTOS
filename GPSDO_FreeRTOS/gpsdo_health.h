@@ -1,38 +1,37 @@
 /*
  * gpsdo_health.h — self-assessment from the loop's own corrections.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * WHY THIS EXISTS
  * ---------------
- * Algorithm 11 was validated against a rubidium standard on someone else's
- * bench. Almost nobody who builds this will have one, and without it they have
- * the author's word and a green rectangle on the display. That is a poor
- * position to leave a builder in.
+ * Algorithm 11 was validated against a rubidium standard, but almost nobody
+ * who builds this will have one — without it they have the author's word
+ * and a green rectangle on the display. That is a poor position to leave a
+ * builder in, and the firmware already computes every one of these numbers
+ * and throws them away.
  *
- * The idea is Alan's (MIS42N on EEVblog), who pointed out that a disciplined
- * oscillator can assess itself: the correction the loop applies is the error it
- * just observed, so the size of those corrections says whether the discipline is
- * working. GPS is the reference and there is nothing better to compare frequency
- * against. His own design relies on this, which is why it needs no secondary
- * standard — a real advantage over the approach taken here.
- *
- * The firmware already computes every one of these numbers and throws them away.
+ * The idea is Alan Cashin's (MIS42N on EEVblog): a disciplined oscillator
+ * can assess itself, because the correction the loop applies is the error
+ * it just observed, so the size of those corrections says whether the
+ * discipline is working. His own design relies on this and needs no
+ * secondary standard — an advantage this implementation does not have.
  *
  * WHAT IT DOES AND DOES NOT TELL YOU
  * ----------------------------------
- * It measures whether the LOOP IS SETTLED, not whether the OUTPUT IS GOOD. Those
- * are the same thing only while the phase detector is trustworthy.
+ * It measures whether the LOOP IS SETTLED, not whether the OUTPUT IS GOOD.
+ * Those are the same thing only while the phase detector is trustworthy.
  *
- * If the detector is noisy, the loop makes corrections chasing that noise. The
- * corrections grow, and this reports them faithfully — but the oscillator was
- * fine and the loop has just made it worse. That is precisely the failure a GPSDO
- * is prone to: perfectly locked by every indicator, and worse at short averaging
- * times than if left alone. Nothing measured from inside the loop can see it.
+ * If the detector is noisy, the loop makes corrections chasing that noise.
+ * The corrections grow, and this reports them faithfully — but the
+ * oscillator was fine and the loop has just made it worse. That is
+ * precisely the failure a GPSDO is prone to: perfectly locked by every
+ * indicator, and worse at short averaging times than if left alone.
+ * Nothing measured from inside the loop can see it.
  *
  * So read a small figure as "the loop is not fighting anything", which is
- * necessary but not sufficient. A large or growing figure is the useful signal:
- * something is wrong, even if this cannot say what.
+ * necessary but not sufficient. A large or growing figure is the useful
+ * signal: something is wrong, even if this cannot say what.
  */
 #ifndef GPSDO_HEALTH_H
 #define GPSDO_HEALTH_H
@@ -53,6 +52,18 @@ void health_reset(void);
  * The statistics gate on it (with a calibration check on top), and the span
  * module uses it to decide whether a code is a null worth remembering. */
 bool health_loop_locked(void);
+
+/* RAIL TO RAIL (build 65). After each loop step the control task passes the
+ * code the loop found on the DAC (`before`) and the one it left there
+ * (`code`). When the loop's codes reach one end of the DAC's range and then
+ * the other with no lock in between, the loop is diverging, not pulling in:
+ * each such swing is reported once on the console, and health_rails_alarm()
+ * holds true (the telemetry line shows RAILS for the trend word) until the
+ * loop locks, the algorithm changes, the code is moved by something other
+ * than the loop (SP, CT, LC, a span move), or 30 minutes pass without either
+ * end. See the .cpp. */
+void health_watch_loop(uint16_t before, uint16_t code, uint8_t algo);
+bool health_rails_alarm(void);
 
 typedef struct {
     bool     have_k;        /* false until CT has measured the VCO slope   */
@@ -90,11 +101,11 @@ void health_get(health_stats_t *out);
  * straight out of the per-task measurement below — exact cycle counts between
  * context switches — so there is nothing to calibrate and nothing to assume.
  *
- * It used to be counted the other way round: an idle-hook spin counter, with
- * the highest count ever seen taken as 0% load. That works, and it has a flaw
- * that cannot be measured from inside it — a board that has never once been
- * near idle has an underestimated reference, and therefore an optimistic
- * reading, for ever. The cycle counter has no reference to be wrong about.
+ * The obvious alternative is an idle-hook spin counter, with the highest
+ * count ever seen taken as 0% load. That works, but it has a flaw that
+ * cannot be measured from inside it: a board that has never once been near
+ * idle has an underestimated reference, and therefore an optimistic
+ * reading, forever. The cycle counter has no reference to be wrong about.
  *
  * What it measures is the CPU the idle task did not get, so interrupt time
  * counts too: an ISR steals from whatever is running, idle included. */
@@ -110,11 +121,11 @@ uint8_t cpu_load_pct(void);     /* 0..100, 255 until the first second */
  * HOW IT IS MEASURED. Not by sampling. FreeRTOS calls traceTASK_SWITCHED_IN()
  * on every context switch, and the Cortex-M4 has a free-running cycle counter
  * in the DWT block that costs one load to read — so the time between two
- * switches is known exactly and belongs, exactly, to the task that was running.
- * That is a handful of cycles per switch and no timer: the sampling profiler
- * this replaced would have needed the tick, and would have been blind to any
- * task that starts on a tick boundary and finishes before the next one, which
- * on this firmware is most of them.
+ * switches is known exactly and belongs, exactly, to the task that was
+ * running. That is a handful of cycles per switch and no timer: a sampling
+ * profiler would instead need the tick, and would be blind to any task that
+ * starts on a tick boundary and finishes before the next one, which on this
+ * firmware is most of them.
  *
  * WHAT IT ATTRIBUTES WHERE. Interrupt time lands on whichever task was
  * interrupted, because an ISR does not switch context. The PPS capture, the

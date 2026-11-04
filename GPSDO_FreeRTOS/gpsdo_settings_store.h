@@ -1,24 +1,23 @@
 /* ======================================================================
  * gpsdo_settings_store.h  —  persistent user settings via the flash ring
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.60rt
  *
- * Replaces the old STM32duino emulated EEPROM (gpsdo_state.cpp eeprom_*).
  * Settings are stored as a REC_SETTINGS slot in the flash ring (sector 7),
  * alongside the live data (REC_LIVE). This gives them the same atomicity
  * guarantees the ring already provides for live data: per-slot CRC16,
  * sequence-numbered newest-wins, read-back verify, power-loss safety.
  *
- * Layout version (SETTINGS_VER) is the first byte of the payload. A mismatch
- * on recall (e.g. older layout saved by a previous firmware) is treated like
- * a blank ring: compile-time defaults apply, the user re-runs CT/LC/TZ/ES.
+ * Layout version (SETTINGS_VER) is the first byte of the payload. A
+ * mismatch on recall (e.g. an older layout) is treated like a blank ring:
+ * compile-time defaults apply, the user re-runs CT/LC/TZ/ES.
  *
  * Selective save (ES <object>): rather than overwrite the entire settings
- * block when the user changes one field, settings_save_partial() reads the
- * last saved block from the ring, updates only the requested group of fields
- * from the live runtime state, and writes a fresh slot. Untouched fields
- * keep their stored values — a deliberate `ES TZ` cannot clobber a hand-tuned
- * PID set the way the old full-state EEPROM write could.
+ * block when the user changes one field, settings_save_partial() reads
+ * the last saved block from the ring, updates only the requested group of
+ * fields from the live runtime state, and writes a fresh slot. Untouched
+ * fields keep their stored values, so a deliberate `ES TZ` cannot clobber
+ * a hand-tuned PID.
  * ====================================================================== */
 #ifndef GPSDO_SETTINGS_STORE_H
 #define GPSDO_SETTINGS_STORE_H
@@ -28,7 +27,7 @@
 
 /* Bump when the on-flash layout of SettingsBlock_t changes. A mismatch with
  * the stored value triggers a fall-back to defaults on recall. */
-#define SETTINGS_VER  6u   /* v6: + DV/AV output scales; v5 algo-12 block; v4 LT flag; v3 FA windows; v2 Lars */
+#define SETTINGS_VER  6u
 
 /* The flat on-flash block. Total size must stay <= FR_PAYLOAD (504 B).
  * Every field is little-endian and tightly packed; the recall path range-
@@ -145,18 +144,20 @@ typedef struct {
      * rather than for a nonsense scale. */
     uint16_t dac_vref_cv;    /* g_dac_vref in centivolts ×100 (DV), 0 = 3.3 V */
     uint16_t adc_vdiv_h;     /* g_adc_vdiv ×100 (AV), 0 = 1.00×               */
-    /* What the PA0 divider is measuring (VS command) — SETTINGS_VER 6, appended
-     * after the layout was frozen. The board selects between the 5 V rail and
-     * the voltage reference with a jumper on the top of that divider, and the
-     * firmware cannot see a jumper, so it is told. 0 = unset (an older record,
-     * which means the 5 V rail, the behaviour every build before this had),
-     * 1 = VCC, 2 = VREF — offset by one for the same reason dac_path is.
+    /* What the PA0 divider is measuring (VS command) — SETTINGS_VER 6,
+     * appended after the layout was frozen. The board selects between the
+     * 5 V rail and the voltage reference with a jumper on the top of that
+     * divider, and the firmware cannot see a jumper, so it is told. 0 =
+     * unset (an older record, which means the 5 V rail, the behaviour every
+     * build before this had), 1 = VCC, 2 = VREF — offset by one for the same
+     * reason dac_path is.
      *
-     * APPENDED WITHOUT A VERSION BUMP, and that is now a supported thing to do
-     * rather than a trick: settings_recall() accepts any record from
-     * SETTINGS_V6_BYTES up to the current size, and the struct is zeroed first,
-     * so everything appended reads back as 0 = unset on an older record. The
-     * three alignment bytes after this one are the room for the next two. */
+     * APPENDED WITHOUT A VERSION BUMP: a supported way to grow the block,
+     * not a one-off trick. settings_recall() accepts any record from
+     * SETTINGS_V6_BYTES up to the current size, and the struct is zeroed
+     * first, so everything appended reads back as 0 = unset on an older
+     * record. The three alignment bytes after this one are the room for
+     * the next two. */
     uint8_t  vsense_src;     /* g_vsense_src + 1; 0 = unset = the 5 V rail    */
     /* Span sensing on PB14 (gpsdo_span.h) — appended under the rule above: an
      * older record reads all of these back as 0, and 0 means "never recorded",
@@ -167,27 +168,41 @@ typedef struct {
     uint8_t  span_last;      /* span in force when saved, + 1; 0 = unset      */
     float    span_k[2];      /* CT's K in each span, Hz/LSB; 0 = none         */
     uint16_t span_pair[2];   /* one code per span, same EFC volts; 0 = none   */
-    /* DV in millivolts. dac_vref_cv holds centivolts, so a DV of 4.096 — the
-     * ADR4540 on Dan Wiering's V3 — came back from every restart as 4.10, a
-     * 0.1 % bias on the commanded column of the DAC report. Appended under the
-     * rule above rather than by widening dac_vref_cv, which every older build
-     * reads: dac_vref_cv is still written, from the same value, so a downgrade
-     * keeps the two-decimal DV it always had, and an older record reads this
-     * back as 0 = not recorded. On recall it refines dac_vref_cv only when the
-     * two agree to the centivolt (apply_full). Takes the word after
-     * span_pair: the block grows from 392 to 396 bytes. Checked with offsetof
-     * under arm-none-eabi. */
+    /* DV in millivolts. dac_vref_cv holds centivolts, so a DV of 4.096 —
+     * the ADR4540 on a V3 board — came back from every restart as 4.10, a
+     * 0.1 % bias on the commanded column of the DAC report. Appended under
+     * the rule above rather than by widening dac_vref_cv, which every older
+     * build reads: dac_vref_cv is still written, from the same value, so a
+     * downgrade keeps the two-decimal DV it always had, and an older record
+     * reads this back as 0 = not recorded. On recall it refines dac_vref_cv
+     * only when the two agree to the centivolt (apply_full). Takes the word
+     * after span_pair: the block grows from 392 to 396 bytes. Checked with
+     * offsetof under arm-none-eabi. */
     uint16_t dac_vref_mv;    /* g_dac_vref ×1000 (DV); 0 = not recorded       */
+    /* Where CT found 10 MHz in each span position, renewed by every pair
+     * measured since (span_store_t.null, SPAN_NULL_TOL in gpsdo_span.cpp) —
+     * what tells a null from a code the other position's plant put there.
+     * Appended under the rule above: an older record reads back 0 = not known,
+     * which is what a board that has not run CT on build 58 is. Takes the two
+     * bytes after dac_vref_mv and two more: the block grows from 396 to 400
+     * bytes. Checked with offsetof under arm-none-eabi. */
+    uint16_t span_null[2];   /* one code per span; 0 = not known              */
+    /* Algorithm 12's mode (MM), + 1. Appended under the rule above: an older
+     * record reads back 0 = unset, which takes the default (calm). Takes the
+     * first of the two pad bytes after span_null (offset 398), so the block
+     * stays 400 bytes. Checked with offsetof under arm-none-eabi. */
+    uint8_t  a12_mode;       /* g_mlacc_mode + 1; 0 = unset                   */
 } SettingsBlock_t;
 
-/* The size SETTINGS_VER 6 had when it was frozen, and the shortest record
- * settings_recall() will accept as one. Every byte appended since reads back
- * as zero on such a record, which each appended field defines as "unset".
+/* The size SETTINGS_VER 6 had when it was frozen, and the shortest
+ * record settings_recall() will accept as one. Every byte appended
+ * since reads back as zero on such a record, which each appended field
+ * defines as "unset".
  *
- * DO NOT CHANGE THIS NUMBER WHEN YOU APPEND A FIELD — it is the whole point of
- * it. The alternative, and what this file used to do, was a fresh `else if`
- * per version with a hand-written offsetof, and before that a version bump,
- * which threw away everyone's PID, LC and timezone to gain one byte. */
+ * DO NOT CHANGE THIS NUMBER WHEN YOU APPEND A FIELD — it is the whole
+ * point of it. A fresh `else if` per version with a hand-written
+ * offsetof would work, and so would a version bump, but each throws
+ * away everyone's PID, LC and timezone to gain one byte. */
 #define SETTINGS_V6_BYTES  376u
 
 /* Which group of fields a partial save should update. Used by `ES <object>`. */

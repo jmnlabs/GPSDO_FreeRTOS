@@ -2,9 +2,9 @@
  * gpsdo_health.cpp — correction statistics. See the header for what these
  * numbers mean and, more importantly, what they cannot mean.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.67rt
  *
- * Exponentially weighted rather than buffered: three time constants cost three
+ * Exponentially weighted rather than buffered: four time constants cost four
  * multiply-adds per second and no memory, where a ring buffer covering an hour
  * would be several kilobytes to answer the same question no better.
  */
@@ -38,20 +38,16 @@
 #define A_100K  (1.0 / 100000.0)
 
 /* True while the loop is disciplining normally: locked, and no calibration
- * sweeping the DAC underneath us. Anything else writing to the DAC is issuing a
- * command, not correcting an error, and must not enter the statistics.
+ * sweeping the DAC underneath us. Anything else writing to the DAC is
+ * issuing a command, not correcting an error, and must not enter the
+ * statistics.
  *
- * Algorithms 0-9 have no lock concept, so they are excluded entirely rather than
- * counted with a meaning nobody could interpret; CS says so instead of quietly
- * reporting a number about nothing.
+ * Algorithms 0-9 have no lock concept, so they are excluded entirely
+ * rather than counted with a meaning nobody could interpret; CS says so
+ * instead of quietly reporting a number about nothing.
  *
- * ALGORITHMS 12 AND 13 WERE EXCLUDED TOO, and that was a plain omission rather
- * than a decision. They fell through the `default:` below with 0-9, so on the
- * two newest loops — the two most likely to be running on a board whose owner
- * cares about this number — the statistics never counted a single correction,
- * and CS explained the blank by saying the board was "running an algorithm
- * below 10". Both of them can say whether they are locked; until now neither
- * was asked. See mlacc_locked() / kf_locked() in gpsdo_algorithms.h. */
+ * Algorithms 12 and 13 have their own lock predicates and are asked too:
+ * see mlacc_locked() / kf_locked() in gpsdo_algorithms.h. */
 bool health_loop_locked(void)
 {
     switch (gCtrl.active_algo) {
@@ -62,6 +58,94 @@ bool health_loop_locked(void)
         default: break;             /* algorithms 0-9: no lock state to gate on */
     }
     return false;
+}
+
+/* ---- RAIL TO RAIL (build 65) ------------------------------------------------
+ *
+ * Build 64's first start swung algorithm 13 from one end of the DAC to the
+ * other for an hour and a half (04.10: 1 <-> 65535, -12.8 <-> +8.4 Hz, about
+ * ten minutes a swing), and nothing said so: the telemetry showed NOPH and a
+ * PWM that happened to be wherever it was that second. The cause is fixed (see
+ * "IT LIMITS SPEEDING UP, NOT SLOWING DOWN" in kalman_ctl()); this is so that
+ * the next fault of the kind is not found by someone watching a display.
+ *
+ * WHAT IS WATCHED IS WHERE THE CODE GOES, NOT HOW FAST. A loop pulling in
+ * from far off may well sit against one end of the range for a while, and it
+ * makes large corrections for as long as it takes: in simulation a pull-in
+ * from 6000 LSB (1.9 Hz) out runs 45-55 minutes and settles, so a threshold on
+ * the size of the corrections would cry wolf on every honest one. A loop that
+ * reaches the OTHER end without having locked in between is not pulling in,
+ * whatever the cause - on 04.10 that was 220 s after it first touched 65535.
+ *
+ * Fed by the control task after each loop step, with the code the loop found
+ * on the pin as well as the one it left there. If the first is not where the
+ * loop left it at its previous step, something else moved it - SP, CT's or
+ * LC's restore, a span move, holdover's own steering - and the watch starts
+ * afresh: a code set by hand can neither begin a swing nor finish one (SP 30
+ * and later SP 65500 on an unlocked algorithm used to read as one). So does a
+ * change of algorithm, a lock, or 30 minutes without touching either end.
+ * Each swing is said once, as it lands. It only says: what to do about it
+ * stays with the operator. */
+#define HEALTH_RAIL_LSB       64u                      /* "at an end": 0.1 % */
+#define HEALTH_RAIL_QUIET_MS  (30UL * 60UL * 1000UL)  /* the episode is over */
+
+static uint8_t  s_rail_end    = 0u;      /* 0 none yet, 1 bottom, 2 top        */
+static uint32_t s_rail_ms     = 0u;      /* when the code was last at that end */
+static uint16_t s_rail_code   = 0u;      /* ...and the code it was at          */
+static uint8_t  s_rail_algo   = 0xFFu;
+static uint16_t s_rail_swings = 0u;
+static bool     s_rail_seen   = false;   /* a step has been seen...            */
+static uint16_t s_rail_last   = 0u;      /* ...and the code it left on the pin */
+static volatile bool s_rail_alarm = false;
+
+void health_watch_loop(uint16_t before, uint16_t code, uint8_t algo)
+{
+    const uint32_t now    = millis();
+    const bool     locked = health_loop_locked();
+    const bool     moved  = s_rail_seen && before != s_rail_last;   /* not by the loop */
+    s_rail_seen = true;
+    s_rail_last = code;
+    if (algo != s_rail_algo || locked || moved ||
+        (s_rail_end != 0u && (uint32_t)(now - s_rail_ms) > HEALTH_RAIL_QUIET_MS)) {
+        s_rail_algo   = algo;
+        s_rail_end    = 0u;
+        s_rail_swings = 0u;
+        s_rail_alarm  = false;
+    }
+    if (locked) return;
+
+    const uint8_t end = (code <= HEALTH_RAIL_LSB)          ? 1u
+                      : (code >= 65535u - HEALTH_RAIL_LSB) ? 2u : 0u;
+    if (end == 0u) return;
+
+    if (s_rail_end != 0u && end != s_rail_end) {
+        if (s_rail_swings < 0xFFFFu) s_rail_swings++;
+        s_rail_alarm = true;
+        OUT_SERIAL.print("LOOP: rail to rail with no lock - PWM ");
+        OUT_SERIAL.print(s_rail_code);
+        OUT_SERIAL.print(" -> ");
+        OUT_SERIAL.print(code);
+        OUT_SERIAL.print(" in ");
+        OUT_SERIAL.print((now - s_rail_ms) / 1000UL);
+        OUT_SERIAL.print(" s (swing ");
+        OUT_SERIAL.print(s_rail_swings);
+        OUT_SERIAL.print(", algorithm ");
+        OUT_SERIAL.print(algo);
+#ifdef GPSDO_LTIC
+        OUT_SERIAL.println(algo == 11 ? "): diverging, not pulling in. Check CT and LPOL."
+                                      : "): diverging, not pulling in. LA 11 pulls in from far off.");
+#else
+        OUT_SERIAL.println("): diverging, not pulling in. Check CT.");
+#endif
+    }
+    s_rail_end  = end;
+    s_rail_ms   = now;
+    s_rail_code = code;
+}
+
+bool health_rails_alarm(void)
+{
+    return s_rail_alarm;
 }
 
 static bool counting_now(void)
@@ -169,10 +253,10 @@ void health_get(health_stats_t *out)
     out->peak    = s_peak;
 }
 
-/* ---------------------------------------------------------------------- */
-/* CPU load. Not measured here any more — it falls out of the per-task
- * accounting below as 100% minus the idle task's share, which is exact where
- * the idle-hook spin counter it replaced was a self-calibrating estimate. */
+/* ----------------------------------------------------------------------
+ * CPU load falls out of the per-task accounting below, as 100% minus the
+ * idle task's share. See gpsdo_health.h for why this is exact rather
+ * than a sampled estimate. */
 static uint8_t  s_load_pct = 255;   /* 255 = not measured yet */
 
 uint8_t cpu_load_pct(void) { return s_load_pct; }
@@ -185,7 +269,7 @@ uint8_t cpu_load_pct(void) { return s_load_pct; }
 
 /* The Cortex-M4 cycle counter. Enabling TRCENA powers the DWT block; no
  * debugger need be attached and no timer is consumed. CYCCNT is 32 bits and
- * wraps every 43 s at 100 MHz, which does not matter: only DIFFERENCES between
+ * wraps every 45 s at 96 MHz, which does not matter: only DIFFERENCES between
  * consecutive context switches are taken, and unsigned subtraction is exact
  * across the wrap. */
 void cpu_trace_begin(void)

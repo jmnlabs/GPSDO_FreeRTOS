@@ -1,7 +1,7 @@
 /**
  * gpsdo_cli.cpp — vCliTask — Serial / Bluetooth command line interface
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.71rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -62,10 +62,19 @@ static bool cli_ieq(const char *a, const char *b)
 }
 
 /* -----------------------------------------------------------------------
- * Output helpers - all protected by xSerialMutex
+ * Output helpers - all protected by xSerialMutex, and all held back while
+ * the phase detector's burst is due: text going out on the Bluetooth UART at
+ * the PPS edge put that second's reading ~20 codes high (ltic_quiet_now()).
  * ----------------------------------------------------------------------- */
+static void cli_quiet(void)
+{
+#ifdef GPSDO_LTIC
+    while (ltic_quiet_now()) vTaskDelay(1);
+#endif
+}
 static void cli_puts(const char *s)
 {
+    cli_quiet();
     if (xSemaphoreTake(xSerialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         CLI_SERIAL.print(s);
         xSemaphoreGive(xSerialMutex);
@@ -73,6 +82,7 @@ static void cli_puts(const char *s)
 }
 static void cli_putln(const char *s)
 {
+    cli_quiet();
     if (xSemaphoreTake(xSerialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         CLI_SERIAL.println(s);
         xSemaphoreGive(xSerialMutex);
@@ -127,6 +137,7 @@ static void cli_putint(int v)
 {
     static char tmp[14];
     ltoa((long)v, tmp, 10);
+    cli_quiet();
     if (xSemaphoreTake(xSerialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         CLI_SERIAL.print(tmp);
         CLI_SERIAL.print("\r\n");
@@ -211,6 +222,7 @@ static void cli_putfloat(float v, int dec)
 {
     static char tmp[24];
     dtostrf(v, -1, dec, tmp);
+    cli_quiet();
     if (xSemaphoreTake(xSerialMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         CLI_SERIAL.print(tmp);
         CLI_SERIAL.print("\r\n");
@@ -273,6 +285,8 @@ static void print_help(void)
     cli_putln("  -- LTIC (algo 10) phase-discipline params --");
     cli_putln("  LC          LTIC self-Calibrate (ns/V, offset, range)");
     cli_putln("  LL          List all LTIC params + state");
+    cli_putln("  LRM [0|1]   Phase read: 1 = line through the burst, at the edge (default), 0 = median");
+    cli_putln("  LB          Counts since boot (edge caught, line refused, kept), the last burst");
     cli_putln("  LNV/LZO/LRN cal: ns/V, zero-offset V, range ns");
     cli_putln("  AQP/I/D/L   ACQ PID Kp/Ki/Kd/I_LIMIT");
     cli_putln("  DPP/I/D/L   DPLL PID Kp/Ki/Kd/I_LIMIT");
@@ -293,7 +307,7 @@ static void print_help(void)
     cli_putln("     (credit: Lars Walenius' original PI GPSDO loop)");
     cli_putln("  WU 0|1        - OCXO warmup on boot (saved with ES)");
     cli_putln("  SPL 0|1       - boot animation: 1=full show, 0=static (saved with ES)");
-    cli_putln("  LRN 0|1|R     - self-learning drift/damping (R=reset, ES saves)");
+    cli_putln("  LRN 0|1|R     - self-learning drift/damping (R=reset, saved; 0/1: ES FLAGS)");
     cli_putln("  LCV [V]     ACQ centring target (0=range mid)");
     cli_putln("  AP          Arm picDIV");
     cli_putln("  ES [obj]    Save settings to flash ring (obj: TZ/PID/LTIC/FLAGS/ALGO12/ALGO/PO)");
@@ -302,10 +316,12 @@ static void print_help(void)
     cli_putln("-- Algo 12 (multi-level accumulator) --");
     cli_putln("  MG [v]      Gain LSB/ns (0 = auto from CT)");
     cli_putln("  MR [n]      Force a correction at level n (0-10)");
+    cli_putln("  MM [0|1]    Corrections: 1 = calm, ramped (default), 0 = original");
     cli_putln("  MLP <n> [ns] Phase limit for level n");
     cli_putln("  MF [0-3]    Limits: 0=default(formula) 1=stored 2=formula 3=measured");
     cli_putln("  KR/KQ/KT    Algo 13 Kalman: noise R [ns], Q, ESTIMATOR horizon [s] (0=measure)");
     cli_putln("  KC          Algo 13: CONTROLLER horizon [s] - phase nulling (0 = KT/3)");
+    cli_putln("  KF          Algo 13: horizon while a disturbance lasts [s] (16; 0 = off)");
     cli_putln("  KL          List the Kalman state and what it has measured");
     cli_putln("  MFT [s]     MF 3: target s between noise-driven corrections");
     cli_putln("  ML          List all algo-12 parameters");
@@ -366,19 +382,18 @@ static void print_help_tz(void)
 
 /* -----------------------------------------------------------------------
  * Command dispatcher
- * ----------------------------------------------------------------------- */
-/* ADC counts <-> volts, the ONE place the detector's scale is written down on
- * the CLI side. The firmware's own conversion is gpsdo_tasks.cpp:
- *   g_ltic_voltage = (accepted / 4096.0f) * 3.3f
- * and these must agree with it. 12-bit ADC, 3.3 V reference, 4096 not 4095 —
- * counts are bucket indices, not fenceposts.
+ * -----------------------------------------------------------------------
  *
- * Why they exist: two commands used to take ADC counts while everything else
- * on this detector spoke volts and nanoseconds, so LZO = 2.0809 V and
- * LTO = 2620 counts named the SAME physical point in two units — and did not
- * agree (2620 counts is 2.1104 V, 37 counts away, about 37 ns once the scale
- * was corrected). Nobody spots that by eye, which is the whole argument for
- * one unit at the human face. TODO item 21. */
+ * ADC counts <-> volts, the ONE place the detector's scale is written
+ * down on the CLI side. The firmware's own conversion is gpsdo_tasks.cpp:
+ *   g_ltic_voltage = (accepted / 4096.0f) * 3.3f
+ * and these must agree with it. 12-bit ADC, 3.3 V reference, 4096 not
+ * 4095 — counts are bucket indices, not fenceposts.
+ *
+ * One unit at the human face matters: expressing the same physical point
+ * in two different units invites disagreement that nobody spots by eye,
+ * as when LZO in volts and LTO in counts once named the same point 37
+ * counts (about 37 ns) apart. */
 #define ADC_FULL_SCALE_V   3.3
 #define ADC_STEPS          4096.0
 static double adc_to_v(uint16_t counts) { return ((double)counts / ADC_STEPS) * ADC_FULL_SCALE_V; }
@@ -393,15 +408,15 @@ static uint16_t v_to_adc(double volts)
 #ifdef GPSDO_LTIC
 /* Warn before an algorithm is handed the phase detector.
  *
- * Two different states, and only one of them used to be reported. LC writes
- * three numbers: ns_per_volt, zero_offset and range_ns. If ALL of them are
- * still at their build defaults, LC has never run on this board — and the
- * likeliest reason is not that the owner forgot, but that there is no detector
- * to calibrate. That is exactly the case Dave hit: a counter-only board built
- * with GPSDO_LTIC on, PA1 floating, ADC noise arriving as a phase in
- * nanoseconds and the loop faithfully disciplining the OCXO against it.
- * A merely uncalibrated detector (range known, slope not) is a much milder
- * complaint and keeps the old wording. */
+ * Two different states get two different warnings. LC writes three
+ * numbers: ns_per_volt, zero_offset and range_ns. If ALL of them are
+ * still at their build defaults, LC has never run on this board — and
+ * the likeliest reason is not that the owner forgot, but that there is
+ * no detector to calibrate: a counter-only board built with GPSDO_LTIC
+ * on, PA1 floating, ADC noise arriving as a phase in nanoseconds and
+ * the loop faithfully disciplining the OCXO against it. A merely
+ * uncalibrated detector (range known, slope not) is a much milder
+ * complaint. */
 static void cli_warn_ltic_cal(void)
 {
     if (g_ltic.ns_per_volt == 0.0f && g_ltic.range_ns == 0.0f) {
@@ -487,12 +502,13 @@ static void dispatch(char *line)
     if (cli_ieq(verb, "DAC")) {
         /* Every line is assembled whole and emitted with one cli_putln().
          *
-         * The first version built lines from cli_puts() + cli_putfloat()
-         * fragments, which came out broken on the wire: cli_putfloat() always
-         * terminates its line, so each number landed on one of its own and the
-         * units ended up on the next. It is a line printer, not an inline
-         * formatter. Assembling here also means the serial mutex is taken once
-         * per line, so another task's output cannot interleave mid-sentence. */
+         * Building it from cli_puts() + cli_putfloat() fragments comes out
+         * broken on the wire: cli_putfloat() always terminates its own
+         * line, so a number lands alone and its units land on the next
+         * line. It is a line printer, not an inline formatter.
+         *
+         * Assembling here also takes the serial mutex once per line, so
+         * another task's output cannot interleave mid-sentence. */
         char l[96], b1[16], b2[16];
         uint32_t c24 = gpsdo_dac_last24();
         double   f16 = gpsdo_dac_last16f();
@@ -542,19 +558,29 @@ static void dispatch(char *line)
         }
         if (g_dac_path == DAC_PATH_EXT) {
             cli_putln("        external SPI DAC (AD5680, bit-banged)");
+            cli_putln("        PWM pin PB9 held low - no carrier while EXT is live");
         }
 #if defined(GPSDO_PWM_DITHER)
         else if (g_dac_path == DAC_PATH_DITH) {
         snprintf(l, sizeof(l), "        %u-bit PWM + dither -> 24 bit, PB9/TIM4 CH4, DMA",
                  (unsigned)PWM24_N);
         cli_putln(l);
-        /* TIM4 runs from the 100 MHz APB1 timer clock with no prescaler, so the
-         * carrier is that divided by the period. */
-        snprintf(l, sizeof(l), "        carrier %lu Hz, table %lu x2 = %lu bytes RAM",
-                 (unsigned long)(100000000UL / (1UL << PWM24_N)),
-                 (unsigned long)PWM24_TBL,
-                 (unsigned long)(PWM24_TBL * 2UL * 2UL));
-        cli_putln(l);
+        /* TIM4 runs from the APB1 timer clock with no prescaler, so the
+         * carrier is that divided by the period. The clock is read from the
+         * RCC (build 67): up to build 66 this divided an assumed 100 MHz, and
+         * the BlackPill runs 96 MHz under the STM32duino core, so every
+         * carrier printed here was 4 % high. The clock goes on the line too,
+         * because it is the first thing to check when a carrier seen on a
+         * scope or in LB disagrees with this one. */
+        {
+            uint32_t tclk = pwm24_timer_hz();
+            snprintf(l, sizeof(l), "        carrier %lu Hz (timer %lu.%lu MHz), table %lu x2 = %lu bytes RAM",
+                     (unsigned long)((tclk + PWM24_PERIOD / 2u) / PWM24_PERIOD),
+                     (unsigned long)(tclk / 1000000UL), (unsigned long)((tclk / 100000UL) % 10UL),
+                     (unsigned long)PWM24_TBL,
+                     (unsigned long)(PWM24_TBL * 2UL * 2UL));
+            cli_putln(l);
+        }
         }
         else {
             cli_putln("        dither engine at whole-LSB granularity — same pin,");
@@ -597,21 +623,20 @@ static void dispatch(char *line)
             dtostrf(vm, -1, 4, b1);
             /* COMMANDED AGAINST MEASURED — the one check that catches a jumper
              * that does not match the setting. The firmware cannot see the
-             * jumper, so the only evidence is that the control voltage is not
-             * where it was told to put it.
+             * jumper, so the only evidence is a control voltage that is not
+             * where it was told to be.
              *
              * Half a volt of slack, deliberately: the ADC divider and the
              * reference are good to a few percent at best, so a tight bound
-             * would cry wolf on every board. What this has to catch is the
-             * gross case — commanded 1.8 V, measured 0.0 V because the driver
-             * that is selected is not the one wired to the filter — and half a
-             * volt catches that without ever firing on a scale error.
+             * would cry wolf on every board. What this must catch is the gross
+             * case — commanded 1.8 V, measured 0.0 V because the selected
+             * driver is not the one wired to the filter — and half a volt
+             * catches that without ever firing on a scale error.
              *
-             * The commanded side is scaled by g_dac_vref (DV), not the
-             * hardcoded 3.3 V it used to be: on a 5 V external DAC the old
-             * model under-stated commanded by 1.5x and the check cried wolf
-             * on every reading — the false MISMATCH that started the whole
-             * DV/AV business. */
+             * The commanded side is scaled by g_dac_vref (DV), not a
+             * hard-coded 3.3 V: on a 5 V external DAC a fixed 3.3 V
+             * under-states commanded by 1.5x and cries wolf on every
+             * reading. */
             double vc = ((double)v16 / 65536.0) * g_dac_vref;
             dtostrf(vc, -1, 4, b2);
             snprintf(l, sizeof(l), "  Vctl: %s V measured, %s V commanded", b1, b2);
@@ -671,23 +696,20 @@ static void dispatch(char *line)
         if (lsb_per_hz > 0.0) {
             /* TWO STEPS, AND THEY ARE NOT THE SAME NUMBER.
              *
-             * The control value is 24-bit on every path — that is what the loop
+             * The control value is 24-bit on every path — what the loop
              * commands and what the fine carry delivers on average. What the
-             * OUTPUT moves in a single write is the live driver's own width:
-             * 2^24 on DITH (the dither table averages the 24-bit value
-             * exactly), 2^18 on the AD5680, 2^16 on plain PWM riding the
-             * dither engine — and 50 000, which is not a power of two at all,
-             * on a build with no dither engine, where the timer's period is
-             * the resolution. See gpsdo_dac_output_steps().
+             * OUTPUT moves in one write is the live driver's own width: 2^24
+             * on DITH (the dither table averages the 24-bit value exactly),
+             * 2^18 on the AD5680, 2^16 on plain PWM riding the dither engine,
+             * and 50 000 — not a power of two — on a build with no dither
+             * engine, where the timer's period is the resolution. See
+             * gpsdo_dac_output_steps().
              *
-             * This used to print 16-bit and 24-bit regardless of the path, so
-             * on Dan Wiering's AD5680 board the report offered 0.094 uHz as a
-             * step — 64 counts of the control value make one move at that pin,
-             * so the smallest real one is about 6 uHz — while at the same time
-             * understating the part by quoting a 16-bit figure four times
-             * coarser than it can do. Both lines were wrong on the same board
-             * in opposite directions, which is what a fixed pair of widths gets
-             * you when there are three converters.
+             * A fixed pair of widths regardless of path is wrong with three
+             * converters: on an AD5680 board it understated the control step
+             * by printing a 16-bit figure four times coarser than the part
+             * can do, while overstating the output step at 0.094 uHz when 64
+             * counts there make one real move, about 6 uHz.
              *
              * uHz on both lines, so they are comparable at a glance. */
             uint32_t osteps = gpsdo_dac_output_steps();
@@ -770,8 +792,8 @@ static void dispatch(char *line)
                 return;
             }
             g_dac_vref = v;
-            /* Three decimals, as stored since build 57 (dac_vref_mv): with two,
-             * DV 4.096 echoed back as 4.10 and was saved as 4.10 too. */
+            /* Three decimals: with two, DV 4.096 echoes back as 4.10 and
+             * saves as 4.10 too. */
             dtostrf(v, -1, 3, b1);
             snprintf(l, sizeof(l), "DV: commanded now scaled at %s V full code", b1);
         } else {
@@ -784,14 +806,12 @@ static void dispatch(char *line)
             snprintf(l, sizeof(l), "AV: Vctl readings now scaled x%s", b1);
         }
         cli_putln(l);
-        /* AUTO-SAVED, not "run ES ALGO". These two describe the board's output
-         * stage — they are typed once when the hardware is built and never
-         * again — and the v1.07 changelog and the notes sent to the people
-         * building those boards both said so. The code did not, so a DV set
-         * and not followed by an ES came back as 3.30 after a reset and the
-         * MISMATCH warning returned with it, which looks like a hardware fault
-         * rather than a lost setting. The promise was the right one; this is
-         * the code catching up to it. */
+        /* AUTO-SAVED, not "run ES ALGO". These two describe the board's
+         * output stage — typed once when the hardware is built and
+         * rarely touched again — so leaving them to an explicit ES risks
+         * a DV set and not saved coming back as 3.30 after a reset, with
+         * the MISMATCH warning returning right alongside it and looking
+         * like a hardware fault rather than a lost setting. */
         cli_autosaved(SET_ALGO, isDV ? "DV: DAC full-code volts"
                                      : "AV: ADC divide ratio");
         return;
@@ -850,7 +870,7 @@ static void dispatch(char *line)
         else { cli_reject("SPAN CLR: FULL or REDUCED"); return; }
         span_clear(which);
         cli_puts("SPAN: calibration for "); cli_puts(span_name(which));
-        cli_putln(" forgotten (and the code pair). Saved.");
+        cli_putln(" forgotten (its K and null, and the code pair). Saved.");
         if (which == span_active())
             cli_putln("SPAN: this is the position the jumper is in - the live loop is unchanged; run CT to re-measure it.");
         return;
@@ -921,7 +941,7 @@ static void dispatch(char *line)
     /* ---- CT: calibrate K + auto-tune all PID from measured gain ---- */
     if (cli_ieq(verb, "CT")) {
         xEventGroupSetBits(xSysEvents, EVT_NEED_TUNE);
-        cli_putln("CT: calibrate + auto-tune started (~3 min, 3 PWM points)");
+        cli_putln("CT: calibrate + auto-tune started (~3 min, 3 PWM points; ~8 min more on a gentle plant)");
         cli_putln("Derives K, tunes PID (3-9) and LTIC (10 & 11); auto-saves the PID group.");
         return;
     }
@@ -1021,16 +1041,11 @@ static void dispatch(char *line)
 #ifdef GPSDO_PICDIV
         xEventGroupSetBits(xSysEvents, EVT_ARM_PICDIV);
         cli_putln("picDIV arm requested (1.0-1.2s output gap, then syncs to 1PPS)");
-        /* THE OLD NOTE NAMED LA 4/5/7, and it predates algorithms 10-13 by a
-         * long way. Those three steer on the COUNTER and have no phase detector
-         * at all, so they cannot hold the divider's phase where it is put -
-         * which is the one thing this note is about. The loops that can are the
-         * LTIC family, and they also re-arm by themselves when the detector
-         * says the divider has lost sync, so on 10-13 this command is a manual
-         * override rather than routine maintenance. Dan Wiering picked 7 for an
-         * overnight run and wondered why he was seeing arm events; algorithms
-         * 0-9 never arm at all, and this line is the likeliest reason he was
-         * there in the first place. */
+        /* Only algorithms 10-13 (the LTIC family) hold the divider's phase;
+         * they already re-arm by themselves once the detector reports the
+         * divider out of sync, so this command is a manual override rather
+         * than routine maintenance. Algorithms 0-9 steer on the counter
+         * alone, have no phase detector, and never arm at all. */
         cli_putln("Note: LA 10-13 hold the divider's phase and re-arm by");
         cli_putln("themselves; on LA 0-9 nothing keeps it aligned afterwards.");
 #else
@@ -1042,7 +1057,16 @@ static void dispatch(char *line)
     /* ---- PWM adjustments ---- */
     /* Block manual PWM nudges while a calibration is sweeping: LC/CT drive
      * PWM themselves and measure the response, so a manual step corrupts the
-     * slope/range measurement. One guard covers up1/up10/dp1/dp10/SP. */
+     * slope/range measurement. One guard covers up1/up10/dp1/dp10/SP.
+     *
+     * Every write below also tells the span module (span_note_manual): a code
+     * typed here is not the loop's null, even under a lock flag that has not
+     * noticed yet, and a span jumper moved on it must not record it as one.
+     * The flag is set BEFORE the write, so the span module, which reads the
+     * code first and the flag after, can never see the one without the other.
+     * The live store is told too (build 65), before the code moves: a typed
+     * code is not the operating point either, however close, and the store
+     * reads the note first and the code after. */
     if (cli_ieq(verb, "up1") || cli_ieq(verb, "up10") ||
         cli_ieq(verb, "dp1") || cli_ieq(verb, "dp10") || cli_ieq(verb, "SP")) {
         if (g_calib_active) {
@@ -1053,7 +1077,9 @@ static void dispatch(char *line)
 
     if (cli_ieq(verb, "up1")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            live_store_note_manual();
             if (gCtrl.pwm_output < 65535) gCtrl.pwm_output++;
+            span_note_manual();
             gpsdo_dac_write16(gCtrl.pwm_output);
             xSemaphoreGive(xCtrlMutex);
         }
@@ -1062,7 +1088,9 @@ static void dispatch(char *line)
     }
     if (cli_ieq(verb, "up10")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            live_store_note_manual();
             if (gCtrl.pwm_output <= 65525) gCtrl.pwm_output += 10;
+            span_note_manual();
             gpsdo_dac_write16(gCtrl.pwm_output);
             xSemaphoreGive(xCtrlMutex);
         }
@@ -1071,7 +1099,9 @@ static void dispatch(char *line)
     }
     if (cli_ieq(verb, "dp1")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            live_store_note_manual();
             if (gCtrl.pwm_output > 1) gCtrl.pwm_output--;
+            span_note_manual();
             gpsdo_dac_write16(gCtrl.pwm_output);
             xSemaphoreGive(xCtrlMutex);
         }
@@ -1080,7 +1110,9 @@ static void dispatch(char *line)
     }
     if (cli_ieq(verb, "dp10")) {
         if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            live_store_note_manual();
             if (gCtrl.pwm_output >= 11) gCtrl.pwm_output -= 10;
+            span_note_manual();
             gpsdo_dac_write16(gCtrl.pwm_output);
             xSemaphoreGive(xCtrlMutex);
         }
@@ -1094,7 +1126,9 @@ static void dispatch(char *line)
             cli_puts("No value. Default PWM: ");
             cli_putint(DEFAULT_PWM_OUTPUT);
             if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                live_store_note_manual();
                 gCtrl.pwm_output = DEFAULT_PWM_OUTPUT;
+                span_note_manual();
                 gpsdo_dac_write16(gCtrl.pwm_output);
                 xSemaphoreGive(xCtrlMutex);
             }
@@ -1102,7 +1136,9 @@ static void dispatch(char *line)
             int32_t v = atoi(arg);
             if (v >= 1 && v <= 65535) {
                 if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    live_store_note_manual();
                     gCtrl.pwm_output = (uint16_t)v;
+                    span_note_manual();
                     gpsdo_dac_write16(gCtrl.pwm_output);
                     xSemaphoreGive(xCtrlMutex);
                 }
@@ -1150,11 +1186,11 @@ static void dispatch(char *line)
                 cli_putln("LA 11 needs GPSDO_LTIC enabled at build time.");
 #endif
             } else if (v == 12) {
-                /* Algo 12 needs the phase detector, like 10 and 11. It was first
-                 * written to fall back to the frequency counter on boards without
-                 * one; that fallback integrated quantisation noise into a random
-                 * walk and destroyed the lock, so it is gone. Refuse rather than
-                 * run something that cannot work. */
+                /* Algo 12 needs the phase detector, like 10 and 11. Falling
+                 * back to the frequency counter on boards without one
+                 * integrates quantisation noise into a random walk and
+                 * destroys the lock, so it refuses rather than run something
+                 * that cannot work. */
 #ifndef GPSDO_LTIC
                 cli_reject("LA 12: needs the LTIC phase detector "
                            "(enable GPSDO_LTIC and run LC)");
@@ -1388,25 +1424,38 @@ static void dispatch(char *line)
             cli_puts("  slope="); cli_putfloat(g_lrn_slope_ns_s, 3);
             cli_puts(" ns/s  osc="); cli_putint(g_lrn_osc_period);
             cli_puts("s/"); cli_putfloat(g_lrn_osc_amp_ns, 1); cli_putln("ns");
-        } else if (arg[0] == 'R' || arg[0] == 'r') {
+        } else if (cli_ieq(arg, "R")) {
             g_lrn_drift = 0.0f; g_lrn_damp = 1.0f;
-            cli_putln("LRN: learned drift/damping reset to theory");
+            /* The two numbers live in the live store, not the settings
+             * block, so saving with ES FLAGS alone does not persist them —
+             * only the on/off switch. Request the live-store save
+             * explicitly so the reset survives a power cycle rather than
+             * lasting only until one happens on its own. */
+            live_store_request_save();
+            cli_putln("LRN: learned drift/damping reset to theory (saved)");
+        } else if (strcmp(arg, "0") == 0 || strcmp(arg, "1") == 0) {
+            g_lrn_enable = (arg[0] == '1');
+            cli_puts("learn="); cli_putint(g_lrn_enable ? 1 : 0); cli_putln("");
             cli_manual_save("ES FLAGS");
         } else {
-            int v = atoi(arg);
-            if (arg[0] >= '0' && arg[0] <= '9' && v != 0 && v != 1) {
-                /* numeric but not a toggle: the detector range in ns
-                 * (the float table used to claim this verb first, which
-                 * made the 0|1|R form above unreachable). */
+            /* THE WHOLE ARGUMENT, OR NOTHING. atoi() reads what digits
+             * it can and ignores the rest, which would make LRN 1e3 set
+             * learning ON (atoi reads "1"), LRN ON set it OFF (no
+             * digits = 0), and LRN 2500.7 set 2500 — so the switch is
+             * instead the exact words 0 and 1, and anything else must
+             * parse to its end as a number: the detector range in ns, 2
+             * up to 1e9 — the lower end because 0 and 1 are the switch,
+             * the upper the one the tuner's field always had. */
+            char  *end = NULL;
+            double v   = strtod(arg, &end);
+            if (end != arg && *end == '\0' && v >= 2.0 && v <= 1.0e9) {
                 if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     g_ltic.range_ns = (float)v;
                     xSemaphoreGive(xCtrlMutex);
-                    cli_puts("range_ns="); cli_putfloat((float)v, 6); cli_putln("");
+                    cli_puts("range_ns="); cli_putfloat((float)v, 2); cli_putln("");
                     cli_manual_save("ES LTIC");
                 } else cli_putln("LRN: busy");
-            } else if (v == 0 || v == 1) { g_lrn_enable = (v != 0); cli_puts("learn="); cli_putint(v); cli_putln("");
-                                    cli_manual_save("ES FLAGS"); }
-            else cli_reject("LRN: 0 (off), 1 (on), R (reset), or a number = detector range ns");
+            } else cli_reject("LRN: 0 (learning off), 1 (on), R (reset), or the detector range in ns, 2..1e9");
         }
         return;
     }
@@ -1566,6 +1615,126 @@ static void dispatch(char *line)
         }
         return;
     }
+    /* ---- LRM [0|1] / LB — how the detector burst is read (ltic_read_fast) ----
+     * Not saved: an A/B switch for the bench, and every boot starts on the
+     * line at the edge. LB is the evidence either way - the conversions with
+     * their times after the edge, and the line through them. */
+    if (cli_ieq(verb, "LRM") || cli_ieq(verb, "LB")) {
+#ifdef GPSDO_LTIC
+        char t[96];
+        if (cli_ieq(verb, "LRM")) {
+            if (arg != NULL) {
+                if ((arg[0] == '0' || arg[0] == '1') && arg[1] == '\0')
+                    g_ltic_read_mode = (uint8_t)(arg[0] - '0');
+                else { cli_reject("LRM: 1 = line through the burst, read at the edge (default), 0 = median"); return; }
+            }
+            if (g_ltic_read_mode == LTIC_READ_EDGE)
+                snprintf(t, sizeof(t), "ltic_read=1 (line through %u conversions, read at the edge)",
+                         (unsigned)LTIC_EDGE_N);
+            else
+                snprintf(t, sizeof(t), "ltic_read=0 (median of %u analogRead, build 60)",
+                         (unsigned)LTIC_OVERSAMPLE);
+            cli_puts(t);
+            cli_putln(arg != NULL ? "  - not saved" : "");
+            return;
+        }
+        static ltic_burst_t b;                /* ~300 bytes: not on this task's stack */
+        static ltic_counts_t c;
+        ltic_burst_get(&b);
+        ltic_counts_get(&c);
+        /* Since boot: what became of each second. A reading is kept when the
+         * edge was not caught or the line was refused (up to 3 s in a row), or
+         * when the gate holds a jump back. */
+        snprintf(t, sizeof(t), "LTIC since boot: edge caught %lu, came first %lu, missed %lu,",
+                 (unsigned long)c.caught, (unsigned long)c.early, (unsigned long)c.missed);
+        cli_puts(t);
+        snprintf(t, sizeof(t), " TIM2 %lu, not tried %lu",
+                 (unsigned long)c.stuck, (unsigned long)c.untried);
+        cli_putln(t);
+        snprintf(t, sizeof(t), "  lines %lu; refused: too few %lu, off the line %lu,",
+                 (unsigned long)c.line, (unsigned long)c.few, (unsigned long)c.off);
+        cli_puts(t);
+        snprintf(t, sizeof(t), " bend %lu, other %lu", (unsigned long)c.bend, (unsigned long)c.other);
+        cli_putln(t);
+        snprintf(t, sizeof(t), "  last reading kept %lu, no new edge %lu",
+                 (unsigned long)c.kept, (unsigned long)c.noedge);
+        cli_putln(t);
+        snprintf(t, sizeof(t), "  every third conversion left out %lu, typical bend moved %lu",
+                 (unsigned long)c.third, (unsigned long)c.bendjump);
+        cli_putln(t);
+        static const char *const how[] = {
+            "median of the burst (LRM 0)",
+            "line, read at the edge",
+            "line refused, the burst's median carried to the edge",
+            "last reading kept",
+            "no new edge, the burst's median",
+        };
+        /* +1: the read runs before the drain loop counts its edge. */
+        snprintf(t, sizeof(t), "LTIC burst, pulse %lu: %s", (unsigned long)(b.seq + 1u),
+                 b.how <= LTIC_HOW_NOEDGE ? how[b.how] : "?");
+        cli_putln(t);
+        if (b.how != LTIC_HOW_MEDIAN && b.how != LTIC_HOW_NOEDGE) {
+            snprintf(t, sizeof(t), "  %s%s", b.sync ? "taken at the edge, interrupts masked"
+                                                    : "taken late, when the capture interrupt woke the task",
+                     b.how == LTIC_HOW_HELD ? (b.fit ? " - held back" : " - line refused, held") : "");
+            cli_putln(t);
+        }
+        if (b.why != LTIC_WHY_NONE) {
+            static const char *const why[] = {
+                "", "too few conversions", "too many off the line",
+                "bent unlike the board's bursts", "timing, TIM2 or off the scale",
+            };
+            snprintf(t, sizeof(t), "  refused: %s", b.why <= LTIC_WHY_OTHER ? why[b.why] : "?");
+            cli_putln(t);
+        }
+        if (b.used != 0u) {
+            float tau_ms = (b.slope < -1e-6f) ? -b.level / b.slope / 1000.0f : 0.0f;
+            int used = 0;
+            for (int i = 0; i < b.n; i++) if ((b.used >> i) & 1u) used++;
+            snprintf(t, sizeof(t), "  at the edge: %.2f codes = %.5f V   slope %.4f codes/us",
+                     (double)b.level, (double)(b.level / 4096.0f * 3.3f), (double)b.slope);
+            cli_putln(t);
+            snprintf(t, sizeof(t), "  decay ~%.1f ms   off the line %.2f codes rms   used %d/%d   bend %+.2f",
+                     (double)tau_ms, (double)b.rms, used, (int)b.n, (double)b.bend);
+            cli_puts(t);
+            snprintf(t, sizeof(t), " (typical %+.2f)", (double)b.bend_ref);
+            cli_putln(t);
+            /* Build 71: every third conversion, judged on the first line. */
+            if (b.third > 0)
+                snprintf(t, sizeof(t), "  every third conversion from #%d left out: %+.1f codes off the other two",
+                         b.third - 1, (double)b.third_off);
+            else if (b.third == 0)
+                snprintf(t, sizeof(t), "  thirds kept: the furthest %+.1f codes off the other two",
+                         (double)b.third_off);
+            if (b.third >= 0) cli_putln(t);
+        }
+        if (b.vref >= 0)
+            snprintf(t, sizeof(t), "  VREFINT before it %d   median %d   after the gate %.2f codes",
+                     (int)b.vref, (int)b.median, (double)b.accepted);
+        else
+            snprintf(t, sizeof(t), "  median %d   after the gate %.2f codes",
+                     (int)b.median, (double)b.accepted);
+        cli_putln(t);
+        cli_putln(b.edge ? "  t: from the edge to the start of each conversion"
+                         : "  t: from the first conversion (no edge to count from)");
+        cli_putln(b.fit ? "   i   t[us]  len[us]   code   off the line" : "   i   t[us]  len[us]   code");
+        for (int i = 0; i < b.n; i++) {
+            float tu = (float)b.t[i] / 10.0f;
+            if (b.fit)
+                snprintf(t, sizeof(t), "  %2d  %6.1f  %6.1f  %5d   %+6.2f%s", i, (double)tu,
+                         (double)b.dur[i] / 10.0, (int)b.code[i],
+                         (double)((float)b.code[i] - (b.level + b.slope * tu)),
+                         ((b.used >> i) & 1u) ? "" : "  (left out)");
+            else
+                snprintf(t, sizeof(t), "  %2d  %6.1f  %6.1f  %5d", i, (double)tu,
+                         (double)b.dur[i] / 10.0, (int)b.code[i]);
+            cli_putln(t);
+        }
+#else
+        cli_putln("LRM/LB need GPSDO_LTIC enabled at build time.");
+#endif
+        return;
+    }
     /* ---- LCV [volts] — ACQ centring target (0=use range middle) ---- */
     if (cli_ieq(verb, "LCV")) {
         if (arg == NULL) { cli_puts("centre_v="); cli_putfloat(g_ltic.centre_v, 3); }
@@ -1610,17 +1779,17 @@ static void dispatch(char *line)
         cli_puts(g_ltic.polarity == 0 ? " (not set - loop holds)" : "");
         cli_puts("  LCV=");      cli_putfloat(g_ltic.centre_v, 3);
         cli_putln(g_ltic.centre_v == 0.0f ? " (auto=range mid)" : "");
-        /* THIS STATE BELONGS TO ALGORITHM 10 AND TO NOTHING ELSE. It is
-         * persisted, so under any other algorithm LL was reporting where the
-         * three-stage loop stopped the last time it ran — possibly in a
-         * previous session, since the value is recalled from flash. Printed
-         * without that qualification beside the live LTIC parameters, it read
-         * as the current state of whatever loop is running now.
+        /* THIS STATE BELONGS TO ALGORITHM 10 AND TO NOTHING ELSE. It
+         * is persisted, so under any other algorithm it would report
+         * where the three-stage loop stopped the last time it ran —
+         * possibly in a previous session, since the value is recalled
+         * from flash — read next to the live LTIC parameters as if it
+         * were the current state of whatever loop is running now.
          *
-         * The ternary was the second half of the fault: every value that was
-         * neither ACQ nor DPLL printed as LOCK, so a byte that had never been
-         * written, or had been recalled from an older settings layout, claimed
-         * the most reassuring of the three states rather than the least. */
+         * Guard the default case too: a byte that has never been
+         * written, or was recalled from an older settings layout, is
+         * neither ACQ nor DPLL, and must not default to printing as
+         * the most reassuring of the three states. */
         if (gCtrl.active_algo == 10) {
             const char *sn = (g_ltic.state == LTIC_ACQ)  ? "ACQ"  :
                              (g_ltic.state == LTIC_DPLL) ? "DPLL" :
@@ -1686,10 +1855,9 @@ static void dispatch(char *line)
     }
 
     /* ---- LT [0|1] — show UTC or local time --------------------------------
-     * The help has always documented this and g_show_local_time has always been
-     * read by the display and report paths, but the handler itself was never
-     * written, so the verb silently did nothing. Implemented here to match what
-     * the help promises. Saved by ES with the rest of the timezone group. */
+     * Sets g_show_local_time, read by the display and report paths to
+     * choose UTC or local time. Saved by ES with the rest of the timezone
+     * group. */
     if (cli_ieq(verb, "LT")) {
         if (arg == NULL) {
             cli_puts("Time display: ");
@@ -1868,20 +2036,21 @@ static void dispatch(char *line)
         } else if (cli_ieq(arg, "LTIC")) {
             cli_putln("Saving LTIC params...");
             settings_save_partial(SET_LTIC);
-            /* The detector calibration lives in TWO places and the other one
-             * wins at boot: LC writes ns_per_volt / zero_offset / range_ns to
-             * the live-store slot (live_store_request_save at the end of
-             * do_ltic_calibrate), and setup() applies the settings block FIRST
-             * and the live slot AFTER it. So an LNV/LZO/LRN set by hand and
-             * saved here was silently overwritten by the last LC result on the
-             * next reset — measured 25.08: LNV was set to 1252, saved, and the
-             * board came back up on 2649.3914 with no complaint.
+            /* The detector calibration lives in TWO places and the other
+             * one wins at boot: LC writes ns_per_volt / zero_offset /
+             * range_ns to the live-store slot (live_store_request_save at
+             * the end of do_ltic_calibrate), while setup() applies the
+             * settings block FIRST and the live slot AFTER it. Saving an
+             * LNV/LZO/LRN set by hand to the settings block alone is
+             * therefore silently overwritten by the last LC result at the
+             * next reset — measured: LNV set to 1252 and saved, board came
+             * back up on 2649.3914 with no complaint.
              *
-             * Refreshing the live slot here makes the two agree, so it no
-             * longer matters which is applied last. Reordering the two loads
-             * would have been the other fix, but LC saves ONLY to the live
-             * slot, so making the settings block authoritative would have
-             * stopped an ordinary LC surviving a reboot. */
+             * Refreshing the live slot here as well makes the two agree,
+             * so it no longer matters which is applied last. Reordering
+             * the two loads would be the other fix, but LC saves ONLY to
+             * the live slot, so making the settings block authoritative
+             * would stop an ordinary LC surviving a reboot. */
             live_store_request_save();
             cli_putln("Done.");
         } else if (cli_ieq(arg, "FLAGS")) {
@@ -1931,10 +2100,8 @@ static void dispatch(char *line)
 
         if (!h.counting) {
             cli_putln("Corrections: NOT COUNTING - loop not locked, calibrating,");
-            /* Algorithms 12 and 13 used to land here for a reason this line
-             * denied: they were excluded outright by counting_now(). They are
-             * counted now, so the only algorithms without a lock state really
-             * are 0-9 and the sentence is true again. */
+            /* Algorithms 12 and 13 are counted by counting_now(), leaving
+             * only 0-9 without a lock state to gate on. */
             cli_putln("  or running algorithm 0-9 (no lock state to gate on).");
         }
         snprintf(line, sizeof(line),
@@ -1992,9 +2159,10 @@ static void dispatch(char *line)
                 snprintf(t, sizeof(t), "m_gain=%.3f", v); cli_putln(t);
                 /* Check it against the gain CT measured, and say so here as
                  * well as in the loop. MG and algorithm 11's LG are both
-                 * printed "LSB per ns" and are different quantities; copying LG
-                 * into MG cost a 2.3 hour limit cycle on 26.08 (2.130 against a
-                 * measured 31.3). Beyond a factor of four this is not tuning. */
+                 * printed "LSB per ns" and are different quantities;
+                 * copying LG into MG produced a 2.3 hour limit cycle at
+                 * 2.130 against a measured 31.3. Beyond a factor of four
+                 * this is not tuning. */
                 {
                     double der = (g_pid[7].Kp > 100.0)
                                ? ((double)g_pid[7].Kp / 0.40 / 100.0) : 0.0;
@@ -2020,6 +2188,18 @@ static void dispatch(char *line)
                 cli_puts("m_run_level="); cli_putint((int)v);
                 cli_manual_save("ES ALGO12");
             } else cli_reject("MR: 0..10 (level at which a correction is forced)"); }
+        return;
+    }
+    if (cli_ieq(verb, "MM")) {                 /* how a correction reaches the pin */
+        if (arg != NULL) {
+            if ((arg[0] == '0' || arg[0] == '1') && arg[1] == '\0') {
+                g_mlacc_mode = (uint8_t)(arg[0] - '0');
+            } else { cli_reject("MM: 1 = calm (default), 0 = original correction path"); return; }
+        }
+        cli_puts("m_mode="); cli_putint(g_mlacc_mode);
+        cli_putln(g_mlacc_mode == MLACC_MODE_CALM ? " (calm: ramped)"
+                                                  : " (original correction path)");
+        if (arg != NULL) cli_manual_save("ES ALGO12");
         return;
     }
     /* ---- Algorithm 13: Kalman ------------------------------------------ */
@@ -2053,27 +2233,48 @@ static void dispatch(char *line)
                 else          snprintf(t, sizeof(t), "k_T=%u s", (unsigned)g_kf_horizon_s);
                 cli_putln(t);
                 cli_putln("  saved");
-                /* Said here because the loop cannot say it any other way. The
-                 * process noise Sg is seeded and capped at R/KT^3, so a long
-                 * horizon forces the ESTIMATOR to be as slow as the CONTROLLER -
-                 * and those are different things. Past a few hundred seconds the
-                 * cap binds permanently and the loop stops being able to follow
-                 * its own oscillator: replayed, phase sd 0.64 -> 2.82 ns at
-                 * KT 300 and 3.04 -> 47.6 ns at KT 1000. Removing the cap fixes
-                 * KT 1000 and brings the ratchet straight back at KT 100, so
-                 * there is no setting of it that serves both.
+                /* Said here because the loop cannot say it any other way.
+                 * The process noise Sg is seeded and capped at R/KT^3, so
+                 * a long horizon forces the ESTIMATOR to be as slow as the
+                 * CONTROLLER - and those are different things. Past a few
+                 * hundred seconds the cap binds permanently and the loop
+                 * stops being able to follow its own oscillator: replayed on
+                 * one night's plant, phase sd 0.64 ns at KT 100, 1.81 at
+                 * KT 300 and 9.3 at KT 1000. Removing the cap fixes KT 1000
+                 * and brings the ratchet straight back at KT 100, so there
+                 * is no setting of it that serves both.
                  *
-                 * THAT PARAGRAPH USED TO END "separating the two needs Sg
-                 * measured from the oscillator, which needs a reference this
-                 * board does not have." It was wrong. Separating them needs a
-                 * second variable and nothing else - see KC and the derivation
-                 * at g_kf_ctl_s - because the controller acts on an ESTIMATE
-                 * whose white noise the filter has already removed. KT is now
-                 * the estimator's horizon alone, and 100 s remains the measured
-                 * setting for it. */
-                if (!isR && !isQ && g_kf_horizon_s > 200u)
-                    cli_putln("  ^ above ~200 s the filter sits against its Q ceiling"
-                              " and tracks poorly. 100 s is the measured setting.");
+                 * Separating the two needs nothing more than a second
+                 * variable - see KC and the derivation at g_kf_ctl_s -
+                 * because the controller acts on an ESTIMATE whose white
+                 * noise the filter has already removed. KT is the
+                 * estimator's horizon alone; why the default is 100 s is
+                 * at g_kf_ctl_s.
+                 *
+                 * WHICH SIDE OF 100 s IS RIGHT DEPENDS ON THE OSCILLATOR
+                 * (build 67). The figures above are the author's board, whose
+                 * OCXO walks fast; up to build 66 this warning said "tracks
+                 * poorly" to every board, and on a quiet OCXO (Dan's, against
+                 * a rubidium) the model puts the right KT at 300-1000 s. So it
+                 * says what to watch instead. A cold start no longer pays for
+                 * a long KT either: acquisition uses KT up to 100 s
+                 * (kf_acq_horizon in gpsdo_algorithms.cpp).
+                 *
+                 * AND NOT BY THE CEILING (build 71). Up to build 70 this said
+                 * to shorten KT if KL showed Q at its ceiling with the phase
+                 * wandering. Dan's board (28-29.10) sat at the ceiling at KT
+                 * 1000 and was still better than at KT 500: ADEV flat at
+                 * 2.9e-12 from 40 to 400 s, where 500 s had a 4e-12 hump at
+                 * 100-150 s. What presses Q up is as often the GPS side's own
+                 * slow wander, or the detector's, as the oscillator's - and a
+                 * faster loop copies it; the ceiling cannot tell them apart. */
+                if (!isR && !isQ && g_kf_horizon_s > 200u) {
+                    cli_putln("  ^ a long KT trusts the oscillator longer: right for a quiet");
+                    cli_putln("    one, wrong for one that walks. Judge it by ADEV, a run at");
+                    cli_putln("    each value - Q at its ceiling in KL does not say KT is too");
+                    cli_putln("    long. 100 s is the default; a cold start acquires at 100 s");
+                    cli_putln("    whatever KT says.");
+                }
             }
         }
         return;
@@ -2105,10 +2306,34 @@ static void dispatch(char *line)
                     cli_putln("  ^ a long KC tolerates a standing phase error for"
                               " that long, and books it into the frequency state.");
                 if (k.ctl_s < 15u)
-                    cli_putln("  ^ below ~15 s the phase stops improving and the DAC"
-                              " moves more. The measured knee is 20-30 s.");
+                    cli_putln("  ^ below ~15 s the phase gains little and the DAC"
+                              " moves much more.");
             }
         }
+        return;
+    }
+    /* KF (build 69): the controller's horizon while a disturbance lasts - see
+     * g_kf_fast_s in gpsdo_algorithms.cpp. Saved with KR/KQ/KT/KC. */
+    if (cli_ieq(verb, "KF")) {
+        char t[80];
+        if (arg != NULL) {
+            double v = atof(arg);
+            if (!(v == 0.0 || (v >= 10.0 && v <= 250.0))) {
+                cli_reject("KF: 10..250 s, or 0 for off");
+                return;
+            }
+            g_kf_fast_s = (uint16_t)v;
+            kf_store_save();
+        }
+        kf_stats_t k; kf_get_stats(&k);
+        if (g_kf_fast_s == 0u)
+            snprintf(t, sizeof(t), "k_F=0 (off)   (in force: %u s)", (unsigned)k.ctl_s);
+        else
+            snprintf(t, sizeof(t), "k_F=%u s%s   (in force: %u s%s)", (unsigned)g_kf_fast_s,
+                     g_kf_fast_s == 16u ? " (default)" : "", (unsigned)k.ctl_s,
+                     k.dist ? ", disturbance" : "");
+        cli_putln(t);
+        if (arg != NULL) cli_putln("  saved");
         return;
     }
     if (cli_ieq(verb, "KL")) {
@@ -2120,6 +2345,9 @@ static void dispatch(char *line)
                  (double)g_kf_q,    g_kf_q    <= 0.0f ? "(adapt)" : "",
                  (unsigned)g_kf_horizon_s, (unsigned)k.ctl_s,
                  g_kf_ctl_s == 0u ? "(auto)" : "");
+        cli_putln(t);
+        snprintf(t, sizeof(t), "  KF=%u s%s   disturbance: %s", (unsigned)g_kf_fast_s,
+                 g_kf_fast_s == 0u ? " (off)" : "", k.dist ? "yes, KF in force" : "no");
         cli_putln(t);
         snprintf(t, sizeof(t), "  in use: R=%.2f ns  Q=%.3e (ns/s)^2/s%s",
                  (double)k.r_ns, (double)k.q,
@@ -2136,8 +2364,8 @@ static void dispatch(char *line)
         if (k.q_adapting) {
             snprintf(t, sizeof(t), "          ratio %.2f (%s)   Q while tracking: %.3e .. %.3e",
                      (double)k.q_ratio,
-                     (k.q_ratio > 1.05f) ? "wants more Q"
-                                         : ((k.q_ratio < 0.95f) ? "wants less" : "consistent"),
+                     (k.q_ratio > 1.05f) ? "Q pushed up"
+                                         : ((k.q_ratio < 0.95f) ? "Q pushed down" : "consistent"),
                      (double)k.q_lo, (double)k.q_hi);
             cli_putln(t);
         }
@@ -2149,23 +2377,28 @@ static void dispatch(char *line)
         snprintf(t, sizeof(t), "          Sf=%.3e ns^2/s (phase walk, measured)",
                  (double)k.sf);
         cli_putln(t);
-        /* The ceiling is the loop refusing to run more than twice as fast as
-         * its horizon. Sitting on it is not a fault - it is the filter being
-         * told the detector is noisier than the innovations think - but it is
-         * the state that used to end in 195x the seed and a DAC moving four
-         * times more than it needed to, so it is worth naming. */
+        /* The ceiling is the loop refusing to run more than twice as
+         * fast as its horizon. Sitting on it is not a fault - it is
+         * the filter being told the detector is noisier than the
+         * innovations think - but an adaptation pinned there can run
+         * to many times the seed and drive the DAC far more than the
+         * innovations justify, so it is worth naming. Up to build 70
+         * it was named as "innovations want a loop faster than KT",
+         * and the ratio above as "wants more Q": read as advice to
+         * shorten KT, which on Dan's board (28-29.10) made it worse - see
+         * the note KT prints above 200 s. Both now say what happens,
+         * not what to do. */
         if (k.q_at_max) {
-            snprintf(t, sizeof(t), "  ^ Q at ceiling %.3e: innovations want a loop"
-                                   " faster than KT %u s.", (double)k.q_max,
-                     (unsigned)g_kf_horizon_s);
+            snprintf(t, sizeof(t), "  ^ Q at ceiling %.3e (KT %u s): the innovations are larger",
+                     (double)k.q_max, (unsigned)g_kf_horizon_s);
             cli_putln(t);
+            cli_putln("    than the oscillator model explains - GPS and detector wander too.");
+            cli_putln("    Not by itself a reason to shorten KT: compare ADEV.");
         }
-        /* THE OTHER RAIL, and it was invisible until 02.09. Three captures on
-         * one board read Q = 7.777e-06, 9.936e-08 and 7.949e-07 at KT 100, 40
-         * and 20; the first was the ceiling and the other two were the floor,
-         * each to four significant figures. KL reported only the first, so two
-         * of the three looked like a healthy adaptation and a whole KT sweep
-         * was spent measuring where a rail happened to sit. */
+        /* THE OTHER RAIL: Q sitting on the floor rather than adapting,
+         * easy to miss because it looks like a healthy value unless
+         * both rails are reported (see kf_get_stats() in
+         * gpsdo_algorithms.cpp). */
         if (k.q_at_min) {
             snprintf(t, sizeof(t), "  ^ Q on the FLOOR %.3e: the adaptation has"
                                    " walked all the way down.", (double)k.q_min);
@@ -2200,22 +2433,19 @@ static void dispatch(char *line)
         snprintf(t, sizeof(t), "  gate rejected %lu readings, %.1f%% over the last ~5 min",
                  (unsigned long)k.rejects, (double)k.rej_pct);
         cli_putln(t);
-        /* Said here because it is the setting that causes a rejection storm and
-         * the one nobody remembers changing. A twelve-hour run on 29.08 threw
-         * away 11% of its readings with KR pinned at 2.5 ns; the same board
-         * measuring R rejected none. */
+        /* Said here because it is the setting that causes a rejection
+         * storm and the one nobody remembers changing. A twelve-hour
+         * run with KR pinned at 2.5 ns threw away 11% of its readings;
+         * the same board measuring R rejected none. */
         if (k.r_pinned && k.rej_pct >= 2.0f)
             cli_putln("  ^ KR is PINNED. A rate above a few per cent usually means it is"
                       " too small - try KR 0 (measure).");
-        /* And the same for KQ, because the 01.09 capture cost an evening's
-         * analysis to this: the loop was moving the DAC six times less than the
-         * week before, which looked like the new ceiling on the adaptation
-         * working, and it was not — KQ had been pinned at the seed in an
-         * earlier experiment and recalled from the flash ring on every boot
-         * since, so the adaptation was never running at all. The header line
-         * says so by omitting "(adapt)", which is not enough of a signal for a
-         * setting that survives reboots and changes what every other number in
-         * this report means. */
+        /* Same for KQ: it can be pinned at the seed value from an earlier
+         * experiment and recalled from the flash ring on every boot, so the
+         * adaptation never runs even though nothing else looks wrong. The
+         * header line signals this only by omitting "(adapt)", which is easy
+         * to miss for a setting that survives reboots and changes what every
+         * other number in this report means. */
         if (!k.q_adapting)
             cli_putln("  ^ KQ is PINNED - the adaptation and its ceiling are OFF."
                       " KQ 0 restores them.");
@@ -2231,9 +2461,9 @@ static void dispatch(char *line)
         /* Separate from MG on purpose. The gain is a property of the
          * OSCILLATOR — LSB per ns, and a different OCXO has a different Vctl
          * sensitivity — while the limits are a property of the PHASE NOISE the
-         * board sees, which belongs to the site and the receiver. They shared
-         * one `if` until now, so "measured gain with hand-set limits" — exactly
-         * what a noisy installation wants — could not be asked for. */
+         * board sees, which belongs to the site and the receiver. Keeping them
+         * apart lets "measured gain with hand-set limits" be asked for — the
+         * combination a noisy installation actually wants. */
         static const char *const NAMES[4] = {
             "default: sigma formula", "stored table", "sigma formula", "measured"
         };
@@ -2257,8 +2487,8 @@ static void dispatch(char *line)
     if (cli_ieq(verb, "MFT")) {                /* target s between noise fires */
         /* The one number MF 3 leaves to the user, and it is a statement about
          * what you want rather than a coefficient: how long between corrections
-         * that noise alone triggered. Every per-level multiplier follows from
-         * it, which is the job the hard-coded "8 sigma" was doing by hand. */
+         * that noise alone triggers. Every per-level multiplier follows from
+         * it, computed rather than fixed. */
         char t[72];
         unsigned cur = (g_mlacc_thr_tgt_s > 0u) ? (unsigned)g_mlacc_thr_tgt_s
                                                 : (unsigned)MLACC_THR_TGT_DEFAULT;
@@ -2301,18 +2531,18 @@ static void dispatch(char *line)
              * means. The stored value is in accumulator units; the phase it
              * corresponds to is that divided by 2^(level+2), since the level
              * holds 2^(level+1) samples of (2*phase + 1). Printing only the
-             * former — and calling it "ns", as this did — invites tuning a
-             * number nobody can relate to the oscilloscope. */
+             * former as "ns" invites tuning a number nobody can relate to the
+             * oscilloscope. */
             snprintf(t, sizeof(t), "lim[%ld]=%ldns (%ld units over %us)",
                      n, (long)(g_mlacc_lim[n] >> (n + 2)),
                      (long)g_mlacc_lim[n],
                      (unsigned)(1u << (n + 1)));
             cli_putln(t);
         } else {
-            /* The value is nanoseconds - the unit humans (and Alan's e-mails)
-             * speak. Stored as accumulator units = ns << (level+2): the level
-             * holds 2^(level+1) samples of (2*phase + 1). Units stay the
-             * storage format (settings block unchanged), ns is the CLI face. */
+            /* The value is nanoseconds - the unit humans speak. Stored as
+             * accumulator units = ns << (level+2): the level holds 2^(level+1)
+             * samples of (2*phase + 1). Units stay the storage format (settings
+             * block unchanged), ns is the CLI face. */
             long v = atol(p2);
             long u = v << (n + 2);
             if (v >= 1 && u <= 500000) {
@@ -2431,14 +2661,15 @@ static void dispatch(char *line)
 
     if (cli_ieq(verb, "FA") || cli_ieq(verb, "FAD") || cli_ieq(verb, "FAL")) {
         /* Frequency-averaging window for the LTIC damping term, per state. A
-         * measured ~220 s limit cycle (Dan Wiering's Rb reference, algo 10)
-         * traces to the group delay of the long avg100 landing near quadrature;
-         * a shorter window is the candidate fix. Split by state so it can be
-         * tried in acquisition (FAD) or steady state (FAL) independently — the
-         * way to find which one the cycle lives in. FA sets both at once. 100 is
-         * the historical value in each and changes nothing. Only the LTIC
-         * frequency term is affected; escape detection, self-learning, the
-         * state machine and the phase PI all stay on avg100. */
+         * measured ~220 s limit cycle (seen on a Rb reference board, algo 10)
+         * traces to the group delay of the long avg100 landing near
+         * quadrature; a shorter window is the candidate fix. Split by state so
+         * it can be tried in acquisition (FAD) or steady state (FAL)
+         * independently — the way to find which one the cycle lives in. FA
+         * sets both at once. 100 matches the compiled-in default, so setting
+         * it to 100 changes nothing. Only the LTIC frequency term is affected;
+         * escape detection, self-learning, the state machine and the phase PI
+         * all stay on avg100. */
         bool set_dpll = cli_ieq(verb, "FA") || cli_ieq(verb, "FAD");
         bool set_lock = cli_ieq(verb, "FA") || cli_ieq(verb, "FAL");
         if (arg == NULL) {
@@ -2624,11 +2855,11 @@ static void dispatch(char *line)
             }
         }
 
-        /* Uptime source and the MCU clock error that made it worth changing.
-         * Uptime is counted from the PPS now, so this number no longer affects
-         * the clock — but it is the only figure the box has about its own
-         * crystal, it costs nothing to keep, and it is what would tell you the
-         * board came up on the internal RC oscillator instead of the crystal. */
+        /* MCU clock error, kept for what it reveals about startup, not for
+         * timekeeping: uptime is counted from the PPS, so this figure does not
+         * affect the clock. It is the only reading the box has of its own
+         * crystal, costs nothing to keep, and is what would show the board
+         * came up on the internal RC oscillator instead of the crystal. */
         {
             uint32_t last = gUpPpsMs;
             bool     live = (last != 0u) && ((millis() - last) < 1500u);
@@ -2666,12 +2897,12 @@ void vCliTask(void *pvParameters)
     {
         if (CLI_SERIAL.available() > 0) {
             char c = (char)CLI_SERIAL.read();
-            /* Line-based input only: RP/RR pause and resume the telemetry.
-             * A bare-TAB/bare-ESC toggle was tried here after Alan's
-             * suggestion and REMOVED: real terminals and the tuner send
-             * CR/LF-terminated lines and never a bare TAB or ESC, so the
-             * feature could not be reached from the tools people actually
-             * use. RP and RR do the same job and work everywhere. */
+            /* Line-based input only: RP/RR pause and resume the telemetry. A
+             * bare-TAB/bare-ESC toggle was tried and removed: real terminals
+             * and the tuner send CR/LF-terminated lines and never a bare TAB
+             * or ESC, so the feature could not be reached from the tools
+             * people actually use. RP and RR do the same job and work
+             * everywhere. */
             if (c == '\n' || c == '\r') {
                 if (pos > 0) {
                     buf[pos] = '\0';

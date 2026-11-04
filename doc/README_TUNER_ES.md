@@ -47,12 +47,12 @@ escribió. Al conectar lee la versión de la propia placa y compara:
   la medida en que la haya ofrecido:
 
   ```
-  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
+  connected — firmware v1.08.71rt  2026-10-29 23:34  CRC 8EED4610
   ```
 
   Los tres datos responden a preguntas distintas. La **versión** dice con qué
   protocolo habla el afinador. El **build** — dentro del nombre desde el build
-  56, `.57rt` (el propio build 56 escribía `-rt56`); un firmware anterior
+  56, `.71rt` (el propio build 56 escribía `-rt56`); un firmware anterior
   (`v1.07-rtos`) lo envía aparte y la línea
   muestra `build N` — y la hora de compilación dicen de qué árbol de fuentes
   salió. El **CRC** dice qué binario está corriendo realmente, y
@@ -99,7 +99,7 @@ superiores depende del algoritmo que reporte la placa:
 | | Algoritmos 10 / 11 (LTIC) | Algoritmo 12 | Algoritmo 13 | Algoritmos 0-9 |
 |---|---|---|---|---|
 | Superior | Fase `dph` (ns) | Error de fase `ph` (ns) | **Estimación** de fase `ph` (ns) | Deriva aprendida (LSB) |
-| Central | `Vphase` del detector (V), con guías de banda | Tensión de control `Vctl` (V) | `Vphase` del detector (V), con guías de banda | Tensión de control `Vctl` (V) |
+| Central | `Vphase` del detector (V), con guías de banda | Tensión de control ordenada `Vcmd` (V) | `Vphase` del detector (V), con guías de banda | Tensión de control ordenada `Vcmd` (V) |
 | Inferior | Error de frecuencia (Hz) | Error de frecuencia (Hz) | Error de frecuencia (Hz) | Error de frecuencia (Hz) |
 
 Solo los lazos LTIC tienen detector de fase, así que bajo cualquier otro
@@ -113,6 +113,12 @@ deriva saldría plana, y su fase viene directamente del detector y no a través 
 un filtro de lazo, de modo que no es la misma magnitud que dibuja `dph`. Las
 guías de banda del detector desaparecen siempre que el panel central muestra en
 su lugar una tensión de control.
+
+La tensión de control dibujada es la **ordenada**: `Vcmd` = código PWM / 65536
+× `DV`, con `DV` leído de la placa al conectar. La lectura del ADC (`Vctl`)
+lleva cerca de 1 mV de ruido — unos veinte LSB del código — mientras que un
+lazo asentado mueve el código en uno o dos, así que un panel de `Vctl`
+mostraba el ADC y no el lazo. `Vctl` sigue en los campos en vivo y en el log.
 
 El algoritmo 13 dibuja lo que el filtro de Kalman CREE que es la fase, no la
 lectura de este segundo — esa estimación es justamente el sentido de tener un
@@ -220,6 +226,15 @@ Sustituye `Lat` / `Lon` / `Alt` del receptor por marcadores **sólo en el archiv
 guardado** — el Raw monitor y las gráficas siguen mostrando tu fix real. El
 número de satélites, el HDOP y el indicador TIME se conservan: son diagnósticos
 y no dicen nada sobre dónde estás.
+
+Desde el build 67 atrapa también una línea de posición dañada por el camino —
+sin sus primeros caracteres o pegada a la siguiente (el enlace serie pierde a
+veces un byte, y dos líneas así pasaron una vez enteras): cualquier número tras
+una etiqueta `Lat:` o `Lon:`, aunque haya perdido sus cifras enteras, los
+números justo antes de `Lon:` y de `Alt:`, etiquetas pegadas a la línea
+anterior y, en una línea con las palabras del propio informe, todo número con
+forma de coordenada (de cuatro a siete decimales). Lo comprueba
+`tools/redact_test.py`, junto con que nada más de la telemetría cambie.
 
 Un registro de telemetría es justo lo que acaba en un foro o en manos de quien
 se ofreció a medir tu placa, y cada segundo lleva una posición con seis

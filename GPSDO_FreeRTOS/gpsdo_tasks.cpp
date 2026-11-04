@@ -1,7 +1,7 @@
 /**
  * gpsdo_tasks.cpp — Sensor, Display and Uptime tasks
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.71rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -54,6 +54,8 @@ static bool i2c_probe(uint8_t addr)
 float  g_bmp_temp = 0.0f, g_bmp_pres = 0.0f;
 float  g_aht_temp = 0.0f, g_aht_humi = 0.0f;
 float  g_ina_volt = 0.0f, g_ina_curr = 0.0f;
+float  g_lm75_temp = 0.0f;   /* LM75 [degC]; meaningful only while g_lm75_valid */
+bool   g_lm75_valid = false; /* answered at boot and on the last reads (build 68) */
 
 /* ---- Damping-window sizes (FA / FAD / FAL) -----------------------------
  *
@@ -74,94 +76,800 @@ volatile bool g_ltic_must_read = false;
 int16_t       g_ltic_adc_raw   = 0;
 int16_t       g_ltic_adc_avg   = 0;
 float         g_ltic_voltage   = 0.0f;
+/* Whether g_ltic_voltage is this pulse's reading or the last one published
+ * again (ltic_read_fast(): held back, or a burst not read at its edge).
+ * Algorithm 13 takes no phase from a kept second (build 66). */
+volatile bool g_ltic_kept      = false;
 /* THE SAWTOOTH THAT BELONGS TO THIS PULSE, LATCHED AT THE PULSE.
  *
- * Both display paths — the serial report and the TFT phase row — used to call
- * ubx_timtp_correction_ns() at the moment they were drawn, which returns
- * whatever qErr was decoded most recently. That is fine for the report, which
- * is gated on a change of ppscount and therefore runs on the first wake after
- * the pulse. It is wrong for the TFT, which redraws on EVERY wake of
- * vDisplayTask — and one of those wakes comes from the GPS parser, after the
- * receiver's serial burst has been consumed. The TIM-TP frame is inside that
- * burst, so by then g_qerr_ns has already advanced to the NEXT pulse, while
- * g_ltic_voltage is still this pulse's ramp. The panel was subtracting
- * qErr(N+1) from phase(N).
+ * The serial report and the TFT phase row both derive dph from
+ * g_qerr_ns and g_ltic_voltage. The report is gated on a change of
+ * ppscount, so it always runs on the first wake after the pulse and
+ * reads a matching pair. The TFT redraws on EVERY wake of
+ * vDisplayTask, including a wake from the GPS parser after the
+ * receiver's serial burst — which carries the next TIM-TP frame — has
+ * been consumed. By then g_qerr_ns has advanced to the NEXT pulse
+ * while g_ltic_voltage is still this pulse's ramp, so reading both at
+ * draw time subtracts qErr(N+1) from phase(N).
  *
- * On a receiver whose sawtooth is slow that would merely be imprecise. On this
- * one successive values are anti-correlated (corr = -0.30, period near 2-3 s),
- * so the wrong pulse's qErr ADDS the sawtooth instead of removing it: measured
- * 25.08, subtracting the neighbouring pulse takes the residual from 11.46 ns
- * to 13.6 ns, which is worse than applying no correction at all. Hence a panel
- * reading visibly larger than the log line printed in the same second, which
- * is what put us onto it.
+ * On this receiver successive qErr values are anti-correlated
+ * (corr = -0.30, period near 2-3 s), so the wrong pulse's qErr ADDS
+ * the sawtooth instead of removing it: subtracting the neighbouring
+ * pulse has been measured to take an 11.46 ns residual to 13.6 ns,
+ * worse than applying no correction at all.
  *
- * ltic_read_fast() runs ~50 us after the PPS edge, before the burst that
- * carries the next frame, so g_qerr_ns there is still this pulse's. Latch it
- * once and let every reader use the latch: the two paths then agree with each
- * other and with the loop by construction, whenever they happen to be drawn. */
+ * ltic_read_fast() runs within a millisecond of the PPS edge, before
+ * the burst that carries the next frame, so g_qerr_ns there is still
+ * this pulse's. Latch it once and let every reader use the latch: the two
+ * paths then agree with each other and with the loop by construction,
+ * whenever they happen to be drawn. */
 static float  s_ltic_qerr_ns   = 0.0f;
 
-/* ltic_read_fast — read PA1 (the TIC ramp) ~50 µs after the PPS edge, from
- * vFreqRelayTask (which is woken directly by the GPS-PPS ISR). Oversamples
- * within the one PPS slot, takes the median, applies an outlier/dead-zone
- * gate, and publishes g_ltic_voltage. Crucially it does NOT discharge and
- * NEVER switches the pin to open-drain: the Kaashoek detector self-clears
- * through leakage (~25 ms << 1 s pulse spacing), and driving the pin low was
- * both unnecessary and a way to corrupt the very charge we want to measure.
- * The pin stays INPUT_ANALOG for the whole life of the program. */
-void ltic_read_fast(void)
+/* THE READ, BUILD 62: AT THE EDGE, ON A QUIET CHIP, WITHOUT analogRead().
+ *
+ * What build 61's LB showed on the board: one analogRead() takes 54.5 us,
+ * not the ~19 this code had assumed, so its sixteen conversions ran from 64
+ * to 942 us after the edge; the cap leaks with tau ~27-30 ms, not 5 (about
+ * -0.08 codes per us at ~2300 codes); and the codes scatter 1.3-2.2 rms
+ * about a straight line. Its line, read 200 us after the edge, sat ~20 ns
+ * from where build 60's median had been, so every switch of LRM stepped the
+ * phase by that much.
+ *
+ * And with the read that clean, a one-second spike of +10..16 ns stood out
+ * on a grid of exactly 233.24 s all night - 28 of them, in both read modes.
+ * That is the beat of the GPS second against the 1 ms RTOS tick, which on
+ * this board runs 4.29 ppm off: once a beat the tick, and whatever it woke,
+ * landed on the charge pulse, and the charge moved with it. No arithmetic on
+ * the burst takes that out; the chip has to be quiet at the pulse.
+ *
+ * So the read now owns the chip around the edge:
+ *   - vFreqRelayTask predicts the next edge from the last two captures (TIM2
+ *     counts the OCXO, so the last second in its own ticks says where the
+ *     next one ends, to a tick or so), sleeps until 1-3 ms before it and
+ *     waits there with the scheduler held. LTIC_PRE_TICKS before the edge
+ *     it masks every interrupt and polls the capture flag itself, and keeps
+ *     them masked until LTIC_SETTLE_TICKS after it, when the pulse is long
+ *     over: at the pulse the core is in that loop and nothing else - no
+ *     tick, no task, no interrupt - runs. ~15 us a second, 35 at most;
+ *   - the converter is driven through its registers (CMSIS, which the HAL is
+ *     written on), not through analogRead(), which initialises it, resets it
+ *     and stops its clock on every call: LTIC_EDGE_N conversions of
+ *     ~1.4 us, the first LTIC_SETTLE_TICKS after the edge, ~90 us in all, at
+ *     the sampling time (15 cycles) and clock (PCLK2/4) analogRead() uses.
+ *     They run inside a FreeRTOS critical section, which holds the tick, the
+ *     timers and the capture interrupt until the burst is done but not the
+ *     serial ports or USB: in this core those sit above the RTOS's level, so
+ *     a GPS at 115200 baud loses nothing (at the top rates `T` can set, a
+ *     byte that ends inside the ~15 us around the edge could still overrun;
+ *     the receiver's 1 Hz output is normally idle then). A conversion one of
+ *     them stretched is left out of the line, as build 61 left out a
+ *     stretched analogRead();
+ *   - ~60 us before the edge it converts VREFINT once, with the 20 us
+ *     sampling time VREFINT needs. Each conversion begins by sharing charge
+ *     between the converter's ~4 pF sampling capacitor and the 1 nF node -
+ *     0.4 % of whatever voltage that capacitor kept from its last
+ *     conversion, up to ~9 codes. Whatever ran last (Vctl, Vcc, the last
+ *     burst) no longer decides that; it is the same every second;
+ *   - the line through the burst, against its TIM2 times, is read AT the
+ *     edge, t = 0: the charge the pulse delivered, before any of it leaked.
+ *     It depends neither on how fast the cap leaks - a Schottky's reverse
+ *     current, which grows with temperature - nor on how long a conversion
+ *     takes, and there is no reference time left to disagree about.
+ *
+ * When the edge cannot be caught that way - the first two after a boot, an
+ * early or a missed edge, a wake-up held off too long, the GPS tunnel open -
+ * the same burst is taken as soon as the capture interrupt has woken the
+ * task, timed from the captured edge and read at t = 0 just the same; only
+ * the pulse did not find a quiet chip. Such a reading is held back, as build
+ * 61 held a late one: the last reading is kept, up to LTIC_HOLD_MAX seconds
+ * in a row, and then late readings are used. A burst the line cannot stand
+ * on is held the same way, then gives way to the burst's median, carried
+ * back to the edge along the slope of the last line that stood (from no
+ * further than 1 ms; beyond that, as it is); one that starts more than
+ * LTIC_REACH_TICKS after its edge counts as such, and so does a burst the
+ * converter never finished, which shows as 0 V, as it did before. A second
+ * with no new edge (the 2 s timeout) gets the burst's median, as before.
+ * LRM 0 is build 60's read, unchanged, for an A/B - and as each mode reads
+ * the decay at a different time, an LC calibration belongs to the mode it
+ * ran in. LB prints the last burst. */
+#define LTIC_PRECHARGE_TICKS  600u  /* TIM2 ticks (60 us) before the edge: VREFINT              */
+#define LTIC_PRE_TICKS        100u  /* every interrupt masked from 10 us before the edge...     */
+#define LTIC_SETTLE_TICKS      50u  /* ...to 5 us after it, the first conversion                */
+#define LTIC_WAIT_TICKS       200u  /* the edge awaited this long past its time (20 us)         */
+#define LTIC_REACH_TICKS     3000u  /* a burst starting later is not read at its edge (300 us)  */
+#define LTIC_CARRY_TICKS    10000u  /* nor its median carried back along a line from past 1 ms */
+#define LTIC_FIT_SLACK          3u  /* ticks a conversion may run over the shortest            */
+#define LTIC_FIT_MIN           16   /* conversions the line needs                               */
+#define LTIC_FIT_OUTLIER     6.0f   /* codes off the line, at the least, to be dropped          */
+#define LTIC_FIT_DROPS         20   /* conversions that may be dropped as off the line          */
+#define LTIC_FIT_THIRD       6.0f   /* codes, at the least, every third conversion is off by... */
+#define LTIC_FIT_THIRD_SIG   3.0f   /* ...and times the burst's noise, to be left out whole     */
+#define LTIC_BEND_MAX        3.5f   /* codes at the edge a bend must differ from the board's by */
+#define LTIC_BEND_TRACK        32   /* seconds the board's own bend is averaged over            */
+#define LTIC_BEND_CLIP       1.0f   /* codes, at most, one burst counts for in that average     */
+#define LTIC_BEND_WIN          15   /* the last bursts whose median it moves to, when that far  */
+#define LTIC_QUIET_MS        150u   /* the CLI holds its output this long before an edge...     */
+#define LTIC_QUIET_AFTER_MS    2u   /* ...until this long after it                              */
+#define LTIC_HOLD_MAX           3   /* seconds in a row the last reading may be kept            */
+#define LTIC_VREFINT_CH       17u   /* ADC1_IN17 on every STM32F4                               */
+#define LTIC_ADC_GUARD       1000u  /* polls of one conversion before it is given up            */
+#define LTIC_MASK_GUARD      1000u  /* polls with interrupts masked, should TIM2 stop          */
+#define LTIC_SPIN_GUARD     50000u  /* polls with them enabled (~5-10 ms), likewise            */
+static_assert(LTIC_EDGE_N >= LTIC_FIT_MIN && LTIC_EDGE_N >= LTIC_OVERSAMPLE && LTIC_EDGE_N <= 64,
+              "ltic_burst_t.used is a 64-bit mask, and LRM 0 shares the burst's arrays");
+static_assert(LTIC_ADC_CHANNEL < 10, "the pin's sampling time is set in SMPR2");
+
+#if defined(ADC1_COMMON)
+  #define LTIC_ADC_COMMON ADC1_COMMON
+#elif defined(ADC123_COMMON)
+  #define LTIC_ADC_COMMON ADC123_COMMON
+#else
+  #define LTIC_ADC_COMMON ADC
+#endif
+
+uint8_t g_ltic_read_mode = LTIC_READ_EDGE;  /* LRM */
+
+/* The last burst, for LB, and the burst itself: the conversions are written
+ * straight into it. Only FreqRelay writes it, no other task can preempt that
+ * one, and it does not block between the burst and the end of the read; LB
+ * copies it with the scheduler held. Static: FreqRelay's whole stack is 192
+ * words (STACK_ISR_RELAY). */
+static ltic_burst_t s_ltic_burst;
+
+/* What became of every second since boot, for LB: why a reading was kept is
+ * not visible in any one burst. Written by FreqRelay only, copied with the
+ * scheduler held. */
+static ltic_counts_t s_ltic_counts;
+
+static uint32_t s_cap1, s_cap0;             /* the last two edges TIM2 captured  */
+static bool     s_cap_ok;                   /* ...one second apart               */
+static uint32_t s_tref;                     /* the burst's times count from this */
+static int16_t  s_bvref = -1;               /* its VREFINT conversion, codes     */
+static uint8_t  s_bn;                       /* its conversions                   */
+
+/* Clock on, set up, powered up; ready t_STAB (3 us) later, VREFINT 10 us. */
+static void ltic_adc_on(void)
 {
-    /* THE WHOLE MEASUREMENT IS ATOMIC AGAINST OTHER TASKS, AND IT HAD TO BE.
-     *
-     * This part is 50 µs of settling followed by sixteen conversions, and both
-     * halves were interruptible by any other task. Two things follow from that,
-     * and both were measured on the bench rather than reasoned about here:
-     *
-     * 1. THE ADC IS SHARED. PA1 is ADC1_IN1 and PIN_VCTL_ADC (PB1) is
-     *    ADC1_IN9 - one ADC on this part - and the core's analogRead()
-     *    reconfigures the channel on a shared handle and is not reentrant.
-     *    ControlTask reads Vctl/Vcc/Vdd every 200 ms with no interlock at all.
-     *    The 03.09 10:08 capture caught the consequence on the harmless side:
-     *    Vctl, a 10-deep moving average, dropped to exactly 0.900 of its value
-     *    seven times - which is one conversion returning zero, to four figures
-     *    (1.800 -> 1.620). On this side the same collision corrupts a PHASE.
-     * 2. THE 50 µs IS A DEADLINE, not a delay. The ramp decays with a ~5 ms
-     *    leakage constant, so a read that slips by 1 ms lands 20 % down it.
-     *    A task switch inside the settle was therefore a 20 % phase error with
-     *    no outward sign.
-     *
-     * Suspending the scheduler fixes both without a mutex and without the PPS
-     * path ever waiting on anything: no task can run here, so no task can touch
-     * the ADC or displace the deadline. INTERRUPTS STAY ENABLED - the PPS
-     * capture, the timers and SysTick are untouched - and the section is about
-     * 350 µs, which is 7 % of the leakage constant and 0.035 % of a second.
-     *
-     * ControlTask does the same around its own three conversions (about 60 µs),
-     * so the cheap side yields to the deadline instead of the other way round.
-     * A mutex was considered and rejected: the only correct timeout on this
-     * side is zero, and a zero-timeout take that fails leaves the choice
-     * between racing anyway and dropping a phase measurement. */
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    (void)RCC->APB2ENR;                          /* the clock runs before the first write */
+    LTIC_ADC_COMMON->CCR = (LTIC_ADC_COMMON->CCR & ~ADC_CCR_ADCPRE)
+                         | ADC_CCR_ADCPRE_0 | ADC_CCR_TSVREFE;     /* PCLK2/4, VREFINT on */
+    ADC1->CR1   = 0u;                            /* 12 bits, no scan, no interrupts        */
+    ADC1->SMPR1 = ADC1->SMPR1 | (7u << (3u * (LTIC_VREFINT_CH - 10u)));   /* VREFINT: 480 */
+    ADC1->SMPR2 = (ADC1->SMPR2 & ~(7u << (3u * LTIC_ADC_CHANNEL)))
+                | (1u << (3u * LTIC_ADC_CHANNEL));                 /* the pin: 15 cycles  */
+    ADC1->SQR1  = 0u;                            /* one conversion per start               */
+    ADC1->SQR3  = LTIC_ADC_CHANNEL;
+    ADC1->CR2   = ADC_CR2_EOCS | ADC_CR2_ADON;
+}
+
+/* ...and left as analogRead() leaves it: reset, clock stopped. */
+static void ltic_adc_off(void)
+{
+    ADC1->CR2 = 0u;
+    RCC->APB2RSTR |=  RCC_APB2RSTR_ADCRST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_ADCRST;
+    RCC->APB2ENR  &= ~RCC_APB2ENR_ADC1EN;
+}
+
+/* One conversion of the channel in SQR3: the code, or -1 if it never ends. */
+static inline int32_t ltic_adc_conv(void)
+{
+    ADC1->CR2 = ADC_CR2_EOCS | ADC_CR2_ADON | ADC_CR2_SWSTART;
+    for (uint32_t g = 0; !(ADC1->SR & ADC_SR_EOC); )
+        if (++g > LTIC_ADC_GUARD) return -1;
+    return (int32_t)(ADC1->DR & 0xFFFu);
+}
+
+/* VREFINT into the sampling capacitor, so that what the first conversion of
+ * the pin shares with the node is the same every second. Interrupts may run:
+ * none of them touches the converter. */
+static int16_t ltic_precharge(void)
+{
+    ADC1->SQR3 = LTIC_VREFINT_CH;
+    int32_t v = ltic_adc_conv();
+    ADC1->SQR3 = LTIC_ADC_CHANNEL;
+    return (int16_t)v;
+}
+
+/* The burst, in a critical section: LTIC_EDGE_N conversions of the pin, each
+ * one's start kept in TIM2 ticks after `ref` and its length in ticks, into
+ * the record LB prints. Returns how many were taken. */
+static uint8_t ltic_burst(uint32_t ref)
+{
+    uint8_t n = 0;
+    while (n < LTIC_EDGE_N) {
+        uint32_t a = TIM2->CNT;
+        int32_t  v = ltic_adc_conv();
+        uint32_t b = TIM2->CNT;
+        if (v < 0) break;
+        uint32_t t = a - ref, d = b - a;
+        s_ltic_burst.code[n] = (int16_t)v;
+        s_ltic_burst.t[n]    = (uint16_t)(t > 65535u ? 65535u : t);
+        s_ltic_burst.dur[n]  = (uint8_t)(d > 255u ? 255u : d);
+        n++;
+    }
+    return n;
+}
+
+/* Spin, interrupts on and the scheduler held, until TIM2 reaches `at`.
+ * 0 when it does, 1 if an edge came first (the capture interrupt stored a
+ * new one), 2 if TIM2 does not get there. */
+static int ltic_spin_to(uint32_t at)
+{
+    for (uint32_t g = 0; (int32_t)(TIM2->CNT - at) < 0; ) {
+        if (g_pps_ccr3 != s_cap1) return 1;
+        if (++g > LTIC_SPIN_GUARD) return 2;
+    }
+    return (g_pps_ccr3 == s_cap1) ? 0 : 1;
+}
+
+/* WAIT FOR THE EDGE AND TAKE THE BURST ON IT. vFreqRelayTask calls this in
+ * place of waiting for the capture interrupt: true when the burst was taken
+ * at the edge (whose interrupt has run since), false when the caller must
+ * wait for the interrupt as before. LRM 0 never syncs, nor does an open GPS
+ * tunnel, whose rate is the user's and may be far above 115200. */
+bool ltic_edge_sync(void)
+{
+    if (g_ltic_read_mode != LTIC_READ_EDGE) return false;
+    if (!s_cap_ok || g_pps_ccr3 != s_cap1 || (xEventGroupGetBits(xSysEvents) & EVT_TUNNEL_MODE)) {
+        s_ltic_counts.untried++;
+        return false;                            /* no second to go by, or an edge unread */
+    }
+    const uint32_t sec  = s_cap1 - s_cap0;       /* the last second, in OCXO ticks         */
+    const uint32_t ms   = sec / 1000u;
+    const uint32_t edge = s_cap1 + sec;          /* the next edge, to a tick or so         */
+    const int32_t  rem  = (int32_t)(edge - TIM2->CNT);
+    if (rem < 3 * (int32_t)ms || rem > (int32_t)sec) {
+        s_ltic_counts.untried++;
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)rem / ms - 1u));   /* wakes 1-3 ms before it */
+
+    bool got = false;
+    int  why;                                    /* 1 early, 2 TIM2 stuck, 3 missed */
     vTaskSuspendAll();
+    ltic_adc_on();
+    why = ltic_spin_to(edge - LTIC_PRECHARGE_TICKS);
+    if (why == 0) {
+        s_bvref = ltic_precharge();
+        why = ltic_spin_to(edge - LTIC_PRE_TICKS);
+        if (why == 0) {
+            taskENTER_CRITICAL();                /* tick, timers, the capture: held */
+            __disable_irq();                     /* ...and everything else          */
+            if (g_pps_ccr3 == s_cap1) {          /* not slipped in before the mask  */
+                uint32_t g = 0;
+                while (!(TIM2->SR & TIM_SR_CC3IF)
+                       && (int32_t)(TIM2->CNT - (edge + LTIC_WAIT_TICKS)) <= 0
+                       && ++g <= LTIC_MASK_GUARD) { }
+                if (TIM2->SR & TIM_SR_CC3IF) {   /* the edge, a poll or two ago */
+                    s_tref = TIM2->CNT;
+                    g = 0;
+                    while ((int32_t)(TIM2->CNT - (s_tref + LTIC_SETTLE_TICKS)) < 0
+                           && ++g <= LTIC_MASK_GUARD) { }
+                    __enable_irq();              /* the pulse is over: serial and USB run */
+                    s_bn = ltic_burst(s_tref);
+                    got  = true;
+                } else {
+                    why = (g > LTIC_MASK_GUARD) ? 2 : 3;
+                }
+            } else {
+                why = 1;
+            }
+            __enable_irq();
+            taskEXIT_CRITICAL();                 /* ...and the capture interrupt runs here */
+        }
+    }
+    if (got)           s_ltic_counts.caught++;
+    else if (why == 1) s_ltic_counts.early++;
+    else if (why == 2) s_ltic_counts.stuck++;
+    else               s_ltic_counts.missed++;
+    ltic_adc_off();
+    xTaskResumeAll();
+    return got;
+}
 
-    /* Settle onto the ramp peak. Charging ends on the picPPS edge, at most
-     * ~2 µs after the GPS-PPS edge that woke the caller; 50 µs clears the
-     * widest pulse while sitting only ~1 % down the ~5 ms leakage decay. */
-    delayMicroseconds(50);
+/* THE COMMAND LINE KEEPS QUIET AROUND THE EDGE. On 04.10, with LB typed 70
+ * times in under three minutes, the reading at the next edge came out +8..+20
+ * ns high 30 times, and never otherwise: LB's ~3 kB were still going out on
+ * the Bluetooth UART (57600 baud, ~0.5 s) when the edge came, and the bursts
+ * taken then sat ~20 codes high. So the CLI holds its output from
+ * LTIC_QUIET_MS before the next edge, predicted as for the burst, until
+ * LTIC_QUIET_AFTER_MS after it: the Bluetooth UART's 512-byte buffer
+ * (build_opt.h) is empty ~90 ms after the last line went in, and LRM 0's
+ * read is over ~1 ms after the edge. Nothing is dropped; the text waits.
+ * With no edge to predict from, no wait. Called by the CLI task: s_cap0 and
+ * s_cap1 change once a second, and a pair read across that change fails
+ * the range check, which lets one line through. */
+bool ltic_quiet_now(void)
+{
+    const uint32_t c1 = s_cap1, c0 = s_cap0;
+    if (!s_cap_ok) return false;
+    const uint32_t sec = c1 - c0;
+    if (sec <= FREQ_LOWER || sec >= FREQ_UPPER) return false;
+    const int32_t ms = (int32_t)(sec / 1000u);
+    const int32_t to = (int32_t)(c1 + sec - TIM2->CNT);       /* ticks to the next edge */
+    return to < (int32_t)LTIC_QUIET_MS * ms && to > -(int32_t)LTIC_QUIET_AFTER_MS * ms;
+}
 
-    int16_t s[LTIC_OVERSAMPLE];
-    for (int i = 0; i < LTIC_OVERSAMPLE; i++) {
-        int16_t x = (int16_t)analogRead(PIN_LTIC_VPHASE);
+/* The middle conversion - build 60's reading. */
+static int16_t ltic_median(const int16_t *x, int n)
+{
+    static int16_t s[LTIC_EDGE_N];
+    if (n <= 0) return 0;
+    for (int i = 0; i < n; i++) {
+        int16_t v = x[i];
         int j = i;
-        while (j > 0 && s[j-1] > x) { s[j] = s[j-1]; j--; }
-        s[j] = x;
+        while (j > 0 && s[j-1] > v) { s[j] = s[j-1]; j--; }
+        s[j] = v;
+    }
+    return s[n / 2];
+}
+
+/* The median of v[0..n-1], which it sorts (by insertion: n is 64 at most). */
+static float ltic_fmedian(float *v, int n)
+{
+    for (int i = 1; i < n; i++) {
+        const float a = v[i];
+        int j = i;
+        while (j > 0 && v[j-1] > a) { v[j] = v[j-1]; j--; }
+        v[j] = a;
+    }
+    return (n & 1) ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/* EVERY THIRD CONVERSION (build 71). On some bursts the conversions follow
+ * each other every 16 2/3 ticks (on others every ~17.7: the converter runs
+ * on the MCU's clock, not on the 10 MHz), and then every third one meets the
+ * 10 MHz at the same point of its period. A detector that picks up the 10 MHz
+ * edges - through a supply or a ground - then has one third of the burst off
+ * by the same few codes: on Dan's board 17-30 codes high (24 and 28.10) or
+ * 7.5 low (23.10), the other two thirds agreeing. Not a sine, which would
+ * move all three in every burst: a burst half an hour after one of those had
+ * no third off at all. Such a third pulls the line by a third of its offset -
+ * by more at the edge when it fades along the burst - and swells the MAD of
+ * the whole burst: on 24.10 one burst passed 13 codes high with every
+ * conversion used, and one with a third 30 codes off had more than
+ * LTIC_FIT_DROPS off the line one by one and was refused.
+ *
+ * So on the first line, before any conversion is dropped, each third's
+ * residuals are taken by their median, and the third furthest from the mean
+ * of the other two is left out whole if it is more than LTIC_FIT_THIRD codes
+ * and LTIC_FIT_THIRD_SIG of the burst's noise from it - while those two
+ * differ by no more than that, nor by more than half the distance (one third
+ * off and the other two together, not three apart), and two in three of its
+ * own conversions are at least half that distance out (the third off as a
+ * whole, not a burst's glitches gathered in half of it). The noise is the MAD
+ * about each third's own median, which the offset does not swell. Returns 1-3
+ * (the third starting at conversion 0, 1 or 2), 0 for none, or -1 when a
+ * third has fewer than LTIC_FIT_MIN/2 conversions to judge by; *off is the
+ * furthest third's offset from the other two, in codes. What it cannot tell
+ * apart: two thirds off together and one clean look like one third off the
+ * other way, and the clean one is left out - the burst stands on the two, as
+ * build 70's drops mostly had it stand too. */
+static int ltic_third(const float *r, uint64_t use, int n, float *off)
+{
+    static float v[LTIC_EDGE_N];
+    float gm[3];
+    *off = 0.0f;
+    for (int g = 0; g < 3; g++) {
+        int c = 0;
+        for (int i = g; i < n; i += 3) if ((use >> i) & 1u) v[c++] = r[i];
+        if (c < LTIC_FIT_MIN / 2) return -1;
+        gm[g] = ltic_fmedian(v, c);
+    }
+    int m = 0;
+    for (int i = 0; i < n; i++) if ((use >> i) & 1u) v[m++] = fabsf(r[i] - gm[i % 3]);
+    const float s = 1.4826f * ltic_fmedian(v, m);       /* the noise, the offsets aside */
+    int w = 0; float wd = 0.0f;
+    for (int g = 0; g < 3; g++) {
+        const float a = gm[(g + 1) % 3], b = gm[(g + 2) % 3], o = gm[g] - 0.5f * (a + b);
+        if (w == 0 || fabsf(o) > fabsf(*off)) { *off = o; wd = fabsf(a - b); w = g + 1; }
+    }
+    const float thr = fmaxf(LTIC_FIT_THIRD, LTIC_FIT_THIRD_SIG * s);
+    if (fabsf(*off) <= thr) return 0;
+    if (wd > fminf(thr, 0.5f * fabsf(*off))) return 0;    /* the other two disagree */
+    const float mid = 0.5f * (gm[w % 3] + gm[(w + 1) % 3]);
+    int c = 0, k = 0;
+    for (int i = w - 1; i < n; i += 3)
+        if ((use >> i) & 1u) { c++; if ((r[i] - mid) * *off > 0.5f * *off * *off) k++; }
+    if (3 * k < 2 * c) return 0;                          /* not the whole third */
+    return w;
+}
+
+/* THE LINE, READ AT THE EDGE. x against t (TIM2 ticks from the edge to each
+ * conversion's start), and the line's value at t = 0 in lb->level. Float is
+ * enough: the times are below 2^12, their sums below 2^18. Not inlined: its
+ * frame then never stacks on analogRead()'s, which sets FreqRelay's peak.
+ *
+ * A conversion an interrupt stretched by more than LTIC_FIT_SLACK (d, its
+ * length in ticks) is left out: when inside it the pin was sampled is not
+ * known. OFF THE LINE is judged by medians, not by the rms, as in build 61:
+ * two 20-code glitches inflate an rms enough to hide behind each other, and
+ * four pull the whole line up. So the residuals are taken about their own
+ * median, and the one furthest from it is dropped if it is more than
+ * LTIC_FIT_OUTLIER and four MADs (median absolute deviations, scaled to a
+ * sigma) out; then the line is refitted, up to LTIC_FIT_DROPS times.
+ *
+ * TWENTY (build 70; twelve from build 67, eight before). A detector that
+ * picks up a square wave gets a pair of glitches at each of its edges: on
+ * Dan's board 15-50 codes, the pairs about 21 us apart, four or five in a
+ * 90-us burst - something outside the GPSDO switching at roughly 23 kHz.
+ * Builds 67-69 put it down to the EFC PWM's carrier, which did run under EXT
+ * until build 69 held that pin low (pwm_park() in gpsdo_dac.cpp); the pairs
+ * stayed - 24 and 25.10, BL 100 too - and came and went with the time of
+ * day (his solar inverter is the suspect). Eight drops refused a third of
+ * his bursts (14.10); twelve read those, but a burst with six pairs or more
+ * was still refused and the last reading kept - with whatever else is
+ * refused as off the line, a fifth of his seconds over 57 hours (25.10).
+ * Through this function, the two refused bursts he has sent that such pairs
+ * filled (21.10, 25.10) read with 18 and 15 left out, within 0.2 codes of a
+ * robust line, and the others he sent read as before. On synthetic bursts
+ * (2 codes of noise, 13 to 18 glitches of 15-50 codes, four seeds of a
+ * thousand) 947-1000 read within 5 codes, where twelve read 0-23. Of two
+ * with every third conversion high - a 10 MHz pickup, 24.10 - one still has
+ * 21 off the line and is refused; in the other the pickup fades along the
+ * burst, the MAD swells with it and the whole burst passes, 13 codes high,
+ * with twelve as with twenty (build 71 reads both, with that third left
+ * out whole first: see ltic_third()). A clean burst drops none, so a board
+ * without such a disturbance reads exactly as before (the author's: 63-64 of
+ * 64 used). What twenty does not change: a burst with that many glitches may
+ * now and then settle on a line a few codes off, because the MAD swells
+ * with them, and it did so as often with twelve (0-94 in a thousand from 13
+ * to 20 glitches, the same either way to within two). A burst begun while
+ * the pulse was still dying away has up to 18 such conversions left out in
+ * tools/lticsim's model and reads like a clean one (build 67: 200 bursts at
+ * 1.5 codes of noise for each length up to twelve, 0.3-0.4 code median
+ * error); past that its bend refuses it first, and so it does a pulse still
+ * charging, as before.
+ *
+ * THE BEND (bend_gate, a burst taken at the edge). Read at the edge, the
+ * line is carried ~50 us from the middle of the burst, and a curve in the
+ * burst would be carried with it: a straight line through a parabola misses
+ * it at t = 0 by (2.25 (tm/h)^2 - 0.75) q, where q is the mean residual of
+ * the burst's first and last thirds less that of its middle third, tm the
+ * burst's centre and h its half-length. This is for a burst unlike the
+ * others - one begun before the pulse ended, or with a disturbance spread
+ * across it. q is weighed against the burst's own noise, sqrt(4.5/m) of it,
+ * taken from neighbouring conversions - which a curve hardly moves, where it
+ * would swell the rms - so a burst is refused only if its bend is real (5
+ * sigma) and worth LTIC_BEND_MAX at the edge.
+ *
+ * BOTH COUNTED FROM THE BOARD'S OWN BEND, bend_ref, not from none. Every
+ * burst on the board bends: each conversion takes ~2.8 codes of the node's
+ * charge (0.12 %), so a burst falls ~180 codes, across the converter's own
+ * uneven codes, and 70 bursts caught by LB on 04.10 bent by -3.1 codes at the
+ * median, spread 1.2. Counted from none, the tail of that was refused as if
+ * bent - 7064 bursts in 61 380 s in build 63's counts, 11.5 %, each a
+ * second of the last reading kept - while the bursts themselves looked like
+ * the rest. Counted from bend_ref, none of the five LB had shown refused is,
+ * and of all 70 at most one: the one a serial transmission had put ~20
+ * codes high. ltic_read_fast() keeps bend_ref. A late burst is carried two
+ * to four times as far, which magnifies its bend too, and it is held back
+ * anyway, so it is not gated; lb->bend keeps the figure for LB either way. */
+static bool __attribute__((noinline)) ltic_fit(const int16_t *x, const uint16_t *t, const uint8_t *d,
+                                               int n, bool bend_gate, float bend_ref, ltic_burst_t *lb)
+{
+    static float rr[LTIC_EDGE_N];              /* residuals, by conversion */
+    static float sr[LTIC_EDGE_N];              /* sorted, for the medians  */
+    uint32_t dmin = 255u;
+    for (int i = 0; i < n; i++) if (d[i] < dmin) dmin = d[i];
+    uint64_t use = 0u;
+    for (int i = 0; i < n; i++)
+        if (d[i] <= dmin + LTIC_FIT_SLACK) use |= (uint64_t)1 << i;
+    bool judged = false;                           /* the thirds, by ltic_third() */
+    lb->third = -1; lb->third_off = 0.0f;
+    for (int drop = 0; ; drop++) {
+        int m = 0; float st = 0.0f, sx = 0.0f;
+        for (int i = 0; i < n; i++)
+            if ((use >> i) & 1u) { m++; st += (float)t[i]; sx += (float)x[i]; }
+        if (m < LTIC_FIT_MIN) { lb->why = LTIC_WHY_FEW; return false; }
+        float tm = st / (float)m, xm = sx / (float)m, stt = 0.0f, stx = 0.0f;
+        for (int i = 0; i < n; i++)
+            if ((use >> i) & 1u) {
+                float dt = (float)t[i] - tm;
+                stt += dt * dt; stx += dt * ((float)x[i] - xm);
+            }
+        if (!(stt > 0.0f)) { lb->why = LTIC_WHY_OTHER; return false; }   /* TIM2 not counting */
+        float k  = stx / stt;                      /* codes per tick */
+        float at = xm - k * tm;                    /* the line at the edge */
+        float ss = 0.0f; int na = 0;
+        for (int i = 0; i < n; i++)
+            if ((use >> i) & 1u) {
+                float r = (float)x[i] - (at + k * (float)t[i]);
+                rr[i] = r; ss += r * r;
+                int j = na++;
+                while (j > 0 && sr[j-1] > r) { sr[j] = sr[j-1]; j--; }
+                sr[j] = r;
+            }
+        float mr = (na & 1) ? sr[na / 2] : 0.5f * (sr[na / 2 - 1] + sr[na / 2]);
+        float wr = 0.0f; int worst = -1; na = 0;
+        for (int i = 0; i < n; i++)
+            if ((use >> i) & 1u) {
+                float a = fabsf(rr[i] - mr);
+                if (a > wr) { wr = a; worst = i; }
+                int j = na++;
+                while (j > 0 && sr[j-1] > a) { sr[j] = sr[j-1]; j--; }
+                sr[j] = a;
+            }
+        float mad = 1.4826f * ((na & 1) ? sr[na / 2] : 0.5f * (sr[na / 2 - 1] + sr[na / 2]));
+        if (!judged) {                             /* the first line: every third conversion? */
+            judged = true;
+            lb->third = (int8_t)ltic_third(rr, use, n, &lb->third_off);
+            if (lb->third > 0) {
+                for (int i = lb->third - 1; i < n; i += 3) use &= ~((uint64_t)1 << i);
+                drop = -1; continue;               /* the line again, without it: no drop spent */
+            }
+        }
+        lb->level = at; lb->slope = k * 10.0f; lb->rms = sqrtf(ss / (float)m); lb->used = use;
+        if (wr <= fmaxf(LTIC_FIT_OUTLIER, 4.0f * mad)) {
+            float q3[3] = { 0.0f, 0.0f, 0.0f }, t0 = 0.0f, t1 = 0.0f, dd = 0.0f;
+            int c3[3] = { 0, 0, 0 }, j = 0, ip = -1;
+            for (int i = 0; i < n; i++)
+                if ((use >> i) & 1u) {
+                    int gi = (3 * j) / m;
+                    if (j++ == 0) t0 = (float)t[i];
+                    t1 = (float)t[i];
+                    q3[gi] += rr[i]; c3[gi]++;
+                    if (ip >= 0) { float e = rr[i] - rr[ip]; dd += e * e; }
+                    ip = i;
+                }
+            float q  = 0.5f * (q3[0] / (float)c3[0] + q3[2] / (float)c3[2]) - q3[1] / (float)c3[1];
+            float h  = 0.5f * (t1 - t0);
+            float sn = sqrtf(dd / (2.0f * (float)(m - 1)));   /* noise, from neighbours */
+            const float g = 2.25f * tm * tm / (h * h) - 0.75f;   /* q, as codes at the edge; > 1.5 */
+            lb->bend = q * g;
+            if (bend_gate && fabsf(q - bend_ref / g) > 5.0f * sn * sqrtf(4.5f / (float)m)
+                && fabsf(lb->bend - bend_ref) > LTIC_BEND_MAX)
+            {   lb->why = LTIC_WHY_BEND; return false; }          /* bent unlike the others */
+            if (at > -0.5f && at < 4095.5f) return true;
+            lb->why = LTIC_WHY_OTHER;              /* off the converter's scale */
+            return false;
+        }
+        if (drop >= LTIC_FIT_DROPS) { lb->why = LTIC_WHY_OFF; return false; }   /* more off the line than that */
+        use &= ~((uint64_t)1 << worst);            /* drop it and fit again */
+    }
+}
+
+/* THE BOARD'S OWN BEND, LEARNED ONLY FROM BURSTS THAT READ THE RAMP (build
+ * 65). bend_ref follows the bend of every burst taken at the edge, the
+ * refused ones too, so that a change in the board can be followed - and up to
+ * build 64 that meant every burst, wherever it sat. A detector against its
+ * rail is not a ramp: with the picDIV not yet synced, or the phase run out of
+ * the window, the pulse is still on or the capacitor is held near the top,
+ * and the burst falls ~160 codes in the first 50 us and then lies flat. Its
+ * "bend" is +70 codes. On 04.10 build 64's first run (2.7 h) sat like that,
+ * bend_ref climbed to +20, and each time the phase did cross the window its
+ * bursts (-3 to -4, the board's own) were refused as bent unlike the board's:
+ * the reading stood frozen for up to 7 s at a time, published as valid. The
+ * night's capture shows the same in miniature: 150 s railed before the first
+ * arm, then readings frozen for 3-4 s at a time over the next seven minutes,
+ * while bend_ref came back down.
+ *
+ * So a burst teaches only if its line reads inside the band LC measured
+ * (lo..hi, in codes: zero_offset +/- 0.55 of the swept span, the window
+ * ltic_phase_error_ns() calls a valid phase; without LC, only the rails are
+ * left out). Each still counts for no more than LTIC_BEND_CLIP, averaged over
+ * LTIC_BEND_TRACK. Pure arithmetic, so tools/lticsim runs it as it is. */
+static float ltic_bend_track(float ref, float bend, float level, float lo, float hi)
+{
+    if (!(level >= lo && level <= hi)) return ref;      /* off the ramp: nothing to learn */
+    float e = bend - ref;
+    if (e >  LTIC_BEND_CLIP) e =  LTIC_BEND_CLIP;
+    if (e < -LTIC_BEND_CLIP) e = -LTIC_BEND_CLIP;
+    return ref + e / (float)LTIC_BEND_TRACK;
+}
+
+/* THE BOARD'S BEND MOVES WITH ITS LEVEL (build 71). On the author's board
+ * the bend is not one figure: it grows as the reading falls, by ~0.19 codes
+ * per code (~0.23 per ns of phase; 26-27.10, from -5 codes near 2340 to +10
+ * near 2280). Near lock that is nothing, but a step in the oscillator's
+ * frequency takes the phase 60-100 ns away for minutes, and bend_ref follows
+ * at a thirty-second of a code a second at most: between two LB prints 16
+ * minutes apart, across the two steps of 27.10, 131 bursts were refused as
+ * bent unlike the board's and 77 readings kept - while the loop was bringing
+ * the phase back. A model of those minutes (each second's bend from the level
+ * logged, as above, 1.5 codes of scatter, the gate as in ltic_fit()) refuses
+ * twice that, 270-290; with what follows, 14-21.
+ *
+ * So the in-band bursts' bends also go into a ring of the last LTIC_BEND_WIN,
+ * and when their median is more than LTIC_BEND_MAX from bend_ref, bend_ref
+ * moves there at once (*moved). Otherwise it is followed as before, so once a
+ * board's bend is found, and while it stays put, it reads as in build 70 (a
+ * bend more than LTIC_BEND_MAX from none is found at the fifteenth burst,
+ * where build 70 crept to it). In the same model with a level that does not
+ * move, fifteen bursts' median never strayed that far in twelve hours at 2.1
+ * codes of scatter (the author's), and 0-12 times at 3 codes, for ~1% more
+ * bursts refused; eight bursts' median strayed 170-260 times, for 14-23%
+ * more. An odd count, so the median is always one burst's bend, never the
+ * midpoint of two. One odd burst moves it no further than before. */
+typedef struct { float b[LTIC_BEND_WIN]; uint8_t n, i; } ltic_bend_win_t;
+static float ltic_bend_follow(float ref, float bend, float level, float lo, float hi,
+                              ltic_bend_win_t *w, bool *moved)
+{
+    *moved = false;
+    if (!(level >= lo && level <= hi)) return ref;      /* off the ramp: nothing to learn */
+    w->b[w->i] = bend;
+    w->i = (uint8_t)((w->i + 1u) % LTIC_BEND_WIN);
+    if (w->n < LTIC_BEND_WIN) w->n++;
+    if (w->n == LTIC_BEND_WIN) {
+        static float v[LTIC_BEND_WIN];                  /* not on the task's stack */
+        for (int k = 0; k < LTIC_BEND_WIN; k++) v[k] = w->b[k];
+        const float med = ltic_fmedian(v, LTIC_BEND_WIN);
+        if (fabsf(med - ref) > LTIC_BEND_MAX) { *moved = true; return med; }
+    }
+    return ltic_bend_track(ref, bend, level, lo, hi);
+}
+
+/* The band ltic_bend_track() learns in, from g_ltic, in codes. */
+static void ltic_band_codes(float *lo, float *hi)
+{
+    float vlo = 0.02f, vhi = 3.28f;                     /* the rails, as the phase is judged */
+    if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
+        float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
+        float a = g_ltic.zero_offset - 0.55f * span_v;
+        float b = g_ltic.zero_offset + 0.55f * span_v;
+        if (a > vlo) vlo = a;
+        if (b < vhi) vhi = b;
+    }
+    *lo = vlo * (4096.0f / 3.3f);
+    *hi = vhi * (4096.0f / 3.3f);
+}
+
+/* For LB: a copy taken with the scheduler held, so it is one burst. */
+void ltic_burst_get(ltic_burst_t *out)
+{
+    vTaskSuspendAll();
+    *out = s_ltic_burst;
+    xTaskResumeAll();
+}
+
+void ltic_counts_get(ltic_counts_t *out)
+{
+    vTaskSuspendAll();
+    *out = s_ltic_counts;
+    xTaskResumeAll();
+}
+
+/* ltic_read_fast — turn this second's burst into g_ltic_voltage, from
+ * vFreqRelayTask, which the GPS-PPS capture woke or which caught the edge
+ * itself (synced: ltic_edge_sync() above took the burst). Reduces the burst
+ * to one number, applies an outlier gate and publishes - and only THEN, with
+ * GPSDO_LTIC_ACTIVE_RESET, discharges the capacitor through the pin, so the
+ * next pulse charges it from 0 V (see the end of this function). Nothing
+ * drives the pin before or during the read: the charge being measured is
+ * never touched. */
+void ltic_read_fast(bool synced)
+{
+    ltic_burst_t *lb = &s_ltic_burst;
+    /* The edge, as the capture interrupt stored it - not CCR3, which reading
+     * would clear CC3IF with. The one the last read already had means no PPS
+     * came (the 2 s timeout), and then there is no second to predict from. */
+    const uint32_t cap   = g_pps_ccr3;
+    const bool     fresh = (cap != s_cap1);
+    if (fresh) {
+        s_cap0 = s_cap1; s_cap1 = cap;
+        const uint32_t d = s_cap1 - s_cap0;
+        s_cap_ok = (d > FREQ_LOWER && d < FREQ_UPPER);
+    } else {
+        s_cap_ok = false;
+    }
+    int32_t lag = 0;                    /* the burst's clock, s_tref, after the edge */
+
+    if (g_ltic_read_mode == LTIC_READ_MEDIAN) {
+        /* LRM 0: BUILD 60's READ, UNCHANGED - fifty microseconds, then sixteen
+         * analogRead()s, their median. The scheduler is held across them: PA1
+         * is ADC1_IN1 and PIN_VCTL_ADC (PB1) is ADC1_IN9 - one converter - and
+         * analogRead() reconfigures it on a shared handle, not reentrantly.
+         * ControlTask holds the scheduler across its own conversions for the
+         * same reason, which is also what keeps the converter free whenever
+         * this task takes it through its registers. */
+        s_tref = fresh ? cap : TIM2->CNT;
+        vTaskSuspendAll();
+        delayMicroseconds(50);
+        for (int i = 0; i < LTIC_OVERSAMPLE; i++) {
+            uint32_t a = TIM2->CNT;
+            lb->code[i] = (int16_t)analogRead(PIN_LTIC_VPHASE);
+            uint32_t b = TIM2->CNT, t = a - s_tref, d = b - a;
+            lb->t[i]   = (uint16_t)(t > 65535u ? 65535u : t);
+            lb->dur[i] = (uint8_t)(d > 255u ? 255u : d);
+        }
+        xTaskResumeAll();
+        s_bn = LTIC_OVERSAMPLE; s_bvref = -1; synced = false;
+    } else if (!synced) {
+        /* LATE: the interrupt woke the task, ~15 us after the edge or more.
+         * The same burst, now, timed from the captured edge. */
+        vTaskSuspendAll();
+        ltic_adc_on();
+        delayMicroseconds(10);                     /* t_STAB, and VREFINT's start-up */
+        s_bvref = ltic_precharge();
+        taskENTER_CRITICAL();
+        s_tref = fresh ? cap : TIM2->CNT;
+        s_bn   = ltic_burst(s_tref);
+        taskEXIT_CRITICAL();
+        ltic_adc_off();
+        xTaskResumeAll();
+    } else {
+        lag = (int32_t)(s_tref - cap);             /* the poll that saw the flag */
     }
 
-    xTaskResumeAll();
+    const int n = s_bn;
+    const int16_t med = ltic_median(lb->code, n);
+    lb->n = (uint8_t)n; lb->median = med; lb->vref = s_bvref;
+    lb->sync = synced ? 1u : 0u; lb->fit = 0u; lb->used = 0u;
+    lb->level = lb->slope = lb->rms = lb->bend = lb->third_off = 0.0f;
+    lb->edge = fresh ? 1u : 0u; lb->why = LTIC_WHY_NONE; lb->third = -1;
+    float est = (float)med;
+    bool hold = false;
+    static uint8_t s_hold = 0;           /* seconds in a row the last reading was kept */
+    static float   s_k    = 0.0f;        /* the last line's slope, codes per tick      */
+    static bool    s_k_ok = false;
+    static float   s_bend_ref = 0.0f;    /* the board's own bend, codes at the edge    */
+    static ltic_bend_win_t s_bend_win;   /* the last bursts' bends (build 71)          */
+    lb->bend_ref = s_bend_ref;
+    if (g_ltic_read_mode == LTIC_READ_MEDIAN) {
+        lb->how = LTIC_HOW_MEDIAN;
+    } else if (!fresh) {
+        lb->how = LTIC_HOW_NOEDGE;                 /* nothing to read it at */
+        s_ltic_counts.noedge++;
+    } else {
+        const bool known = n > 0 && lag >= 0 && lag < (int32_t)LTIC_PRE_TICKS;
+        if (known)
+            for (int i = 0; i < n; i++) lb->t[i] = (uint16_t)(lb->t[i] + lag);   /* from the edge */
+        lb->edge = known ? 1u : 0u;
+        const bool timed = known && lb->t[0] <= LTIC_REACH_TICKS;
+        const bool ok = timed && ltic_fit(lb->code, lb->t, lb->dur, n, synced, s_bend_ref, lb);
+        lb->fit = ok ? 1u : 0u;
+        if (!timed) lb->why = (n == 0) ? LTIC_WHY_FEW : LTIC_WHY_OTHER;   /* none, or too late */
+        /* The board's own bend, from every burst taken at the edge whose bend
+         * was measured - the refused ones too, or a change in it could not be
+         * followed - each counting for no more than LTIC_BEND_CLIP, so one
+         * odd burst moves it by a few hundredths of a code. It starts from
+         * none, as build 63 counted, not from the first burst, which may be
+         * an odd one; a board's -3 is within half a code ~2 minutes on. Only
+         * a burst whose line reads inside LC's band counts: see
+         * ltic_bend_track() for what a railed detector did to it in build 64.
+         * When the last LTIC_BEND_WIN such bursts bend, by their median, more
+         * than LTIC_BEND_MAX away, it moves there at once: see
+         * ltic_bend_follow() for a bend that moves with the level. */
+        if (synced && timed && (ok || lb->why == LTIC_WHY_BEND)) {
+            float lo, hi;
+            bool moved;
+            ltic_band_codes(&lo, &hi);
+            s_bend_ref = ltic_bend_follow(s_bend_ref, lb->bend, lb->level, lo, hi,
+                                          &s_bend_win, &moved);
+            if (moved) s_ltic_counts.bendjump++;
+        }
+        if (lb->third > 0)                  s_ltic_counts.third++;
+        if (ok)                             s_ltic_counts.line++;
+        else if (lb->why == LTIC_WHY_FEW)   s_ltic_counts.few++;
+        else if (lb->why == LTIC_WHY_OFF)   s_ltic_counts.off++;
+        else if (lb->why == LTIC_WHY_BEND)  s_ltic_counts.bend++;
+        else                                s_ltic_counts.other++;
+        if (ok) {
+            est = lb->level; s_k = lb->slope / 10.0f; s_k_ok = true;
+        } else if (known && s_k_ok && lb->t[n - 1 - n / 2] <= LTIC_CARRY_TICKS) {
+            /* The median sits at the middle conversion's time down the leak:
+             * carried back to the edge along the last line's slope, it stays
+             * on the scale the lines are on. Not from further than 1 ms, where
+             * the leak's curve would cost more than a code or two. */
+            est = (float)med - s_k * (float)lb->t[n - 1 - n / 2];
+        }
+        if (ok && synced)                { lb->how = LTIC_HOW_LINE; s_hold = 0; }
+        else if (s_hold < LTIC_HOLD_MAX) { lb->how = LTIC_HOW_HELD; s_hold++; hold = true; }
+        else                             lb->how = ok ? LTIC_HOW_LINE : LTIC_HOW_REFUSED;
+    }
+    if (!lb->edge && n > 0)                        /* no edge: times from the first conversion */
+        for (int i = n - 1; i >= 0; i--) lb->t[i] = (uint16_t)(lb->t[i] - lb->t[0]);
+    if (est < 0.0f)    est = 0.0f;        /* the gate's -1 means "none yet" */
+    if (est > 4095.0f) est = 4095.0f;
+    lb->seq = gFreqSnap.ppscount;
+    g_ltic_adc_raw = (int16_t)lroundf(est);
 
-    int16_t med = s[LTIC_OVERSAMPLE / 2];
-    g_ltic_adc_raw = med;
-
-    static int16_t last_ok = -1, pending = -1;
+    /* The gate, unchanged in what it does: in codes, on the estimate. With
+     * LRM 0 the estimate is the median, a whole code, and every comparison
+     * comes out exactly as it did in integers. */
+    static float last_ok = -1.0f, pending = -1.0f;
     int16_t thr = 120;
     if (g_ltic.range_ns > 1.0f && g_ltic.ns_per_volt > 1.0f) {
         float span_v = g_ltic.range_ns / g_ltic.ns_per_volt;
@@ -169,33 +877,60 @@ void ltic_read_fast(void)
         if (thr < 60)  thr = 60;
         if (thr > 400) thr = 400;
     }
-    int16_t accepted;
-    if (last_ok < 0 || abs(med - last_ok) <= thr) {
-        accepted = med;  pending = -1;
-    } else if (pending >= 0 && abs(med - pending) <= thr) {
-        accepted = med;  pending = -1;
+    float accepted;
+    bool  kept = false;                       /* the reading published is not this pulse's */
+    if (hold && last_ok >= 0.0f) {
+        accepted = last_ok; kept = true;      /* skipped: the gate untouched */
+    } else if (last_ok < 0.0f || fabsf(est - last_ok) <= (float)thr) {
+        accepted = est;  pending = -1.0f;
+    } else if (pending >= 0.0f && fabsf(est - pending) <= (float)thr) {
+        accepted = est;  pending = -1.0f;
     } else {
-        pending = med;   accepted = last_ok;
+        pending = est;   accepted = last_ok; kept = true;
     }
     last_ok = accepted;
-    g_ltic_adc_avg = accepted;
-    g_ltic_voltage = ((float)accepted / 4096.0f) * 3.3f;
-    s_ltic_qerr_ns = ubx_timtp_correction_ns();   /* this pulse's, latched */
-    /* ...and tell the loop which pulse it belongs to, so it can use THIS number
-     * instead of re-deriving one that measured 3x noisier. See
-     * ubx_timtp_latch(). */
-    ubx_timtp_latch(gFreqSnap.ppscount);
+    lb->accepted = accepted;
+    g_ltic_adc_avg = (int16_t)lroundf(accepted);
+    g_ltic_kept    = kept;
+    g_ltic_voltage = (accepted / 4096.0f) * 3.3f;
+
+    /* THE SAWTOOTH GOES WITH THE READING IT BELONGS TO. A kept reading is an
+     * earlier pulse's, so it keeps that pulse's qErr too. Build 62 latched the
+     * new pulse's qErr against it, so in a second in which the receiver's
+     * sawtooth jumped (by up to ~20 ns) the phase jumped with it for that
+     * second: 55 such spikes in its first night. */
+    if (kept) {
+        s_ltic_counts.kept++;
+        ubx_timtp_latch_keep(gFreqSnap.ppscount);
+    } else {
+        s_ltic_qerr_ns = ubx_timtp_correction_ns();   /* this pulse's, latched */
+        /* ...and tell the loop which pulse it belongs to, so it can use THIS
+         * number instead of re-deriving one that measured 3x noisier. See
+         * ubx_timtp_latch(). */
+        ubx_timtp_latch(gFreqSnap.ppscount);
+    }
 
 #ifdef GPSDO_LTIC_ACTIVE_RESET
-    /* Active discharge for the current-source ramp detector. The classic RC
-     * Kaashoek detector self-clears through leakage and must NOT be driven low
-     * (it corrupts the charge being measured), so this is OFF by default and
-     * only compiled in for the current-source variant, where the diode-hold
-     * node has no leakage path and the cap would otherwise stay charged from
-     * the previous cycle. We read first (above), THEN pulse PA1 low to zero the
-     * cap, then hand the pin straight back to analogue input so the next FF
-     * pulse starts from a clean zero. Reset happens ~immediately after the read,
-     * ~1 s before the next pulse, so there is ample settle time. */
+    /* ACTIVE DISCHARGE, FOR BOTH DETECTOR VARIANTS. We read first (above),
+     * THEN pulse PA1 low to zero the cap, then hand the pin straight back to
+     * analogue input, so the next pulse charges it from a clean 0 V. This
+     * runs ~0.2 ms after the edge, when the pulse (about a microsecond at
+     * lock, ~3 us at the edge of the band) has long ended and the burst is
+     * in, and ~1 s before the next pulse.
+     *
+     * The current-source front end has no leakage path and needs it outright.
+     * Up to build 64 this comment said the classic RC Kaashoek detector must
+     * NOT be driven low, as it "self-clears through leakage" and the low pulse
+     * "corrupts the charge being measured". The second was never true of a
+     * discharge made after the read. The first holds only while the leak is
+     * fast: on a board without a bleed resistor (the author's has none; Lars'
+     * original used 1 Mohm) the leak is most likely the Schottky's reverse
+     * current and whatever the pin and the board add - tens of ms at 48 C
+     * (the 1.4-1.5 ms "decay" LB prints is mostly the converter's own draw) -
+     * and a Schottky's reverse current falls several-fold on a cold board,
+     * which could leave part of one second's charge under the next reading.
+     * With the discharge every reading starts from the same 0 V, whatever
+     * the temperature. */
     pinMode(PIN_LTIC_VPHASE, OUTPUT);
     digitalWrite(PIN_LTIC_VPHASE, LOW);
     delayMicroseconds(LTIC_RESET_US);
@@ -205,41 +940,39 @@ void ltic_read_fast(void)
 
 /* THE PHASE AS A DISPLAY MAY REPORT IT - ONE COPY, BECAUSE TWO DISAGREED.
  *
- * The panel and the serial report each derived dph from g_ltic_voltage down
- * their own path, and they drifted apart twice. First over the sawtooth: the
- * panel subtracted it and the report did not, so the same instant read a whole
- * qErr differently on the two. Then over the BAND, which is what this function
- * is really for.
+ * The panel and the serial report each derived dph from g_ltic_voltage
+ * down their own path. One disagreement was over the sawtooth latch (see
+ * s_ltic_qerr_ns above); the other, which this function exists to fix,
+ * is over the BAND.
  *
- * ns_per_volt is a LOCAL slope. LC reads it in a narrow window around the
- * anchor it places at 0.632*Vsat, because the ramp is V = Vsat*(1 - e^(-t/tau))
- * and an exponential has no single slope. Far from that anchor the curve
- * flattens and a linear reading UNDERSTATES the phase; past Vsat the stop pulse
- * has missed the window entirely and the cap charges on to the supply rail, at
- * which point the number means nothing whatever. The 15%..85% band is where the
- * local slope stays within about a third of its anchor value.
+ * ns_per_volt is a LOCAL slope. LC reads it in a narrow window around
+ * the anchor it places at 0.632*Vsat, because the ramp is V = Vsat*(1 -
+ * e^(-t/tau)) and an exponential has no single slope. Far from that
+ * anchor the curve flattens and a linear reading UNDERSTATES the phase;
+ * past Vsat the stop pulse has missed the window entirely and the cap
+ * charges on to the supply rail, at which point the number means
+ * nothing whatever. The 15%..85% band is where the local slope stays
+ * within about a third of its anchor value.
  *
- * The panel has refused to print outside that band for some time - it shows
- * "ovf" - and the serial report went on printing a number. 04.09 is what that
- * costs: switched from algorithm 13 to algorithm 7, the phase parked at what
- * the report called +1085 ns with Vphase at 2.946 V, which is above the 2.798 V
- * top of this detector's band. The panel had been saying ovf for most of an
- * hour while the log said +1085 ns - and the log was not merely near a rail:
- * the compression means the true phase was LARGER than the number printed.
+ * The panel refuses to print outside that band — it shows "ovf" — while
+ * the serial report goes on printing a number. One recorded case: after
+ * switching from algorithm 13 to algorithm 7, the phase parked at a
+ * reported +1085 ns with Vphase at 2.946 V, above the 2.798 V top of
+ * this detector's band; the panel showed ovf for most of an hour while
+ * the log kept printing +1085 ns, and because the curve compresses near
+ * the rail the true phase was LARGER than the number printed. A reading
+ * that is wrong is recoverable; a reading that is wrong and looks calm
+ * is not.
  *
- * The same failure, twice before, from the other end: a rock-steady "+1561 ns"
- * and a rock-steady "+1295 ns", both reported here as good readings, both
- * costing a measurement before anyone noticed. A reading that is wrong is
- * recoverable; a reading that is wrong and looks calm is not.
+ * Returns true when the reading is inside the band the calibration
+ * covers. *ns_out is written whenever LC has run, so a caller that
+ * wants the number anyway still has it — but it has been told.
  *
- * Returns true when the reading is inside the band the calibration covers.
- * *ns_out is written whenever LC has run, so a caller that wants the number
- * anyway still has it - but it has been told.
- *
- * NOT the loop's guard. gpsdo_algorithms.cpp's railed_now tests a hard-coded
- * 3.28 V; on a detector saturating near 2.9 V that never fires, so the filter
- * still acts on readings this function calls out of band. That disagreement is
- * real and is its own repair, deliberately not made here. */
+ * NOT the loop's guard. gpsdo_algorithms.cpp's railed_now tests a
+ * hard-coded 3.28 V; on a detector saturating near 2.9 V that never
+ * fires, so the filter still acts on readings this function calls out
+ * of band. That disagreement is real and is its own repair, deliberately
+ * not made here. */
 static bool ltic_display_phase(double *ns_out)
 {
     if (g_ltic.ns_per_volt <= 1.0f) return false;      /* LC has not run */
@@ -283,6 +1016,45 @@ static bool ltic_display_phase(double *ns_out)
   static bool s_ina_ok = false;
 #else
   static const bool s_ina_ok = false;
+#endif
+
+#ifdef GPSDO_LM75
+  static bool s_lm75_ok = false;
+
+/* LM75-family thermometer (build 68): LM75A/B, PCT2075, TMP75/175, TMP1075 -
+ * any part with the LM75's temperature register, no library needed. The idea
+ * is Zsolt Zsiros's (ZsZs73), whose fork of this firmware reads one.
+ *
+ * Register 0 is two bytes, MSB first, two's complement and LEFT-justified:
+ * 9 significant bits on the original LM75 (or a TMP75/175 at its power-up
+ * resolution), 11 on an LM75A, NXP's LM75B or a PCT2075, 12 on a TMP1075. So
+ * the 16-bit word over 256 is degrees on every one of them, and nothing has
+ * to be configured or known about which part it is. The two bytes are read
+ * in two statements, because in one expression the order of the two
+ * Wire.read() calls would be unspecified. A word none of these parts could
+ * have sent is refused - the read counts as failed: one with any of its low
+ * four bits set (none has more than 12 bits), or outside -55..125 (their
+ * own range). That also keeps most other parts strapped to 0x48 from
+ * passing for a thermometer - an INA219's configuration register reads
+ * 0x399F - but not every one: a converter's result (an ADS1x15's, a
+ * PCF8591's) can pass, an idle ADS1x15's 0x0000 as 0 degrees (see
+ * gpsdo_config.h). Caller holds xWireMutex. */
+static bool lm75_read(float *out_c)
+{
+    Wire.beginTransmission((uint8_t)GPSDO_LM75_ADDR);
+    Wire.write((uint8_t)0x00);                        /* pointer: temperature */
+    if (Wire.endTransmission() != 0) return false;
+    if (Wire.requestFrom((uint8_t)GPSDO_LM75_ADDR, (uint8_t)2) != 2) return false;
+    uint8_t msb = (uint8_t)Wire.read();
+    uint8_t lsb = (uint8_t)Wire.read();
+    if (lsb & 0x0Fu) return false;
+    float c = (float)(int16_t)(((uint16_t)msb << 8) | (uint16_t)lsb) / 256.0f;
+    if (!(c >= -55.0f && c <= 125.0f)) return false;
+    *out_c = c;
+    return true;
+}
+#else
+  static const bool s_lm75_ok = false;
 #endif
 
 /* Set true by vSensorTask once all sensor detection has completed, so the
@@ -329,9 +1101,37 @@ void vSensorTask(void *pvParameters)
         OUT_SERIAL.println("HW: INA219 sensor         not found");
     }
 #endif
+#ifdef GPSDO_LM75
+    /* Probed under the bus mutex, unlike the library sensors above: they
+     * rely on finishing inside the 200 ms the display task waits before its
+     * own I2C init, and a probe queued after them need not. No Wire.begin():
+     * setup() has started the bus, and a begin() would put it back to
+     * 100 kHz. ACK, a byte back AND a sane temperature: a bare ACK is not
+     * proof on every core (see i2c_probe), and another part at 0x48 must not
+     * pass for a thermometer (see lm75_read). */
+    {
+        float t = 0.0f;
+        bool ok = false;
+        if (xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            ok = i2c_probe((uint8_t)GPSDO_LM75_ADDR) && lm75_read(&t);
+            xSemaphoreGive(xWireMutex);
+        }
+        s_lm75_ok = ok;
+        if (ok) { g_lm75_temp = t; g_lm75_valid = true; }
+        /* One println, like the other HW: lines, with the address as it is
+         * written in gpsdo_config.h, made text by the preprocessor - no
+         * snprintf on this task's 384-word stack. */
+        #define LM75_STR_(x) #x
+        #define LM75_STR(x)  LM75_STR_(x)
+        OUT_SERIAL.println(ok ? "HW: LM75 sensor           OK  (I2C " LM75_STR(GPSDO_LM75_ADDR) ")"
+                              : "HW: LM75 sensor           not found (I2C " LM75_STR(GPSDO_LM75_ADDR) ")");
+        #undef LM75_STR
+        #undef LM75_STR_
+    }
+#endif
 
 #ifdef GPSDO_LTIC
-    /* Initialise PA1 as analog input and take the first reading */
+    /* Initialise PA1 as analog input */
     pinMode(PIN_LTIC_VPHASE, INPUT_ANALOG);
     /* Same interlock as everywhere else that touches ADC1: this one's value is
      * thrown away, but the conversion itself can still land in the middle of
@@ -339,11 +1139,12 @@ void vSensorTask(void *pvParameters)
     vTaskSuspendAll();
     analogRead(PIN_LTIC_VPHASE);   /* dummy read to settle ADC mux */
     xTaskResumeAll();
-    ltic_read_fast();              /* no discharge; pin stays analog */
+    /* The first reading is the first PPS's, in vFreqRelayTask: the read is
+     * timed from an edge, and that task is now its only caller. */
     /* NOT "OK": nothing here can tell a fitted ramp detector from a floating
      * pin. All this line may claim is that the firmware was built with the
-     * detector path compiled in and PA1 configured for it. Dave's board was
-     * built without the hardware and this line told him it was fine. */
+     * detector path compiled in and PA1 configured for it — a board built
+     * without the hardware reads this line as fine regardless. */
     OUT_SERIAL.println("HW: LTIC phase input      enabled (PA1) - needs the ramp detector hw");
 #endif
 
@@ -378,12 +1179,25 @@ void vSensorTask(void *pvParameters)
         }
         vTaskDelay(pdMS_TO_TICKS(10));
 #endif
+#ifdef GPSDO_LM75
+        /* A failed read keeps the last value for two more passes, then the
+         * report says "---" (three misses: 6 s without an answer). */
+        if (s_lm75_ok && xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            static uint8_t misses = 0;
+            float t = 0.0f;
+            bool ok = lm75_read(&t);
+            xSemaphoreGive(xWireMutex);
+            if (ok) { g_lm75_temp = t; g_lm75_valid = true; misses = 0; }
+            else if (misses < 255u && ++misses >= 3u) g_lm75_valid = false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+#endif
 #ifdef GPSDO_LTIC
-        /* Vphase is now sampled in vFreqRelayTask ~300 µs after the PPS edge
-         * (ltic_read_fast), on the ramp peak. The old read here fired from
-         * this 2 s loop — far too late for a <1 ms peak — and its open-drain
-         * discharge actively corrupted the charge. Disabled; the flag is left
-         * for compatibility but no longer drives a read/discharge. */
+        /* Vphase is read in vFreqRelayTask at the PPS edge itself
+         * (ltic_edge_sync / ltic_read_fast). This 2 s loop is far too coarse
+         * for a charge that leaks away within tens of ms, and an open-drain
+         * discharge here would corrupt the charge being measured, so the
+         * read/discharge is disabled; the flag is kept only for compatibility. */
         g_ltic_must_read = false;
 #endif
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -405,32 +1219,33 @@ extern SemaphoreHandle_t xTwoHzSemaphore;
 
 /* Advance the clock one second on a VALIDATED PPS.
  *
- * Called from the frequency task at the point where ppscount is incremented,
- * i.e. only for a pulse whose interval the OCXO measured as plausible. A
- * spurious edge or a lost fix therefore does not move the clock; the holdover
- * path below picks it up 1.5 s later instead. */
-/* When the clock last advanced, from EITHER path, in millis(). This is the
- * whole of the shared state: ONE anchor, not one per source.
+ * Called from the frequency task at the point where ppscount is
+ * incremented, i.e. only for a pulse whose interval the OCXO measured as
+ * plausible. A spurious edge or a lost fix therefore does not move the
+ * clock; the holdover path below picks it up 1.5 s later instead.
  *
- * The first version kept a separate holdover baseline that was reset whenever
- * the PPS spoke, so a single missing pulse was simply dropped — the holdover
- * path woke 1.5 s later, found no baseline, started a fresh one and credited
- * nothing. Simulated at 2 % of pulses missing over an hour it lost 77 seconds,
- * which is worse than the free-running counter it replaced. Anchoring both
- * sources to the same instant fixes it by construction: the holdover path adds
- * whole seconds measured FROM THE LAST ONE COUNTED, wherever it came from, so
- * a gap in the pulses is made up rather than skipped, and the next pulse
- * re-anchors the phase to GPS.
+ * When the clock last advanced, from EITHER path, in millis(). This is
+ * the whole of the shared state: ONE anchor, not one per source.
  *
- * The handover is also the one place a second can be counted TWICE: holdover
- * credits a second, the first pulse back arrives 300 ms later and credits
- * another, and one second of wall time has become two. A second is worth
- * crediting at most once,
- * so require 750 ms since the last one: no real pulse ever fails that, pulses
- * being 1000 ms apart, and exactly the one pulse that lands inside a holdover
- * second does. (500 ms was the first attempt and let the case through — the
- * traced handover put the holdover tick at 10501 ms and the first pulse at
- * 11001, exactly on the boundary.) */
+ * A separate holdover baseline, reset on every PPS, was tried and
+ * rejected: a single missed pulse then drops a whole second, because
+ * the holdover path wakes 1.5 s later, finds no baseline, starts a
+ * fresh one and credits nothing — simulated at 2% of pulses missing
+ * over an hour, that loses 77 seconds, worse than the free-running
+ * counter it replaced. Anchoring both paths to the same instant fixes
+ * it: the holdover path adds whole seconds measured FROM THE LAST ONE
+ * COUNTED, wherever it came from, so a gap in the pulses is made up
+ * rather than skipped, and the next pulse re-anchors the phase to GPS.
+ *
+ * The handover is also the one place a second can be counted TWICE:
+ * holdover credits a second, the first pulse back arrives 300 ms later
+ * and credits another, and one second of wall time has become two. A
+ * second is worth crediting at most once, so require 750 ms since the
+ * last one: no real pulse ever fails that, pulses being 1000 ms apart,
+ * and exactly the one pulse that lands inside a holdover second does.
+ * (500 ms was tried first and let the case through: a traced handover
+ * put the holdover tick at 10501 ms and the first pulse at 11001,
+ * exactly on the boundary.) */
 static uint32_t s_up_last_ms = 0;
 
 static inline void up_advance(uint32_t at_ms)
@@ -505,23 +1320,22 @@ void uptime_snapshot(Uptime_t *out)
  * one; this task exists so that losing GPS stops the discipline, not the
  * clock.
  *
- * The previous version counted here unconditionally, and dropped the second
- * outright when the uptime mutex was busy — `continue` on a 5 ms timeout, with
- * no record that a tick had been owed. Nothing here can silently lose a second
- * any more: there is no mutex to miss, and the catch-up loop below settles a
- * backlog rather than discarding it.
+ * Counting here unconditionally, and dropping the second outright when the
+ * uptime mutex was busy, was tried and rejected: a `continue` on a 5 ms
+ * timeout left no record that a tick had been owed. There is no mutex here
+ * to miss, and the catch-up loop below settles a backlog rather than
+ * discarding it, so nothing here can silently drop a second.
  * ====================================================================== */
 void vUptimeTask(void *pvParameters)
 {
     (void)pvParameters;
 
-    /* No half-second parity filter any more. The old one advanced the clock on
-     * every second tick and therefore depended on never missing one — and
-     * xTwoHzSemaphore is a BINARY semaphore, so a give that arrives before the
-     * previous take is simply dropped, which inverts the parity and shifts the
-     * whole clock by half a second. What is counted below is elapsed
-     * milliseconds, so a missed tick, a late tick or a doubled tick all come
-     * out the same. */
+    /* What is counted below is elapsed milliseconds, not a parity of 2 Hz
+     * ticks: xTwoHzSemaphore is a BINARY semaphore, so a give that arrives
+     * before the previous take is simply dropped, which would invert a
+     * parity filter and shift the whole clock by half a second. Counting
+     * elapsed time instead means a missed tick, a late tick or a doubled
+     * tick all come out the same. */
     for (;;)
     {
         xSemaphoreTake(xTwoHzSemaphore, portMAX_DELAY);
@@ -558,7 +1372,8 @@ void vUptimeTask(void *pvParameters)
  * Serial report helpers
  *
  * All output is assembled into a static buffer (SBUF_SIZE bytes) and
- * flushed with a single Serial.write() call.
+ * flushed by report_write(), which writes it out in bounded chunks
+ * rather than one blocking call (see below).
  * ====================================================================== */
 
 #if defined(GPSDO_BLUETOOTH_PARALLEL)
@@ -619,44 +1434,74 @@ static int s2(char *buf, int pos, uint8_t v)
 
 /* Write a report without ever blocking the caller for long.
  *
- * STM32duino's USBSerial::write() loops while the transmit queue is full for
- * as long as the host is connected. A host that has enumerated the CDC port
- * but is not draining it — a closed terminal, a Windows box that opened the
- * port and walked away, a `screen` session someone suspended — therefore
- * stops the calling task dead, inside the write, after the mutex is taken.
- * The 30 ms mutex timeout does not help: the block is on the far side of it.
+ * STM32duino's USBSerial::write() loops while the transmit queue is full
+ * for as long as the host is connected. A host that has enumerated the
+ * CDC port but is not draining it — a closed terminal, a Windows box
+ * that opened the port and walked away, a suspended `screen` session —
+ * therefore stops the calling task dead, inside the write, after the
+ * mutex is taken. The 30 ms mutex timeout does not help: the block is
+ * on the far side of it.
  *
- * The task that calls this is vDisplayTask, which also drives the OLED, the
- * LCD, the TM1637 and the TFT. So the visible symptom of "USB connected, host
- * not reading" is that the DISPLAY FREEZES, which reads as a crashed board and
- * is nothing of the kind. Reported from the field by Dave (Solder_Junkie) on
- * EEVblog, whose board ran fine until a USB cable went in.
+ * The task that calls this is vDisplayTask, which also drives the OLED,
+ * the LCD, the TM1637 and the TFT, so the visible symptom of "USB
+ * connected, host not reading" is that the DISPLAY FREEZES — which reads
+ * as a crashed board and is nothing of the kind, matching a board that
+ * ran fine until a USB cable went in.
  *
- * The first cut of this guard asked availableForWrite() once and dropped the
- * WHOLE report when it returned less than the report size. That silenced the
- * 1 Hz telemetry on USB CDC entirely: the CDC transmit queue is
- * USB_FS_MAX_PACKET_SIZE * CDC_TRANSMIT_QUEUE_BUFFER_PACKET_NUMBER = 64 * 2
- * = 128 bytes (stm32duino 2.12.0 defaults), the human report is 400+ — so room
- * was always 128 and always less than n, and no report ever went out. On a
- * UART with the 512-byte TX buffer of build_opt.h it happened to fit, which
- * is why the failure looked configuration-dependent.
+ * Asking availableForWrite() once and dropping the whole report when it
+ * returned less than the report size was tried and rejected: the CDC
+ * transmit queue is USB_FS_MAX_PACKET_SIZE *
+ * CDC_TRANSMIT_QUEUE_BUFFER_PACKET_NUMBER = 64 * 2 = 128 bytes, the
+ * report is 400+, so room was always less than n and no report ever
+ * went out over USB CDC — while a UART with the 512-byte TX buffer of
+ * build_opt.h happened to fit, making the failure look
+ * configuration-dependent. (Two packets is the core's default; build_opt.h
+ * has since raised it to 16, a 1024-byte queue, which the chunked write
+ * below does not depend on.)
  *
- * So write in CHUNKS no larger than what the port says it can take now, and
- * give up on the remainder after REPORT_WRITE_BUDGET_MS. A draining host
- * empties the 128-byte queue in well under a millisecond of polling, so the
- * whole report goes out in a few iterations; a host that is not reading
- * stalls the first chunk and the tail is dropped — which is the intended
- * behaviour, because telemetry is a live stream, not a log, and the next
- * report is a second away. HardwareSerial::write() blocks rather than drops
- * when its buffer fills, but a room-sized chunk never asks it to. */
-#define REPORT_WRITE_BUDGET_MS 25u
-static bool report_write(const uint8_t *buf, int n)
+ * So write in CHUNKS no larger than what the port says it can take now,
+ * and give up on the remainder after the port's budget. A draining
+ * host empties the 128-byte queue in well under a millisecond of
+ * polling, so the whole report goes out in a few iterations; a host
+ * that is not reading stalls the first chunk and the tail is dropped —
+ * the intended behaviour, because telemetry is a live stream, not a
+ * log, and the next report is a second away. HardwareSerial::write()
+ * blocks rather than drops when its buffer fills, but a room-sized
+ * chunk never asks it to.
+ *
+ * (On the first paragraph, as of build 68: in the current core "connected"
+ * is CDC_connected() - configured, the host's DTR set and no transfer
+ * stalled for more than 3 ms - so a host that stops polling releases
+ * write() within ~3 ms, and with no terminal open it writes nothing at all.
+ * A host that keeps reading slowly can still hold it, and older cores did
+ * not make all of these checks.)
+ *
+ * TWO PORTS, TWO WRITES (build 68). With GPSDO_BLUETOOTH_PARALLEL the report
+ * went through the tee, whose availableForWrite() takes a zero from one port
+ * as no constraint from that side and answers with the other's room. From
+ * the CDC a zero means a full queue, so the tee then wrote the chunk to BOTH
+ * ports - USBSerial::write() into the full queue, for as long as it keeps
+ * trying, with the Bluetooth copy waiting behind it. Found by Zsolt Zsiros
+ * (ZsZs73) in his fork of this firmware. So each port is written on its own,
+ * Bluetooth first, each with its own budget: 25 ms for the CDC, as before,
+ * and 200 ms for the UART, which drains at its baud rate whoever is
+ * listening (57600 baud: ~5.8 bytes/ms, so 200 ms carries a whole report
+ * even behind a full buffer). The offset moves by what write() says it
+ * took, not by what it was offered, and a write that takes NOTHING ends
+ * that port's attempt at once: HardwareSerial never refuses a chunk that
+ * fits its room, so a zero is a USBSerial with no host to send to (no DTR,
+ * not configured) or a stalled transfer - retrying it would only burn the
+ * budget, every second, on every board with nothing on its USB port. */
+#define REPORT_USB_BUDGET_MS  25u
+#define REPORT_BT_BUDGET_MS  200u
+static bool report_write_one(Stream &port, const uint8_t *buf, int n,
+                             uint32_t budget_ms)
 {
     if (n <= 0) return true;
     uint32_t t0 = millis();
     int off = 0;
     while (off < n) {
-        int room = REPORT_SERIAL.availableForWrite();
+        int room = port.availableForWrite();
         /* room == 0 is ambiguous: a FULL CDC queue reports 0, and so would a
          * port that cannot answer. Every port this firmware ships —
          * HardwareSerial, USBSerial, TeeSerial — answers properly, so treat
@@ -666,15 +1511,31 @@ static bool report_write(const uint8_t *buf, int n)
          * wrapper exists to prevent. */
         if (room > 0) {
             int chunk = (room < (n - off)) ? room : (n - off);
-            REPORT_SERIAL.write((uint8_t *)buf + off, (size_t)chunk);
-            off += chunk;
+            size_t took = port.write(buf + off, (size_t)chunk);
+            if (took == 0) return false;    /* no host, or a stalled CDC */
+            off += (int)took;
         } else {
             taskYIELD();
         }
-        if (off < n && (millis() - t0) >= REPORT_WRITE_BUDGET_MS)
+        if (off < n && (millis() - t0) >= budget_ms)
             return false;               /* tail dropped, display must live */
     }
     return true;
+}
+
+static bool report_write(const uint8_t *buf, int n)
+{
+#if defined(GPSDO_BLUETOOTH_PARALLEL)
+    /* g_tee is (Serial, Serial2): port_b() the Bluetooth UART, first, and
+     * port_a() the USB CDC. */
+    bool bt_ok  = report_write_one(g_tee.port_b(), buf, n, REPORT_BT_BUDGET_MS);
+    bool usb_ok = report_write_one(g_tee.port_a(), buf, n, REPORT_USB_BUDGET_MS);
+    return bt_ok && usb_ok;
+#elif defined(GPSDO_BLUETOOTH)
+    return report_write_one(REPORT_SERIAL, buf, n, REPORT_BT_BUDGET_MS);
+#else
+    return report_write_one(REPORT_SERIAL, buf, n, REPORT_USB_BUDGET_MS);
+#endif
 }
 
 /* ---- Tab-delimited report -------------------------------------------- */
@@ -795,6 +1656,11 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
     p=sa(buf,p,"  Vctl:"); p=sd(buf,p,((double)c->avg_vctl_adc/4096.0)*3.3*g_adc_vdiv,3);
     p=sa(buf,p,"V");
     if (c->holdover_mode) p=sa(buf,p," [HOLDOVER]");
+    /* The loop going from one end of the DAC to the other with no lock
+     * between (build 65, health_watch_loop): in the trend word's place, one
+     * token, so a parser that takes the last word of the line - the tuner -
+     * shows it as it would any other state. */
+    else if (health_rails_alarm()) p=sa(buf,p," RAILS");
     else { p=sa(buf,p," "); p=sa(buf,p,c->trendstr); }
     /* live self-learning telemetry: always shown when LRN is on, so the user
      * can see it is active even before it has gathered enough to act on */
@@ -868,11 +1734,17 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
              * for twelve hours. Only shown once it is worth looking at. */
             if (k.rej_pct >= 0.5f) { p=sa(buf,p,"("); p=sd(buf,p,(double)k.rej_pct,1); p=sa(buf,p,"%)"); }
             if (k.r_pinned) p=sa(buf,p," Rpin");
+            /* KF in force of KC (build 69): a disturbance is being nulled. */
+            if (k.dist) p=sa(buf,p," KF");
             if (k.arms) { p=sa(buf,p," arm="); p=si(buf,p,(int)k.arms); }
             if (k.holdover_s) { p=sa(buf,p," HOLD="); p=si(buf,p,(int)k.holdover_s);
                                 p=sa(buf,p,"s"); }
         } else if (c->active_algo == 10) {
-            /* Algo 10 (LTIC three-stage) is a state machine, not an LRN loop. */
+            /* Algo 10 (LTIC three-stage): its state is what this line has
+             * room for. It does run on the LRN feed-forward too — the learned
+             * drift and damping are applied in every state and learned in
+             * LOCK (lrn_update_ef in ltic_three_stage), which is why LRN 0|1|R
+             * matters here — and LRN with no argument prints them. */
             static const char *ltic_st[] = { "ACQ", "DPLL", "LOCK" };
             uint8_t st = g_ltic.state;
             p=sa(buf,p," state="); p=sa(buf,p,(st <= 2) ? ltic_st[st] : "?");
@@ -933,14 +1805,26 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
     }
 #endif
     /* CPU load, appended LAST on purpose: every reader of this line — the
-     * tuner, the log scrapers — searches for its field rather than anchoring at
-     * the end, but adding a field in the middle is still the kind of change
-     * that silently breaks somebody's regex. The end is free. */
-    /* cpu_load_tick() used to be called here, which meant TAB (pause telemetry)
-     * also paused the load measurement. It is driven from vUptimeTask now. */
+     * tuner, the log scrapers — searches for its field rather than
+     * anchoring at the end, but adding a field in the middle is still the
+     * kind of change that silently breaks somebody's regex. The end is
+     * free; the load itself is sampled in vUptimeTask, not here. */
     {
         uint8_t ld = cpu_load_pct();
         if (ld <= 100u) { p=sa(buf,p,"  CPU:"); p=si(buf,p,(int)ld); p=sa(buf,p,"%"); }
+    }
+    /* The LM75's temperature (build 68), after CPU for the same reason CPU
+     * went last, and only on a board where the sensor answered at boot.
+     * "---" once it has stopped answering, so a script reading LM75: and
+     * digits finds no reading rather than the last good one. Three decimals:
+     * an LM75A, NXP LM75B or PCT2075 steps in 1/8 of a degree, which they
+     * carry exactly, and a TMP1075's 1/16 still prints as sixteen distinct
+     * values (9-bit parts - the original LM75, a TMP75/175 as it powers up -
+     * step in 1/2). The log should carry the step, not a rounding of it. */
+    if (s_lm75_ok) {
+        p=sa(buf,p,"  LM75:");
+        if (g_lm75_valid) { p=sd(buf,p,(double)g_lm75_temp,3); p=sa(buf,p,"C"); }
+        else              { p=sa(buf,p,"---"); }
     }
     /* Per-task breakdown, only when TL 1 asked for it. Appended to the sensor
      * line rather than given one of its own so a capture keeps one row per
@@ -1154,7 +2038,6 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   /* Colours (RGB565) */
   #define TFT_COL_BG      TFT_BLACK
   #define TFT_COL_HEADER  0x0A33u        /* dark navy           */
-  #define TFT_COL_LABEL   0x0C1Fu        /* brighter navy — data labels */
   #define TFT_COL_VALUE   TFT_WHITE      /* white — data values          */
 
   /* Frame/separator colour — white on both panels. Besides matching the big
@@ -1168,10 +2051,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   #define TFT_COL_FREQ    TFT_WHITE      /* white — frequency (green on lock) */
   #define TFT_COL_HOLD    0xFC60u        /* orange              */
   #define TFT_COL_ALERT   0xF800u        /* red                 */
-  /* Yellow. Reserved: it carried the SURVEY notice in the header until that
-   * moved onto the status bar, where the text is black on a colour-coded band
-   * and needs no accent of its own. Kept as a palette slot because the header
-   * sprite is 4-bit and has fifteen spare entries anyway. */
+  /* Yellow. Reserved: the SURVEY notice lives on the status bar instead,
+   * where the text is black on a colour-coded band and needs no accent of
+   * its own. Kept as a palette slot because the header sprite is 4-bit and
+   * has fifteen spare entries anyway. */
 #define TFT_COL_NOTICE  0xFFE0u        /* yellow              */
   #define TFT_COL_SINEL   0x3D7Fu        /* blue  (left wave)   */
   #define TFT_COL_SINER   0xFD80u        /* amber (right wave)  */
@@ -1179,9 +2062,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   /* ── Freq-band sprite (4-bit double buffer) ──────────────────────────────
    * The frequency readout and the busy message (SVIN/WARMUP/CAL) share the
    * band between the header separator (y=TFT_SY(22)) and the freq separator
-   * (y=TFT_SY(58)). The old code drew directly to the panel: setTextPadding
-   * erased ~16 k px (480×34) of background BEFORE each redraw, and that
-   * erase-then-draw on the live panel flickered visibly once per second.
+   * (y=TFT_SY(58)). Drawing directly to the panel was tried and rejected:
+   * setTextPadding erased ~16 k px (480×34) of background BEFORE each
+   * redraw, and that erase-then-draw on the live panel flickered visibly
+   * once per second.
    *
    * The 4-bit sprite erases + draws the whole band in RAM (invisible) then
    * pushes it to the panel in ONE continuous transfer. The separator and the
@@ -1197,14 +2081,14 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
 /* Right-edge anchor for the frequency reading (MR_DATUM), both panels.
  *
- * The small panel used to centre the string instead. For the nominal reading
- * the two agree exactly — font 1 at size 3 is fixed-width 18 px, so
- * "10000000.0000 Hz" is 16 x 18 = 288 px and centring leaves 16 px margins,
- * which is where an anchor 16 px in from the right edge puts it too. They part
- * company only while the string is SHORTER, during acquisition: centred, the
- * decimal point walks sideways as digits appear; anchored, it stays put and
- * only the leading digits move. That is the reason the big panel anchors, and
- * it applies here identically. */
+ * Centring the string on the small panel was tried and rejected. For the
+ * nominal reading the two agree exactly — font 1 at size 3 is fixed-width
+ * 18 px, so "10000000.0000 Hz" is 16 x 18 = 288 px and centring leaves
+ * 16 px margins, which is where an anchor 16 px in from the right edge
+ * puts it too. They part company only while the string is SHORTER,
+ * during acquisition: centred, the decimal point walks sideways as
+ * digits appear; anchored, it stays put and only the leading digits
+ * move. That is why the big panel anchors too, identically. */
 #if !defined(GPSDO_TFT_ILI9488)
   #define FREQ_ANCHOR_X    (TFT_W - 16)
 #endif
@@ -1214,8 +2098,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
    * 16 chars, FreeMonoBold24 is fixed-width at 28 px, so 448 px wide, and
    * (480 + 448) / 2 = 464 — i.e. 16 px in from the panel edge, mirroring the
    * 16 px of air the nominal string leaves on the left. Verified on-panel;
-   * the small panel uses the padded-field approach instead (see the format
-   * block in the display task). */
+   * the small panel anchors the same way, at a different offset (see
+   * FREQ_ANCHOR_X above). */
   #define FREQ_ANCHOR_X    464
 #endif
   /* palette indices */
@@ -1228,7 +2112,6 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
    * indices are not interchangeable with the PAL_* above. */
   #define HPAL_BG      0    /* navy    (header band background)           */
   #define HPAL_WHITE   1    /* white   (name, version, clock)             */
-  #define HPAL_NOTICE  2    /* yellow  (spare; see TFT_COL_NOTICE)        */
   static TFT_eSprite s_freq_sprite(&s_tft);
   static bool        s_freq_sprite_ok = false;   /* false → direct-draw fallback */
 
@@ -1296,10 +2179,6 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
   #define TFT_COL_R       TFT_S(168)     /* right column label x  */
   #define TFT_SENS_Y      (TFT_SY(172) + TFT_YOFF)  /* sensor row 1 top      */
   #define TFT_STATUS_Y    (TFT_SY(212) + TFT_YOFF)  /* status bar top (half-height bar) */
-  /* right-edge anchor for right-column values (pinned to screen edge) */
-  #define TFT_COL_RVAL    (TFT_W - TFT_S(8))
-  /* left-column value anchor: right edge of the left half */
-  #define TFT_COL_LVAL    (TFT_S(158))
 
   /* Previous-value cache for selective redraw. One entry per drawn field, and
    * fields have been split into label+value repeatedly (AHT humidity, qErr,
@@ -1542,16 +2421,13 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
        * screen share a visual anchor. --- */
       s_tft.setTextDatum(MC_DATUM);
       s_tft.setTextPadding(0);
-      /* Subtitle only — the big green "GPSDO" title was dropped in v0.93; the
-       * splash leads with "GPS Disciplined OCXO" raised to the top.
+      /* Subtitle only: the splash leads with "GPS Disciplined OCXO" raised
+       * to the top.
        *
-       * Font 4, not GFXFF. The splash was the last GFX holdout, which meant a
-       * user upgrading from v0.92 still had to add LOAD_GFXFF to User_Setup.h
-       * or watch this line collapse to a lone "p" — an obscure failure for a
-       * cosmetic gain. Font 4 carries the full alphabet, so the splash now
-       * needs nothing beyond the fonts the operating screen already loads.
-       * (Fonts 6/8 are the ones that hold only 0-9 . : - a p m; 1/2/4 are
-       * complete.) */
+       * Font 4, not GFXFF: the splash needs nothing beyond the fonts the
+       * operating screen already loads. Font 4 carries the full alphabet;
+       * fonts 6/8 hold only 0-9 . : - a p m, so this text would collapse
+       * to a single glyph in either. Fonts 1/2/4 are complete. */
       TFT_FONT_STATUS(s_tft);                   /* font 4 / GF_STATUS */
       s_tft.setTextColor(0x9CD3, TFT_COL_BG);   /* soft blue-grey */
       s_tft.drawString("GPS Disciplined OCXO", TFT_W/2, TFT_SY(28));
@@ -1565,12 +2441,9 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       s_tft.drawString("inspired by STM32-GPSDO v0.06c by Andre Balsa",
                        TFT_W/2, TFT_SY(218));
 
-      /* The animated boot sequence below — two oscillators fading in out of
-       * phase, drifting into agreement, and merging into one green wave with a
-       * halo of victory — is a small labour of love. Some souls, however, are
-       * immune to art and just want to see "10 MHz" already. `SPL 0` is for
-       * them: title and credits, a dignified two-second pause, done. Their
-       * loss. (SPL 1 restores civilisation; saved by ES.) */
+      /* SPL 0 skips the animated boot sequence: title and credits, a brief
+       * pause, done. SPL 1 (default) plays the two-oscillator wave
+       * animation below. */
       if (!g_splash_enable) {
           vTaskDelay(pdMS_TO_TICKS(2000));
           return;
@@ -1579,8 +2452,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       /* --- two phase-shifted waves converging to synchronism ---
        * Animation requires redrawing each frame, so each wave is erased
        * (drawn in background colour) before the next frame is drawn. The
-       * wave band is raised (now that the header bar is gone) to sit below
-       * the title, clear of the credits. All geometry scales with TFT_S().
+       * wave band sits below the title, clear of the credits. All geometry
+       * scales with TFT_S().
        * The waves also FADE IN: their colour is blended from the background
        * toward full colour over the first ~3 s, a soft tonal reveal. */
       const int   yc      = TFT_SY(108); /* wave centre line              */
@@ -1724,9 +2597,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
        * as "not detected". `ok` reflects runtime detection: a compiled-in
        * device that wasn't found stays as an orange [ ]. OCXO/GPS are always
        * present. Sensors collapse to one row, shown if ANY sensor is built
-       * in. Keeping this consistent across all rows is the whole point —
-       * OLED and the sensor row previously forced show=true and so appeared
-       * even when not compiled. */
+       * in. */
       struct { const char *label; bool ok; bool show; } rows[] = {
           { "OCXO  discipline loop", true,   true   },
 #ifdef GPSDO_GPS_TIMING
@@ -1845,40 +2716,30 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
   /* Where the CPU reading goes in the header, and whether it fits at all.
    *
-   * IT BELONGS ON THE CENTRE LINE OF THE BAR. That is where the eye looks for
-   * it with a name on the left and a clock on the right, and two earlier
-   * versions of this got it wrong in opposite directions.
+   * It sits on the centre line of the bar, between the name on the left
+   * and the clock on the right. Centring at TFT_W/2 can clip into the
+   * clock's own glyphs on the 480 panel, and centring in the nominal gap
+   * (anchor minus HDR_LMT_PAD) leaves the text visibly off-centre because
+   * that padding reserves more room than the clock's glyphs actually use.
    *
-   * The first drew it at TFT_W/2 with no arithmetic and lost the '%' on the 480
-   * panel: the LMT field is right-anchored with a padding of HDR_LMT_PAD, and
-   * TFT_eSPI's padding erase is a rectangle of that width ending at the anchor,
-   * 276..471 there. "CPU 66%" in FreeSans9pt is about 79 px, so centred at 240
-   * its right edge lands near 279 — three pixels inside that band — and the
-   * clock, drawn afterwards, wiped the last glyph.
+   * Both draw paths put CPU down last, so nothing erases it afterwards;
+   * the only thing it must not touch is the clock's glyphs, and their
+   * left edge is the anchor less the MEASURED width of the string being
+   * shown — not the padding, which is not the obstacle. Between the name
+   * and that edge there is room for the centre line on both panels, so
+   * that is where it goes, with the gap centre kept only as a fallback
+   * for a header that is too crowded to hold it there.
    *
-   * The second measured the gap and centred in it. Nothing clipped, and the
-   * whole string sat visibly left of centre, because HDR_LMT_PAD reserves far
-   * more room than the clock's glyphs actually use.
+   * The erase band is sized to the widest field ("CPU 100%"), not to the
+   * gap, so a shorter reading centred on the same x sits wholly inside
+   * it. Every width is asked of the font rather than assumed — the two
+   * panels do not even use the same face (classic font 2 vs GFXFF). If
+   * the slot cannot hold the string, draw nothing: a clipped number is
+   * worse than none.
    *
-   * THE PADDING IS NOT THE OBSTACLE. THE CLOCK'S TEXT IS. Both draw paths put
-   * CPU down last, so nothing can erase it afterwards; the only thing it must
-   * not touch is the clock's glyphs, and their left edge is the anchor less the
-   * measured width of the string being shown. Between the name and that edge
-   * there is room for the centre line on both panels, so that is where it goes,
-   * with the gap centre kept only as the fallback for a header that really is
-   * too crowded — a long clock format, a wider face, a narrower panel.
-   *
-   * The erase band is sized to the FIELD, not to the gap: "CPU 100%" is the
-   * widest this ever gets, and a shorter reading centred on the same x sits
-   * wholly inside it. Sizing it to the gap, as the second version did, is what
-   * forced the text off-centre to keep the erase away from its neighbours.
-   *
-   * Every width is asked of the font rather than assumed — the two panels do
-   * not even use the same face (classic font 2 against GFXFF). If the slot
-   * cannot hold the string, draw nothing: a clipped number is worse than none.
-   *
-   * TFT_eSprite derives from TFT_eSPI, so one helper serves the sprite path and
-   * the direct-draw fallback, and both measure with the font they have set. */
+   * TFT_eSprite derives from TFT_eSPI, so one helper serves the sprite
+   * path and the direct-draw fallback, and both measure with the font
+   * they have set. */
   static bool hdr_cpu_slot(TFT_eSPI &o, const char *cs, const char *clk,
                            int *cx, int *pad)
   {
@@ -1903,19 +2764,18 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       return true;
   }
 
-  /* Per-second update — called from vDisplayTask main loop */
-  /* IS THE LOOP ACTUALLY LOCKED?
+  /* Per-second update — called from vDisplayTask main loop.
    *
-   * One verdict, two consumers: the colour of the frequency digits and the
-   * status bar below them. It used to live inline in the digits and the bar
-   * did not consult it at all, which is how a board thirty seconds into
-   * acquisition came to display "DISCIPLINED FIX OK" on lock green. Extracted
-   * so the two cannot disagree — green here means green there, by
-   * construction rather than by both being written the same way twice.
+   * IS THE LOOP ACTUALLY LOCKED?
+   *
+   * One verdict, two consumers: the colour of the frequency digits and
+   * the status bar below them. Computed once so the two cannot disagree
+   * — green here means green there, by construction rather than by both
+   * being written the same way twice.
    *
    * Green must mean a TRUSTWORTHY, CURRENT lock — not the echo of a long
-   * averaging window (a 1000 s average keeps showing ~10 MHz for minutes after
-   * discipline is lost, e.g. when LTIC drops to ACQ). */
+   * averaging window (a 1000 s average keeps showing ~10 MHz for minutes
+   * after discipline is lost, e.g. when LTIC drops to ACQ). */
   static bool tft_loop_locked(const FreqSnap_t *f, const CtrlData_t *c)
   {
       bool locked = false;
@@ -1923,56 +2783,32 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           c->active_algo == 12) {
           /* All three loops publish an authoritative live state and use the
            * same trend vocabulary, so green comes ONLY from the trend — no
-           * long-average fallback.
-           *
-           * ALGORITHM 12 WAS MISSING FROM THIS LIST and fell through to the
-           * frequency-average branch below, which is exactly what the comment
-           * above says green must not be. Measured over the 20.08 16:04 run,
-           * 2.99 h: the loop and the colour disagreed for 15.0% of the
-           * samples, and every one of those was the loop LOCKED with the
-           * digits WHITE. Two causes, both structural rather than marginal:
-           *
-           *   For the first 17 minutes neither the 10 000 s nor the 1000 s
-           *   average exists, so `locked` below is false by construction. The
-           *   loop reached LOCK at 219 s and the digits stayed white until
-           *   1041 s — thirteen and a half minutes of a disciplined oscillator
-           *   looking undisciplined. 48% of the disagreement.
-           *
-           *   The rest is the stale-echo guard, fixed separately below.
+           * long-average fallback. A loop missing from this list falls
+           * through to the frequency-average branch below, which has no
+           * lock state of its own: for the first several minutes after boot
+           * neither the 10 000 s nor the 1000 s average yet exists, so a
+           * fallen-through loop reads as unlocked however it is actually
+           * doing.
            *
            * CORR and ZC count as locked. They are one-second states that mean
            * the loop is DOING ITS JOB — this algorithm corrects on a schedule
-           * as a form of self-test, which is the same reasoning that keeps them
-           * from resetting s_mla_quiet in the loop itself. Without this the
-           * digits would blink white once per correction: 16 times in the three
-           * hours measured. */
+           * as a form of self-test, which is the same reasoning that keeps
+           * them from resetting s_mla_quiet in the loop itself. Without this
+           * the digits would blink white once per correction. */
           locked = (strncmp(c->trendstr,"LOCK",4) == 0);
           if (!locked && c->active_algo == 12)
               locked = (strncmp(c->trendstr,"CORR",4) == 0) ||
                        (strncmp(c->trendstr,"ZC",2)   == 0);
 #ifdef GPSDO_LTIC
       } else if (c->active_algo == 13) {
-          /* ALGORITHM 13 WAS MISSING FROM THE LIST ABOVE — the same omission
-           * as algorithm 12's, one algorithm later, and worse here because the
-           * trend test could never have matched even if 13 had been listed:
-           * the Kalman loop does not emit "LOCK". Its whole vocabulary is
-           * KAL / REJ / NOPH / ARM / WAIT / NoCT / NoPL.
+          /* The Kalman loop (13) never emits "LOCK": its trend vocabulary is
+           * KAL / REJ / KEPT / NOPH / ARM / WAIT / NoCT / NoPL, so it needs
+           * its own verdict rather than the strncmp("LOCK") test above.
            *
-           * So 13 fell through to the frequency-average branch below, which is
-           * written for loops that have no lock state and is precisely what the
-           * comment above says green must not come from. Consequences, both
-           * structural rather than marginal: for the first seventeen minutes
-           * neither long average exists, so `locked` is false by construction
-           * and a filter that reached the band in three minutes showed
-           * ACQUIRING and white digits for fourteen more; and after that the
-           * verdict was a statement about the COUNTER while the loop's own
-           * estimate of phase and of its own uncertainty — the two things only
-           * this algorithm has — went unread.
-           *
-           * The verdict now comes from the filter, computed where the filter
-           * knows it. See the derivation at the "IS THE LOOP LOCKED?" block in
-           * gpsdo_algorithms.cpp: detector fed this second, estimated phase
-           * inside the LC-measured band, and a covariance small enough for that
+           * The verdict comes from the filter itself, computed where the
+           * filter knows it — see the "IS THE LOOP LOCKED?" derivation in
+           * gpsdo_algorithms.cpp: detector-fed, estimated phase inside the
+           * LC-measured band, and a covariance small enough for that
            * estimate to mean anything. */
           locked = kf_locked();
 #endif
@@ -1990,21 +2826,17 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
                *
                * The 10 s average is a cycle count over ten seconds, so its
                * granularity is 0.1 Hz and it can only ever read a multiple of
-               * that. Measured over the 20.08 16:04 run it took exactly three
-               * values — -100, 0 and +100 mHz — and nothing between. A
-               * threshold of 50 mHz is therefore HALF A COUNT: it does not mean
-               * "within 50 mHz", it means "the counter must read exactly
-               * 10 000 000", and a single count either way killed the green.
-               * That happened on 8.3% of settled samples and accounted for 46%
-               * of the colour disagreeing with the loop.
+               * that. A threshold of 50 mHz is therefore HALF A COUNT: it does
+               * not mean "within 50 mHz", it means "the counter must read
+               * exactly 10 000 000", so a single count either way kills the
+               * green.
                *
                * 0.15 Hz is one count plus half a count of margin: a one-count
                * wobble passes, and a genuine loss of discipline — which is many
                * counts, and is what this guard exists to catch — still fails
                * it. The alternative, testing avg100 against 50 mHz, is
-               * meaningful on ITS grid (10 mHz, and it never left +/-50 mHz in
-               * three hours) but responds in 100 s where the point of this
-               * guard was to kill the green in about ten. */
+               * meaningful on ITS grid (10 mHz) but responds in 100 s where the
+               * point of this guard is to kill the green in about ten. */
               double e10 = f->avg10 - 10000000.0;
               if (e10 < -0.150 || e10 > 0.150) locked = false;  /* stale echo */
           }
@@ -2127,19 +2959,18 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           }
           if (busy) {
               /* One phrasing for every long-running procedure: a spelled-out
-               * name, then its progress figure. Short codes like "SVIN"/"CAL"
-               * told the user little, and "CAL" was ambiguous — C, CT and LC
-               * take very different times, so the countdown alone was
-               * confusing.
+               * name, then its progress figure. A short code like "CAL" is
+               * ambiguous — C, CT and LC take very different times, so the
+               * name says which one is running.
                *
-               * Note the two figures differ in kind: warmup and the
-               * calibrations count DOWN (seconds left), while survey-in counts
-               * UP — the receiver reports elapsed time, and completion also
-               * depends on accuracy, so a "remaining" figure would be a guess.
-               * The "+/-" marks the accuracy so the pair reads unambiguously.
-               * The label is "Survey" rather than "Survey-in" so the worst
-               * case (a poor-signal fix: four-digit seconds AND three-digit
-               * metres) still fits the 320-px panel in font 4. */
+               * The two figures differ in kind: warmup and the calibrations
+               * count DOWN (seconds left), while survey-in counts UP — the
+               * receiver reports elapsed time, and completion also depends on
+               * accuracy, so a "remaining" figure would be a guess. The "+/-"
+               * marks the accuracy so the pair reads unambiguously. The label
+               * is "Survey" rather than "Survey-in" so the worst case (a
+               * poor-signal fix: four-digit seconds AND three-digit metres)
+               * still fits the 320-px panel in font 4. */
               if (g_svin_active)
                   snprintf(s, sizeof(s), "Survey %us +/-%um",
                            (unsigned)g_svin_dur, (unsigned)g_svin_acc_m);
@@ -2155,10 +2986,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
               }
               fcol = TFT_COL_HOLD;
           } else {
-          /* The verdict lives in tft_loop_locked() now, because the status bar
-           * needs exactly the same one and the two used to disagree. This else
-           * branch continues to the `#undef FW` below — it carries the whole
-           * not-busy path, not just this line. */
+          /* The verdict comes from tft_loop_locked(), shared with the status
+           * bar below so the two cannot disagree. This else branch continues
+           * to the `#undef FW` below — it carries the whole not-busy path,
+           * not just this line. */
           locked = tft_loop_locked(f, c);
 
           if      (c->holdover_mode) fcol = TFT_COL_HOLD;
@@ -2166,17 +2997,17 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
           /* Two panels, two ways of holding the reading still.
            *
-           * 320×240 pads the value to a 14-char field, as the display has done
-           * since v0.89: with a fixed-width font that makes the WHOLE string a
-           * constant width regardless of how many decimals the averaging
-           * window shows, so the centred text has nothing to shift. (Monospace
-           * alone is not enough — it holds the digits steady relative to each
-           * other, but a string that loses a character still gets re-centred,
-           * moving every glyph half a character sideways.)
+           * 320×240 pads the value to a 14-char field: with a fixed-width
+           * font that makes the WHOLE string a constant width regardless of
+           * how many decimals the averaging window shows, so the centred text
+           * has nothing to shift. (Monospace alone is not enough — it holds
+           * the digits steady relative to each other, but a string that loses
+           * a character still gets re-centred, moving every glyph half a
+           * character sideways.)
            *
            * 480×320 leaves the value unpadded and anchors the string by its
            * right edge instead (FREQ_ANCHOR_X) — same result, "Hz" nailed
-           * down, and it is what's verified on that panel. */
+           * down, and verified on that panel. */
 #if defined(GPSDO_TFT_ILI9488)
           #define FW 1
 #else
@@ -2315,22 +3146,19 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
         double vctl = ((double)c->avg_vctl_adc / 4096.0) * 3.3 * g_adc_vdiv;
         dtostrf(vctl, 5, 3, fv);
 #if defined(GPSDO_TFT_ILI9488)
-        /* Split, so "Vct: 1.970 V" can sit on the alignment line while "PWM:"
-         * stays with the other labels at the column's left edge. As one string
-         * only one of those two could be true.
+        /* Split, so "Vct: 1.970 V" can sit on the alignment line while
+         * "PWM:" stays with the other labels at the column's left edge. As
+         * one string only one of those two could be true.
          *
-         * Both carry padding. An earlier version passed zero here, reasoning
-         * that "%5u" and dtostrf(5,3) are fixed-width so nothing could shrink
-         * and leave a tail, and that the font paints its own glyph backgrounds
-         * anyway. On the panel the last PWM digit kept fragments of the digit
-         * before it. Fixed character count is not fixed pixel width — and more
-         * to the point, padding is how every other cell in this file clears
-         * itself, which is a convention that has been working for far longer
-         * than that reasoning had been thought about.
+         * Both carry padding. Zero padding looks safe here because "%5u" and
+         * dtostrf(5,3) are fixed-width, but fixed character count is not
+         * fixed pixel width in a proportional font: without padding the last
+         * PWM digit keeps fragments of the digit before it.
          *
-         * Sized by measurement rather than assumption, like the rows below: the
-         * value's pad is its own widest form, the label's is the rest of the
-         * space up to it, so the two tile the row exactly and cannot overlap. */
+         * Sized by measurement rather than assumption, like the rows below:
+         * the value's pad is its own widest form, the label's is the rest of
+         * the space up to it, so the two tile the row exactly and cannot
+         * overlap. */
         static int16_t vct_w = 0;
         if (vct_w == 0) vct_w = tft_text_w("Vct: 0.000 V");
         snprintf(s,sizeof(s),"PWM: %5u", c->pwm_output);
@@ -2427,24 +3255,6 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       }
   #endif
 #else
-      /* qErr joins the Alt row, grouped with the fix data it belongs to — the
-       * receiver's own report on its 1PPS sits beside the position it came
-       * with, and the row below is then free for the two supply rails.
-       * This is the arrangement the 480 uses; the small panel now matches it.
-       *
-       * The arithmetic, at the 8 px per character this font gives:
-       *     "Alt:175m"     8 ch = 64 px   168..232   (pad 64)
-       *     "qE:+12.3ns"  10 ch = 80 px   232..316   (pad 84, right-anchored)
-       * 64 + 84 = 148 = the width the field had as one cell, so the two
-       * background fills tile it exactly and neither erases the other's tail.
-       *
-       * TWO ABBREVIATIONS PAID FOR THE MOVE, both forced by 20 px:
-       *   - Alt gives up the space after its colon (as Vdd does below);
-       *   - the label is "qE:" not "qErr:".
-       * With "Alt: 175m" and "qErr:" the row wants 168 px and the cell is 148.
-       * Dropping only the spaces gets to 160, still 12 over — the label is the
-       * only remaining 16 px. The value keeps its sign and its decimal, which
-       * is the part that carries information. */
       snprintf(s,sizeof(s), g->pos_valid ? "Alt:%dm" : "Alt:---",
                (int)(g->alt + g_altitude_offset));
       tft_val(9, TFT_COL_R, TFT_GRID_Y+3*TFT_ROW_H, TFT_S(64), TFT_COL_VALUE, s);
@@ -2465,11 +3275,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           } else {
               s[0] = '\0';
           }
-          /* LABEL AND VALUE ARE TWO FIELDS. They were one right-anchored
-           * string, and the label jumped: anchoring the whole thing keeps "ns"
-           * still but drags "qE:" left and right as the digits change width.
-           * The label belongs to the slot, not to the value — exactly what the
-           * 480 branch above says, and this is the same fix.
+          /* LABEL AND VALUE ARE TWO FIELDS. Anchoring them as a single
+           * right-anchored string keeps "ns" still but drags "qEr:" left and
+           * right as the digits change width. The label belongs to the slot,
+           * not to the value — exactly what the 480 branch above does.
            *
            * The label carries padding of its own so that it erases itself when
            * SAW goes off and its string becomes empty. Paddings are MEASURED
@@ -2484,11 +3293,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
            * The anchor is 314, not the cell's own 316: it is the alignment
            * line this panel already uses for Vdd (TFT_W - TFT_S(6)), and dph
            * and the INA current are pinned to it too, so the four right edges
-           * form one column instead of four near-misses.
-           *
-           * The label got its 'r' back. It was cut to "qE:" when the field was
-           * one 148 px cell counted at 8 px per character; measured, the row
-           * has the 6 px, and "qEr:" is the abbreviation that reads as qErr. */
+           * form one column instead of four near-misses. */
           tft_val  (17, TFT_COL_R + TFT_S(64), TFT_GRID_Y+3*TFT_ROW_H,
                     TFT_S(26), TFT_COL_VALUE, saw ? "qEr:" : "");
           tft_val_r(14, TFT_COL_R + TFT_S(146), TFT_GRID_Y+3*TFT_ROW_H,
@@ -2498,28 +3303,27 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif
 
 #if defined(GPSDO_TFT_ILI9488)
-      /* Split so the current lands on the right column's alignment line, level
-       * with the "ns" above it. Both fields need padding: each collapses to a
-       * shorter form when the sensor is missing, and a shrinking string leaves
-       * its old tail behind otherwise.
+      /* Split so the current lands on the right column's alignment line,
+       * level with the "ns" above it. Both fields need padding: each
+       * collapses to a shorter form when the sensor is missing, and a
+       * shrinking string leaves its old tail behind otherwise.
        *
-       * Both dtostrf widths are sized for the LONGEST form, not the usual one,
-       * because dtostrf's width is a minimum rather than a field size — ask for
-       * five and "12.050" still prints six. Get that wrong and the text after
-       * the number jumps a digit's width the moment the value crosses a power of
-       * ten, which is exactly what the pressure field did below 1000 hPa.
-       *   voltage 6: "12.050" / " 4.920".  Reads ~4.9 V today, but the changelog
-       *     has this field as "IN:12.05V" in v0.92, so the crossing is a real
-       *     configuration rather than a hypothetical.
-       *   current 7: "1250.00" / " 178.00".  Draws ~180 mA today with an OCXO,
-       *     but a DOCXO's oven pulls well over an amp on warm-up, and the point
-       *     of this field is to watch exactly that.
+       * Both dtostrf widths are sized for the LONGEST form, not the usual
+       * one, because dtostrf's width is a MINIMUM, not a field size: ask
+       * for five and "12.050" still prints six. Get that wrong and the
+       * text after the number jumps a digit's width the moment the value
+       * crosses a power of ten — exactly what the pressure field did below
+       * 1000 hPa.
+       *   voltage 6: "12.050" / " 4.920", either side of 10 V.
+       *   current 7: "1250.00" / " 178.00": a DOCXO's oven can pull over
+       *     an amp on warm-up, and the point of this field is to watch that.
        *
-       * The split is measured, not apportioned. align_R was measured from the
-       * phase row's whole string, so the current's widest form is the only other
-       * number needed and the two then tile the row exactly. That matters more
-       * here than elsewhere: at 1250 mA the two fields want ~211 px of the 219
-       * available, so there is no room for a constant that guesses wrong. */
+       * The split is measured, not apportioned. align_R was measured from
+       * the phase row's whole string, so the current's widest form is the
+       * only other number needed and the two then tile the row exactly.
+       * That matters more here than elsewhere: at 1250 mA the two fields
+       * want ~211 px of the 219 available, so there is no room for a
+       * constant that guesses wrong. */
       { static char fv[10],fi[10];
         static int16_t ina_ma_w = 0;
         if (ina_ma_w == 0) ina_ma_w = tft_text_w("0000.00 mA");
@@ -2596,18 +3400,19 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif
       }
 #if defined(GPSDO_TFT_ILI9488)
-      /* On 480×320 BMP is split like AHT/Vct: label+temp left-anchored, pressure
-       * right-anchored to align_L so "hPa" sits exactly on the column's
-       * alignment line (same edge as "% rH" below and "V" in Vct above). The
-       * old single-string form let the right edge drift, because dtostrf pads
-       * short numbers with a SPACE (narrower than a '0' in FreeSans), so below
-       * 10 °C or 1000 hPa the whole tail shifted left of align_L. Right-
-       * anchoring the pressure+unit makes that drift invisible: the string's
-       * right edge is pinned no matter what its left pad is.
+      /* On 480×320 BMP is split like AHT/Vct: label+temp left-anchored,
+       * pressure right-anchored to align_L so "hPa" sits exactly on the
+       * column's alignment line (same edge as "% rH" below and "V" in Vct
+       * above). A single right-anchored string would drift instead:
+       * dtostrf pads short numbers with a SPACE (narrower than a '0' in
+       * FreeSans), so below 10°C or 1000 hPa the whole tail would shift
+       * left of align_L. Right-anchoring the pressure+unit alone keeps
+       * that drift invisible: the string's right edge is pinned no matter
+       * what its left pad is.
        *
        * Padding: temp slot is the gap from TFT_COL_L to the pressure slot's
-       * left start. Pressure slot pad TFT_S(70) covers "0000.00 hPa" (~95 px).
-       * align_L − TFT_COL_L ≈ 234, so temp gets ~139 and pressure ~95. */
+       * left start. Pressure slot pad TFT_S(70) covers "0000.00 hPa" (~95
+       * px). align_L − TFT_COL_L ≈ 234, so temp gets ~139 and pressure ~95. */
       {
           const int16_t pres_pad = TFT_S(70);
           const int16_t pres_x   = align_L;
@@ -2653,24 +3458,24 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #endif
       }
 #if defined(GPSDO_TFT_ILI9488)
-      /* AHT sits in the LEFT column of the second sensor row, directly under
-       * BMP: the two environmental sensors now share a column and the
-       * electrical fields — phase, then the supply rails — share the other. It
-       * swapped places with Vph/dph, which is drawn further down in this file
-       * because the phase field has to stay inside the LTIC guard; source order
-       * and screen order part company here.
+      /* AHT sits in the LEFT column of the second sensor row, directly
+       * under BMP: the two environmental sensors share a column and the
+       * electrical fields — phase, then the supply rails — share the
+       * other. Vph/dph is drawn further down in this file because the
+       * phase field has to stay inside the LTIC guard; source order and
+       * screen order part company here.
        *
-       * Temp left-anchored, humidity right-anchored to TFT_COL_LVAL so the
+       * Temp left-anchored, humidity right-anchored to align_L so the
        * "% rH" stays pinned. Two separate slots, so neither floats when the
        * other changes width. Padding: temp TFT_S(70) = 105 px covers
-       * "AHT: 25.50 C" (~103); humidity TFT_S(60) = 90 px covers "45.50 % rH"
-       * (~88). They fill 12..117 and 147..237, and the 30 px between is written
-       * by neither, so it stays background.
+       * "AHT: 25.50 C" (~103); humidity TFT_S(60) = 90 px covers "45.50 %
+       * rH" (~88). They fill 12..117 and 147..237, and the 30 px between is
+       * written by neither, so it stays background.
        *
-       * The right anchor is align_L — the same line "hPa" ends on in the row
-       * above and "Vct: … V" ends on further up, so the column has one edge
-       * rather than three near-misses. That also keeps it clear of Vcc, which
-       * starts at 252 in the next column. */
+       * The right anchor is align_L — the same line "hPa" ends on in the
+       * row above and "Vct: … V" ends on further up, so the column has one
+       * edge rather than three near-misses. That also keeps it clear of
+       * Vcc, which starts at 252 in the next column. */
       { const int16_t rh_pad = TFT_S(60);            /* fits "45.30 % rH" */
         tft_val(12, TFT_COL_L, TFT_SENS_Y + TFT_ROW_H,
                 (uint16_t)(align_L - rh_pad - TFT_COL_L), TFT_COL_VALUE, s);
@@ -2695,69 +3500,55 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 #ifdef GPSDO_LTIC
       /* ---- LTIC phase row (only when the TIC hardware is built in) ----
        * Shows the latched TIC voltage, and — once LC has calibrated the
-       * detector — the derived phase in ns. Phase is measured RELATIVE to the
-       * calibrated zero_offset (the mid-point of the swept band), not from
-       * 0 V, and uses the MEASURED ns_per_volt from LC, mirroring the loop's
-       * own ltic_phase_error_ns(). The old code multiplied the raw voltage by
-       * the compile-time LTIC_NS_PER_VOLT constant (default 0), so it showed
-       * nothing once calibrated and would have been wrong (no zero_offset) if
-       * the constant were set. */
+       * detector — the derived phase in ns. Phase is measured RELATIVE to
+       * the calibrated zero_offset (the mid-point of the swept band), not
+       * from 0 V, and uses the MEASURED ns_per_volt from LC, mirroring the
+       * loop's own ltic_phase_error_ns(). A compile-time constant in its
+       * place would read nothing once calibrated (zero_offset unknown at
+       * compile time) or, if set anyway, would simply be wrong. */
       {
           static char fv[8]; dtostrf((double)g_ltic_voltage, 5, 3, fv);
           const bool cal = (g_ltic.ns_per_volt > 1.0f);
-          /* ns_per_volt is a LOCAL slope: LC reads it in a narrow window around
-           * the anchor it places at 0.632*Vsat, because the ramp is
+          /* ns_per_volt is a LOCAL slope: LC reads it in a narrow window
+           * around the anchor it places at 0.632*Vsat, because the ramp is
            * V = Vsat*(1 - e^(-phase/tau)) and an exponential has no single
            * slope. Far from that anchor the curve flattens and the linear
-           * reading understates the phase; past Vsat the stop pulse has simply
-           * missed the window and the cap charges on to the supply rail, at
-           * which point the number means nothing whatever.
+           * reading understates the phase; past Vsat the stop pulse has
+           * simply missed the window and the cap charges on to the supply
+           * rail, at which point the number means nothing whatever.
            *
-           * That last state is not hypothetical and not rare: it has twice been
-           * reported here as a rock-steady "+1561 ns" while the phase was in
-           * fact somewhere unknown, and both times it cost a measurement before
-           * anyone noticed. A reading that is wrong is recoverable; a reading
-           * that is wrong and looks calm is not.
+           * That saturated state is not hypothetical: it can sit rock-steady
+           * at a plausible reading while the true phase is unknown, and looks
+           * no different from a valid one unless the raw voltage is also
+           * checked against Vsat. A reading that is wrong is recoverable; a
+           * reading that is wrong and looks calm is not.
            *
-           * Vsat is not stored — LC fits it, places the anchor and discards it —
-           * but the anchor IS 0.632*Vsat by construction, so zero_offset
+           * Vsat is not stored — LC fits it, places the anchor and discards
+           * it — but the anchor IS 0.632*Vsat by construction, so zero_offset
            * recovers it. The 15%..85% band is where the local slope stays
            * within about a third of its anchor value.
            *
            * The loop's own guard (railed_now, gpsdo_algorithms.cpp) tests a
-           * hard-coded 3.28 V. On a detector saturating near 2.9 V that never
-           * fires, so it is no help here and is worth a look in its own right.
+           * hard-coded 3.28 V; on a detector saturating near 2.9 V that never
+           * fires, so it gives no protection here.
            *
-           * All of that now lives in ltic_display_phase(), which the serial
-           * report calls too — this row and that line cannot disagree about the
-           * same instant any more, which they have twice.
+           * All of this lives in ltic_display_phase(), which the serial
+           * report calls too, so this row and that line cannot disagree
+           * about the same instant.
            *
-           * The sawtooth comes out there as well, and not gated on the
-           * algorithm: ubx_timtp_correction_ns() returns 0 unless SAW is on and
-           * a fresh qErr exists, and the sawtooth is the receiver's, not the
-           * loop's — it is there to be removed whatever is steering. This is
-           * what makes dph a usable instrument under algorithms 3-9, which never
-           * call the loop's phase path at all.
-           *
-           * 04.09 measured what "usable" is worth there, and it is worth saying
-           * next to the claim: switched from 13 to 7, the phase parked at
-           * +1085 ns and sat there, because a frequency-only loop holds
-           * frequency (3.5e-11 over the following half hour) and has no
-           * mechanism at all for the phase offset a transient leaves behind.
-           * The reading is honest; it is a memory of the last upset rather than
-           * a property of the oscillator. */
+           * The sawtooth comes out there too, and not gated on the algorithm:
+           * ubx_timtp_correction_ns() returns 0 unless SAW is on and a fresh
+           * qErr exists — the sawtooth is the receiver's, not the loop's, so
+           * it is removed whatever is steering. This is what makes dph usable
+           * under algorithms 3-9, which never call the loop's phase path at
+           * all: a frequency-only loop holds frequency but has no mechanism
+           * to correct an accumulated phase offset, so a settled reading
+           * there is a memory of the last transient, not a live property of
+           * the oscillator. */
           double ns = 0.0;
           const bool in_band = ltic_display_phase(&ns);
 
           /* The formatted phase, for BOTH panels.
-           *
-           * It used to be declared inside the 480 branch and used in the 320
-           * one, so the small-panel build did not compile at all — 'phs' was
-           * not declared in that scope. Nothing caught it because until the
-           * TFT_eSPI stub went into tools/hostcheck NOTHING compiled a line of
-           * the display code: every panel switch was off there for want of the
-           * vendor library. A build nobody can build is not a configuration,
-           * it is a rumour.
            *
            * The decimal appears only below 100 ns: the 320 cuts a 55 px pad for
            * this field and its own comment warns that a five-digit reading
@@ -2860,19 +3651,16 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
            * the phase keeps a right anchor so "ns" stays put; only the gap
            * between them changes.
            *
-           * It also would not fit as one string. At 8 px per character
-           * "Vph:1.951V dph:+110ns" is 21 ch = 168 px and this cell is 148 —
-           * which is why it used to sit in the wider left column, and even
-           * there it overflowed by 12 px whenever the detector was calibrated.
-           * Splitting it is what makes the move possible AND fixes that.
+           * It would not fit as one string either: at 8 px per character
+           * "Vph:1.951V dph:+110ns" is 21 ch = 168 px, and this cell is only
+           * 148.
            *
-           * THREE fields now, not two — the label came back. It was dropped
-           * because at 8 px per character the row wanted 168 px of a 148 px
-           * cell; measured, "Vph:1.951V" is 70 px rather than 80 and a bare
-           * "d:" is 10 rather than 16, so the row has 20 px it was never
-           * credited with. Font 2 is proportional; counting characters
-           * overstates it by about a fifth, and that error is what cost this
-           * label in the first place.
+           * THREE fields, not two: the label has its own slot. Counted at 8 px
+           * per character the row seemed to want 168 px of a 148 px cell;
+           * measured, "Vph:1.951V" is 70 px rather than 80 and a bare "d:" is
+           * 10 rather than 16, so the row has 20 px more than character-
+           * counting credited it with. Font 2 is proportional; counting
+           * characters overstates width by about a fifth.
            *
            * The paddings tile the row exactly, so no fill erases a neighbour:
            *     Vph    TFT_S(73) = 73 px   168..241   ("Vph:1.951V"  70)
@@ -2911,12 +3699,11 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       /* Supply rails: Vcc (the 5 V input, halved by a divider on PA0) and Vdd
        * (the MCU's own 3.3 V, from VREFINT: 1.21 V * 4096 / adc).
        *
-       * Deliberately OUTSIDE the LTIC guard above. Neither rail has anything to
-       * do with the TIC hardware; Vdd was only ever gated that way because it
-       * happened to be written next to the phase field, and a board without a
-       * TIC still has a 3.3 V rail worth watching. The two share this row's
-       * right half — the left half is the phase field, which simply stays empty
-       * without LTIC.
+       * Deliberately OUTSIDE the LTIC guard above. Neither rail has anything
+       * to do with the TIC hardware, and gating Vdd on it would hide the
+       * reading on any board without a TIC, which still has a 3.3 V rail
+       * worth watching. The two share this row's right half — the left half
+       * is the phase field, which simply stays empty without LTIC.
        *
        * Drawn as separate fields rather than one string, so neither shifts as
        * the other's width changes: Vcc is left-aligned in the R column, Vdd is
@@ -2952,19 +3739,15 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
           tft_val(18, TFT_COL_R, TFT_SENS_Y + TFT_ROW_H,
                   TFT_S(75), TFT_COL_VALUE, s);
   #endif
-          /* Vdd at full precision. It used to drop to 1 decimal whenever qErr
-           * shared the row — that was the only reason — and qErr has moved up to
-           * the Alt row. Vcc's field ends at 364 and this padding starts at 369,
-           * so the two background fills never meet. */
+          /* Vdd at full precision: Vcc's field ends at 364 and this padding
+           * starts at 369, so the two background fills never meet. */
           dtostrf(vdd, 4, 2, fv);
           snprintf(s, sizeof(s), "Vdd: %s V", fv);
           tft_val_r(15, TFT_W - TFT_S(6), TFT_SENS_Y + TFT_ROW_H,
                     TFT_S(66), TFT_COL_VALUE, s);
 #else
-          /* The two supply rails share this row, which is the arrangement the
-           * 480 uses. qErr has moved up to the Alt row, and that is what made
-           * the space: with it gone, Vdd no longer has to shrink to one decimal
-           * to stay clear, so both rails read at full precision.
+          /* The two supply rails share this row, the same arrangement the 480
+           * uses.
            *
            * The arithmetic, on MEASURED glyph widths rather than 8 px per
            * character — font 2 is proportional and counting characters
@@ -2980,12 +3763,10 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
            * integer part is always one digit. */
   #ifdef GPSDO_VCC
           if (c->avg_vcc_adc > 0) {
-              /* Three decimals, the same as the 480 and as Vctl. This used to
-               * be two because the third digit was reckoned to cost 8 px the
-               * row did not have; measured, it costs 8 px and the row has 10.
-               * The digit is worth having: the divider halves the rail, so one
-               * ADC LSB is ~1.6 mV at the input and the third decimal is
-               * carrying real information rather than dressing up noise. */
+              /* Three decimals, the same as the 480 and as Vctl. The digit is
+               * worth having: the divider halves the rail, so one ADC LSB is
+               * ~1.6 mV at the input and the third decimal carries real
+               * information rather than dressing up noise. */
               static char fc[10];
               dtostrf((double)c->avg_vcc_adc / 4096.0 * 3.3 * 2.0, 5, 3, fc);
               /* See the note on the 480x320 panel: the label follows VS. */
@@ -3036,18 +3817,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       {
           /* WHAT THIS BAR IS ALLOWED TO CLAIM.
            *
-           * It used to read: a position fix present and not in holdover
-           * therefore "DISCIPLINED  FIX OK", in lock green. That is a
-           * statement about the GPS receiver wearing the colours of a
-           * statement about the loop. A board warming up, a board running CT
-           * with its output being deliberately swept, and a board thirty
-           * seconds into acquisition with microseconds of phase error all
-           * showed the same green bar as one that had been inside a
-           * nanosecond for an hour. The single most prominent thing on the
-           * screen was the one thing that could not be wrong, and was.
-           *
-           * It now asks tft_loop_locked() — the same verdict that colours the
-           * frequency digits directly above it, with thresholds that were
+           * It asks tft_loop_locked() — the same verdict that colours the
+           * frequency digits directly above it, with thresholds that are
            * measured rather than guessed. The band and the digits therefore
            * cannot disagree: green here means green there, by construction.
            *
@@ -3064,9 +3835,9 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
            * grid wobble the 0.15 Hz threshold was widened for and still shows
            * a real loss of discipline within two seconds. Believing a GAIN
            * takes five, because a bar that has just gone green and might go
-           * amber again is worth nothing to anybody. Instant on the bad news
-           * was tried first and is wrong for the same reason the digits needed
-           * the wider threshold: one count of jitter is not a fault. */
+           * amber again is worth nothing to anybody. Reacting instantly to bad
+           * news is wrong for the same reason the digits needed the wider
+           * threshold: one count of jitter is not a fault. */
           #define STATUS_LOCK_DWELL   5u
           #define STATUS_UNLOCK_DWELL 2u
           static uint8_t s_lock_run   = 0;
@@ -3190,7 +3961,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
 
   /* TM1637 write cache. The TM1637 protocol is software bit-banged (~5–8 ms
    * for a full 6-digit write at the default bit delay), and the display task
-   * now wakes ~every 150 ms during spinner animations. Without a cache each
+   * wakes ~every 150 ms during spinner animations. Without a cache each
    * wake would re-push identical segments and burn milliseconds for nothing.
    * tm_set() compares against the last pattern and only bit-bangs on a real
    * change, so a spinner that only advances every 200 ms costs one transfer
@@ -3210,7 +3981,7 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
    * wrongly skipped. Call after each showNumberDec*. */
   static inline void tm_cache_invalidate(void) { s_tm_prev_valid = false; }
 
-  /* ---- TM1637 status segment patterns (same as André's original) ------
+  /* ---- TM1637 status segment patterns ------------------------------
    *
    * mid_dashes  — displayed at startup / waiting for GPS fix
    *               All digits show a single middle horizontal bar (segment G).
@@ -3273,8 +4044,8 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       return Wire.endTransmission() == 0;
   }
 
-  /* Write 4 digit patterns + colon state to display RAM */
-  static void ht_write(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3,
+  /* Write 4 digit patterns + colon state to display RAM; true if ACKed */
+  static bool ht_write(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3,
                        bool colon)
   {
       Wire.beginTransmission(HT16K33_I2C_ADDR);
@@ -3285,7 +4056,49 @@ static void print_human_report(const GpsData_t *g, const FreqSnap_t *f,
       Wire.write((uint8_t)0x00);
       Wire.write(d2); Wire.write((uint8_t)0x00);
       Wire.write(d3); Wire.write((uint8_t)0x00);
-      Wire.endTransmission();
+      return Wire.endTransmission() == 0;
+  }
+
+  /* HT16K33 write cache (build 67), as the TM1637 has one. The display task
+   * wakes about seven times a second during an animation and twice a second
+   * otherwise, and most of those wakes would re-send the frame the display
+   * already shows: a 12-byte transfer, ~1.2 ms at the bus's 100 kHz, and a
+   * turn on the I2C bus the sensors share. A frame is four digit patterns and
+   * the colon. Only a write the display ACKed is remembered, so a refused one
+   * is tried again on the next wake. And every HT_REFRESH_MS the chip is set
+   * up again (oscillator on, display on, brightness - harmless on a running
+   * chip) and the frame re-sent whatever it holds: a backpack that browned
+   * out comes back with its oscillator and display off and its RAM blank, and
+   * a RAM write alone would leave it dark. So it is lit again within seconds
+   * - in any mode, the clock's included, whose frame changes every second -
+   * instead of staying dark until a restart, as it did before. */
+  #define HT_REFRESH_MS 10000u
+  static uint8_t  s_ht_prev[5];
+  static bool     s_ht_prev_ok = false;
+  static uint32_t s_ht_prev_ms = 0;
+  static uint32_t s_ht_init_ms = 0;
+  static bool ht_due(const uint8_t f[5])
+  {
+      uint32_t now = millis();
+      return !s_ht_prev_ok || memcmp(s_ht_prev, f, 5) != 0 ||
+             (uint32_t)(now - s_ht_prev_ms) >= HT_REFRESH_MS ||
+             (uint32_t)(now - s_ht_init_ms) >= HT_REFRESH_MS;
+  }
+  static void ht_show(const uint8_t f[5])        /* caller holds xWireMutex */
+  {
+      if (!s_ht_prev_ok || (uint32_t)(millis() - s_ht_init_ms) >= HT_REFRESH_MS) {
+          ht_cmd(0x21);                                 /* oscillator on        */
+          ht_cmd(0x81);                                 /* display on, no blink */
+          ht_cmd(0xE0 | (HT16K33_BRIGHTNESS & 0x0F));   /* brightness           */
+          s_ht_init_ms = millis();
+      }
+      s_ht_prev_ok = ht_write(f[0], f[1], f[2], f[3], f[4] != 0u);
+      if (s_ht_prev_ok) { memcpy(s_ht_prev, f, 5); s_ht_prev_ms = millis(); }
+  }
+  static inline void ht_frame(uint8_t f[5], uint8_t d0, uint8_t d1,
+                              uint8_t d2, uint8_t d3, bool colon)
+  {
+      f[0] = d0; f[1] = d1; f[2] = d2; f[3] = d3; f[4] = colon ? 1u : 0u;
   }
 
   /* Init: oscillator on, display on, brightness; returns true if ACKed */
@@ -3338,10 +4151,10 @@ static const char *day_of_week_str(uint8_t day, uint8_t month, uint16_t year)
  * apply_time_offset — add g_time_offset_min minutes to UTC h:m:s, adjusting
  * the date if that crosses midnight in either direction.
  *
- * Minutes, not hours: half-hour zones (India +5:30, Chatham +12:45) mean the
- * minutes field shifts too, so the old hours-only version could never be
- * right there. Working in total minutes-from-midnight also makes the wrap
- * arithmetic a plain loop instead of the tangle of ifs it replaced.
+ * Minutes, not hours: half-hour zones (India +5:30, Chatham +12:45) shift
+ * the minutes field too, so an hours-only offset could never be right
+ * there. Working in total minutes-from-midnight keeps the wrap arithmetic
+ * a plain loop instead of a tangle of ifs.
  * ----------------------------------------------------------------------- */
 static uint8_t days_in(uint8_t mon, uint16_t yr)
 {
@@ -3628,7 +4441,32 @@ void vDisplayTask(void *pvParameters)
          * clock only changes once a second, so there's nothing to gain from
          * waking faster, and it keeps the display task cheap). */
         bool anim_active = g_warmup_active || g_svin_active || g_calib_active;
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(anim_active ? 150 : 1100));
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(anim_active ? 150 : 1100));
+
+        /* FULL PASS OR LED-ONLY (build 67). The quick wakes are for the LED
+         * spinners and nothing else, but up to build 66 every one of them ran
+         * the whole task: the TFT header rebuilt and pushed, the OLED and LCD
+         * redrawn - six or seven times a second, to show what changes once.
+         * Measured on the author's board (three night logs, b65 and b66): CPU
+         * 55-56 % through survey-in against 27 % after it, this task 41-49 %
+         * of the processor against 24 %. The LED write itself is the small
+         * part: ~1.2 ms on the HT16K33, 5-8 ms bit-banged on a 6-digit TM1637.
+         *
+         * So a wake that no notification caused, during an animation, steps
+         * the LED displays and nothing else. A notification (the PPS from
+         * FreqRelay, a time sentence from the GPS task) still runs the full
+         * pass, and so does any wake 1.1 s after the last full one - the
+         * cadence a board without a PPS has always had - so nothing waits
+         * longer for its update than it did. Outside an animation every wake
+         * is a full pass, exactly as before. The flags are read again after
+         * the wait: an animation that ended during it must not leave its
+         * screen up for another second. */
+        static uint32_t s_full_ms   = 0;
+        static bool     s_full_seen = false;
+        anim_active = g_warmup_active || g_svin_active || g_calib_active;
+        bool full = (notified != 0u) || !anim_active || !s_full_seen ||
+                    (uint32_t)(millis() - s_full_ms) >= 1100u;
+        if (full) { s_full_ms = millis(); s_full_seen = true; }
 
         /* ---- Snapshot shared state ---- */
         FreqSnap_t snap_f;
@@ -3636,24 +4474,24 @@ void vDisplayTask(void *pvParameters)
         CtrlData_t snap_c;
         Uptime_t   snap_u;
 
-        /* snap_c HAD NO INITIALISER AT ALL. Its two neighbours are cleared
-         * here and it was not, so a missed 5 ms xCtrlMutex — a timeout, not an
-         * error, and one that happens whenever the control task is part-way
-         * through its own update — handed every consumer below an
-         * uninitialised stack frame. The yellow LED took its holdover state
-         * from it, the status bar took the algorithm number and the lock
-         * verdict, and trendstr reached the serial report and the LCD with no
-         * terminator at all, so sa() copied whatever followed it on the stack
-         * until it happened to meet a zero byte.
+        /* Copied from the control task's snapshot only when xCtrlMutex is taken
+         * within its 5 ms timeout; otherwise snap_c keeps this previous value
+         * instead of the fresh memset's zero. A missed take is a timeout, not
+         * an error — it happens whenever the control task is part-way through
+         * its own update — but every consumer below needs a valid frame: the
+         * yellow LED reads its holdover state from it, the status bar reads
+         * the algorithm number and lock verdict, and trendstr reaches the
+         * serial report and the LCD, where an unterminated string would make
+         * sa() read past the buffer looking for a terminator that isn't there.
          *
-         * Clearing it would make that safe and would still be untrue:
-         * algorithm 0, PWM 0, no holdover and an empty trend, asserted once in
-         * a while at random, is exactly the kind of wrong that gets believed.
-         * The last good copy is the only answer that is both safe and honest —
-         * the state it describes is one second stale, which is what every
-         * reader on this task already assumes about all three snapshots. The
-         * memset still runs, so the very first pass (before any copy exists)
-         * is defined rather than merely unlikely to be reached. */
+         * Falling back to zero on a miss would be safe but untrue: algorithm
+         * 0, PWM 0, no holdover and an empty trend, asserted once in a while
+         * at random, is exactly the kind of wrong that gets believed. The
+         * last good copy is both safe and honest — the state it describes is
+         * one second stale, which every reader on this task already assumes
+         * of all three snapshots. snap_c is memset every pass regardless, so
+         * the very first pass, before any copy exists, is defined rather than
+         * merely unlikely to be reached. */
         static CtrlData_t s_last_c;
         static bool       s_last_c_ok = false;
 
@@ -3686,14 +4524,10 @@ void vDisplayTask(void *pvParameters)
          * When fix returns after auto-holdover, control task clears
          * holdover_auto and holdover_mode → LED transitions back to ON.
          *
-         * THE OFF TEST USED TO READ (!fix && !hold_auto), which is the one
-         * combination that must not be dark: manual holdover with the fix
-         * since lost. The operator froze the output deliberately, the LED was
-         * pulsing to say so, and the moment the fix dropped it went out —
-         * indistinguishable from a board that had never seen a satellite, at
-         * exactly the moment the frozen output is the only thing holding the
-         * oscillator. Manual holdover outranks the fix here, as it does in the
-         * status bar, so the test asks about holdover of either kind. */
+         * Manual holdover outranks the fix: with the fix lost during a manual
+         * hold, the frozen output is the only thing holding the oscillator,
+         * so the OFF test asks about holdover of either kind, not fix alone —
+         * as it does in the status bar. */
         {
             static uint32_t led_blink_last = 0;
             static bool     led_blink_state = false;
@@ -3742,10 +4576,10 @@ void vDisplayTask(void *pvParameters)
             /* Emit the serial report ONCE PER PPS. vDisplayTask is notified
              * from two ~1 Hz sources — the frequency relay (per PPS) and the
              * GPS parser (per time sentence) — so with a fix it wakes twice a
-             * second and used to print two report lines per second (spotted by
-             * Dan Wiering in RD mode). The display refresh below still runs on
-             * every wake for smoothness; only the serial line is gated, on a
-             * change of the PPS counter. */
+             * second. The display refresh below still runs on every full pass
+             * (every notified wake - see FULL PASS OR LED-ONLY above); only
+             * the serial line is gated, on a change of the PPS counter, so
+             * each PPS produces exactly one report line. */
             static uint32_t s_last_report_pps = 0xFFFFFFFFu;
             if (snap_f.ppscount != s_last_report_pps) {
                 s_last_report_pps = snap_f.ppscount;
@@ -3760,7 +4594,7 @@ void vDisplayTask(void *pvParameters)
          * OLED update
          * ============================================================== */
 #ifdef GPSDO_OLED
-        if (s_oled_ok && xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
+        if (full && s_oled_ok && xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
             char line[18];
 
             /* ---- Page switch ---- */
@@ -3959,7 +4793,7 @@ void vDisplayTask(void *pvParameters)
          * Line 3: PWM + Vctl + trend (or blinking [H] holdover)
          * ============================================================== */
 #ifdef GPSDO_LCD_20x4
-        if (s_lcd_ok && xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
+        if (full && s_lcd_ok && xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
             char line[22];
 
             /* ---- Line 0: frequency ----
@@ -4126,10 +4960,11 @@ void vDisplayTask(void *pvParameters)
 #endif /* GPSDO_LCD_20x4 */
 
         /* ==============================================================
-         * TFT 240x320 update (SPI1 — exclusive bus, no mutex)
+         * TFT 240x320 update (SPI1 — exclusive bus, no mutex). Full passes
+         * only: see "FULL PASS OR LED-ONLY" at the top of the loop.
          * ============================================================== */
 #ifdef GPSDO_TFT
-        if (s_tft_ok)
+        if (full && s_tft_ok)
             tft_update(&snap_g, &snap_f, &snap_c, &snap_u,
                        s_aht_ok, s_bmp_ok, s_ina_ok);
 #endif
@@ -4209,13 +5044,14 @@ void vDisplayTask(void *pvParameters)
              * Dots mask 0b00100100 (= 0x24):
              *   showDots() shifts left from MSB: bit5 → visual pos 2,
              *   bit2 → visual pos 5.
-             *   With digitMap {2,1,0,5,4,3}: visual 2 → reg 0, visual 5 → reg 3.
-             *   Physical registers 0 and 3 carry the colon DP segments on the
-             *   diymore-style 6-digit TM1637 module.
+             *   With digitMap order (2,1,0,5,4,3): visual 2 → reg 0, visual 5 →
+             *   reg 3. Physical registers 0 and 3 carry the colon DP segments
+             *   on the diymore-style 6-digit TM1637 module.
              *   Source: library header comment "HH:MM:SS → dots = 0b00100100".
              *
-             * Previous code used 0b01010000 (visual pos 1,3 → regs 1,5 —
-             * those registers have no colon hardware → colons never lit).
+             * 0b01010000 looks equally plausible (visual pos 1,3 → regs 1,5),
+             * but those registers carry no colon hardware, so the colons never
+             * light.
              */
             long t = (long)h * 10000L + (long)mi * 100L + snap_g.secs;
             if ((snap_g.secs & 1) == 0)
@@ -4242,28 +5078,30 @@ void vDisplayTask(void *pvParameters)
          * I2C bus shared → wrapped in xWireMutex.
          * ============================================================== */
 #ifdef GPSDO_HT16K33
-        if (s_ht_ok &&
-            xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+        if (s_ht_ok)
         {
+            /* The frame first, the bus only when it is due (ht_due: changed,
+             * or not refreshed for HT_REFRESH_MS) - build 67. */
+            uint8_t fr[5];
             if (g_warmup_active) {
                 /* warmup: 'o' spinner on every digit, phase-shifted (wave) */
                 static const uint8_t sp[4] = { 0x40, 0x04, 0x08, 0x10 };  /* g,c,d,e */
                 uint8_t f = (uint8_t)((millis() / 200u) % 4u);
-                ht_write(sp[f], sp[(f+1)%4], sp[(f+2)%4], sp[(f+3)%4], false);
+                ht_frame(fr, sp[f], sp[(f+1)%4], sp[(f+2)%4], sp[(f+3)%4], false);
             } else if (g_svin_active) {
                 /* survey-in: upper-'o' spinner (a→b→g→f), wave across digits */
                 static const uint8_t st7[4] = { 0x01, 0x02, 0x40, 0x20 };  /* a,b,g,f */
                 uint8_t f2 = (uint8_t)((millis() / 200u) % 4u);
-                ht_write(st7[f2], st7[(f2+1)%4], st7[(f2+2)%4], st7[(f2+3)%4], false);
+                ht_frame(fr, st7[f2], st7[(f2+1)%4], st7[(f2+2)%4], st7[(f2+3)%4], false);
             } else if (g_calib_active) {
                 /* "CAL" + lowercase-'o' spinner on digit 4 (G→C→D→E chase),
                  * colon off. 7-seg: C=A,D,E,F ; A=A,B,C,E,F,G ; L=D,E,F */
                 const uint8_t SEG_C7 = 0x39, SEG_A7 = 0x77, SEG_L7 = 0x38;
                 static const uint8_t spin_o7[4] = { 0x40, 0x04, 0x08, 0x10 };  /* g,c,d,e */
                 uint8_t d = spin_o7[(millis() / 200u) % 4u];
-                ht_write(SEG_C7, SEG_A7, SEG_L7, d, false);
+                ht_frame(fr, SEG_C7, SEG_A7, SEG_L7, d, false);
             } else if (!snap_g.pos_valid) {
-                ht_write(HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);
+                ht_frame(fr, HT_SEG_o, HT_SEG_o, HT_SEG_o, HT_SEG_o, false);
             } else {
                 /* As above: minutes, so +5:30 zones show correctly. */
                 int h = snap_g.hours, mi = snap_g.mins;
@@ -4273,11 +5111,16 @@ void vDisplayTask(void *pvParameters)
                     while (t >= 1440) t -= 1440;
                     h = (int)(t / 60); mi = (int)(t % 60);
                 }
-                ht_write(ht_digit[h / 10],  ht_digit[h % 10],
+                ht_frame(fr, ht_digit[h / 10],  ht_digit[h % 10],
                          ht_digit[mi / 10], ht_digit[mi % 10],
                          (snap_g.secs & 1) == 0);   /* colon on even seconds */
             }
-            xSemaphoreGive(xWireMutex);
+            if (ht_due(fr) &&
+                xSemaphoreTake(xWireMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+            {
+                ht_show(fr);
+                xSemaphoreGive(xWireMutex);
+            }
         }
 #endif /* GPSDO_HT16K33 */
 

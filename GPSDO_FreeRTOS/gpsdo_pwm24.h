@@ -1,6 +1,6 @@
 /* =======================================================================
  * gpsdo_pwm24.h — 24-bit control voltage from a short PWM plus dithering
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.67rt
  *
  * The idea is Alan Cashin's (MIS42N on EEVblog), from his Budget GPSDO: run the
  * PWM at fewer bits than you need, and vary the duty cycle from one period to the
@@ -34,8 +34,11 @@
  * into the compare register, with the CPU touching nothing. The table is rebuilt
  * only when the value changes, which is once a second:
  *
- *     N=12: 4096 entries, 8 KB per buffer, carrier 24.4 kHz, 0.025% CPU
- *     N=13: 2048 entries, 4 KB per buffer, carrier 12.2 kHz, 0.012% CPU
+ *     N=12: 4096 entries, 8 KB per buffer, carrier 23.4 kHz, 0.025% CPU
+ *     N=13: 2048 entries, 4 KB per buffer, carrier 11.7 kHz, 0.012% CPU
+ *
+ * (carriers at the BlackPill's 96 MHz timer clock; up to build 66 these said
+ * 24.4 and 12.2, from an assumed 100 MHz - DAC prints the board's own)
  *
  * And the average is EXACT, not approximate: the table holds exactly Y entries of
  * X+1 among 2^(24-N), so it averages X + Y/2^(24-N), which is the 24-bit value by
@@ -94,6 +97,10 @@ void pwm24_write(uint32_t code24);
 
 /* Last value written, for reporting. */
 uint32_t pwm24_last(void);
+
+/* The clock TIM4 counts, in Hz, read from the RCC; the carrier is this over
+ * PWM24_PERIOD. The DAC report assumed 100 MHz up to build 66. */
+uint32_t pwm24_timer_hz(void);
 
 #endif /* GPSDO_PWM_DITHER */
 #endif /* GPSDO_PWM24_H */

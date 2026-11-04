@@ -1,12 +1,13 @@
 /*
  * gpsdo_dac.h — single point where the control voltage leaves the firmware.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.67rt
  *
- * Before this existed, analogWrite(PIN_VCTL_PWM, ...) appeared in 23 places
- * across three files. Adding a second output path by editing all of them would
- * have been an invitation to miss one, and a missed call site is the worst kind
- * of bug here: the loop would steer correctly almost all the time and jump
+ * Every write to the control voltage goes through this layer rather than
+ * calling analogWrite(PIN_VCTL_PWM, ...) directly. Scattering that call
+ * across the files that need it invites a second output path to be added
+ * by editing every call site, and a missed one is the worst kind of bug
+ * here: the loop would steer correctly almost all the time and jump
  * whenever the stale path was taken.
  *
  * TWO RESOLUTIONS, DELIBERATELY
@@ -64,16 +65,17 @@ enum {
 
 extern volatile uint8_t g_dac_path;
 
-/* The two scale factors that make the `DAC` report's commanded-against-measured
- * comparison true on boards it used to lie on. Both live here because they
- * describe the same thing g_dac_path does: how the number the loop writes
- * relates to the world outside.
+/* The two scale factors that make the `DAC` report's commanded-against-
+ * measured comparison hold on every board, not only ones with the PWM
+ * path at 3.3 V and no ADC divider. Both live here because they
+ * describe the same thing g_dac_path does: how the number the loop
+ * writes relates to the world outside.
  *
  * g_dac_vref (volts, default 3.3) is what full code means at the output the
  * firmware is steering — the PWM paths run from the 3.3 V rail, an external
  * DAC from its own reference (5.0 V for the AD5680 boards). The report's
- * "commanded" voltage is vref × code/65536; with the default it is exactly
- * the historical 3.3 V PWM model, so existing boards see no change.
+ * "commanded" voltage is vref × code/65536; with the default it matches
+ * the 3.3 V PWM model, so existing boards see no change.
  *
  * g_adc_vdiv (ratio, default 1.0) is the divide ratio of whatever sits
  * between the measured node and the ADC pin (e.g. 2.0 for 10k+10k). Every
@@ -122,9 +124,10 @@ void gpsdo_dac_write16(uint16_t v);
  * nothing either. */
 void gpsdo_dac_write24(uint32_t v);
 
-/* Last value written, in 16-bit units, for telemetry that used to read
- * gCtrl.pwm_output directly. Rounded, not truncated, so what the displays show
- * is the nearest 16-bit code to what is actually on the pin. */
+/* Last value written, in 16-bit units — call this rather than reading
+ * gCtrl.pwm_output directly. Rounded, not truncated, so what the
+ * displays show is the nearest 16-bit code to what is actually on the
+ * pin. */
 uint16_t gpsdo_dac_last16(void);
 
 /* ---- THE FINE PATH ---------------------------------------------------------
@@ -199,9 +202,11 @@ bool gpsdo_dac_fine_available(void);
  *                   equal, low eight bits cleared — whole 16-bit LSBs, which is
  *                   what gpsdo_dac_fine_available() reports
  *   PWM   50 000    on a build with no dither engine: the timer's own period,
- *                   100 MHz / 2 kHz. NOT a power of two, which is the whole
- *                   reason this returns a count rather than a bit width — the
- *                   16 it used to claim overstated that path by a third.
+ *                   meant as 100 MHz / 2 kHz (the BlackPill's timers run at
+ *                   96 MHz, so 1.92 kHz: see gpsdo_dac.cpp). NOT a power of
+ *                   two, which is the whole reason this returns a count
+ *                   rather than a bit width — claiming 16 here would
+ *                   overstate that path by a third.
  *
  * Reporting one figure for all of them is how the DAC report came to promise
  * 0.094 uHz on an 18-bit part that cannot move less than about 6 uHz in a

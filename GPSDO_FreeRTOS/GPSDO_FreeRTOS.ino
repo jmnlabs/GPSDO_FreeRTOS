@@ -1,7 +1,7 @@
 /**
- * GPSDO_FreeRTOS.ino — Main entry point — hardware init and FreeRTOS scheduler start
+ * GPSDO_FreeRTOS.ino — Main entry point: hardware init, FreeRTOS start
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -13,9 +13,11 @@
  * FreeRTOS scheduler.  loop() is intentionally empty — it is never called
  * after the scheduler starts with the STM32duino FreeRTOS port.
  *
- * On boot, EEPROM is checked for a valid signature.  If found, stored
- * PWM, algorithm, time offset and PID parameters are recalled.  Otherwise
- * compile-time defaults are used and the calibration sequence is armed.
+ * On boot, the flash ring (sector 7) is checked for a stored settings
+ * record. If present, PWM, algorithm, time offset, PID and LTIC
+ * parameters are recalled, then any newer live record layers learned
+ * LRN and LTIC calibration on top. Otherwise compile-time defaults are
+ * used and the calibration sequence is armed.
  *
  * Requires:
  *   - STM32duino core >= 2.2.0
@@ -23,12 +25,12 @@
  *   - TinyGPS++, Adafruit_AHTX0, Adafruit_BMP280, Adafruit_INA219
  *   - U8g2, TM1637Display (local copy in project)
  *   - hd44780 (if GPSDO_LCD_20x4 is enabled)
- *   - EEPROM (STM32 emulated)
  *   Arduino IDE: Tools > C Runtime Library > Newlib Nano + Float Printf/Scanf
  *
  * SERIAL RX BUFFER (build_opt.h)
  *   This sketch folder contains build_opt.h with:
  *       -DSERIAL_RX_BUFFER_SIZE=256 -DSERIAL_TX_BUFFER_SIZE=512
+ *       -DCDC_TRANSMIT_QUEUE_BUFFER_PACKET_NUMBER=16
  *   STM32duino picks up build_opt.h automatically and applies these flags
  *   to the WHOLE build, including HardwareSerial.cpp in the core. This is
  *   required because a plain #define in the sketch does NOT reach the core
@@ -52,14 +54,15 @@
 #include "gpsdo_build_id.h"
 #include <Arduino.h>
 
-/* The firmware's version, "v1.07.57rt": the release from gpsdo_config.h, the
+/* The firmware's version, "v1.08.58rt": the release from gpsdo_config.h, the
  * build from gpsdo_build_id.h, then "rt" — joined here because this is the one
  * unit that includes the build id, see gpsdo_build.h. */
 #define GPSDO_STR_(x)  #x
 #define GPSDO_STR(x)   GPSDO_STR_(x)
 extern const char g_fw_version[] = PROGRAM_VERSION "." GPSDO_STR(BUILD_SERIAL) "rt";
 #include <Wire.h>
-/* EEPROM library removed in v0.96 — persistence via flash_ring (sector 7). */
+/* Settings and live data persist via flash_ring (sector 7), not the
+ * EEPROM library. */
 
 /* ---- Forward declarations for task entry points ----------------------- */
 void vFreqRelayTask (void *);
@@ -118,16 +121,17 @@ TeeSerial g_tee(Serial, Serial2);
 
 /* Why did we just restart?
  *
- * The board was rebooting intermittently, always at the same point in GPS
- * configuration, and there was no way to tell a brown-out from a software fault
- * by looking at the log — both leave the same silence followed by a fresh banner.
- * RCC->CSR holds the answer and costs nothing to read.
+ * A brown-out and a software fault leave the same trace on the log:
+ * silence followed by a fresh banner, with no way to tell them apart
+ * from the output alone. RCC->CSR holds the answer and costs nothing
+ * to read.
  *
- * BOR/POR means the 3V3 rail dipped: the regulator on the BlackPill feeds the
- * GPS, the TFT, the LTIC detector and the clock display, and the receiver draws a
- * step of current when it changes mode. PIN is the reset button or a floating
- * NRST. SFT is NVIC_SystemReset, i.e. our own RB command. The flags latch, so
- * they must be cleared afterwards or the next boot reports this one. */
+ * BOR/POR means the 3V3 rail dipped: the regulator on the BlackPill
+ * feeds the GPS, the TFT, the LTIC detector and the clock display, and
+ * the receiver draws a step of current when it changes mode. PIN is
+ * the reset button or a floating NRST. SFT is NVIC_SystemReset, i.e.
+ * our own RB command. The flags latch, so they must be cleared
+ * afterwards or the next boot reports this one. */
 static void print_reset_cause(void)
 {
     uint32_t csr = RCC->CSR;
@@ -197,11 +201,6 @@ extern "C" void vApplicationMallocFailedHook(void)
     }
     interrupts();
 }
-
-/* The idle hook that used to live here is gone with the spin counter it fed:
- * the CPU figure now comes out of the per-task cycle accounting as 100% minus
- * the idle task's share, which needs no hook and has no reference to
- * mis-calibrate. See gpsdo_health.h. */
 
 
 void setup()
@@ -277,15 +276,15 @@ void setup()
         OUT_SERIAL.print(" ");
         OUT_SERIAL.println(g_fw_stamp);
     }
-    /* WHICH BINARY IS THIS, REALLY. The line above is the compile time of THIS
-     * FILE, which is not the same thing as the age of the firmware — the
-     * builder reuses object files whose sources have not changed, so a sketch
-     * that has not been edited keeps its old stamp however much else changed.
-     * On 26.08 two captures from two different builds carried the same one.
+    /* Which binary is this, really? The line above is the compile time of
+     * THIS FILE, not the age of the firmware — the builder reuses object
+     * files whose sources have not changed, so a sketch that has not been
+     * edited keeps its old stamp however much else changed.
      *
      * The CRC is computed at boot from the flash itself, so it cannot be
-     * carried over from a cache and it changes if any byte of any translation
-     * unit changed. When a log and a memory disagree, believe this number. */
+     * carried over from a cache and it changes if any byte of any
+     * translation unit changed. When a log and a memory disagree, believe
+     * this number. */
     {
         uint32_t n = fw_image_bytes();
         if (n) OUT_SERIAL.printf("image CRC32 %08lX  (%lu bytes of flash)\r\n",
@@ -349,14 +348,14 @@ void setup()
     }
     gpsdo_dac_write16(127);
 
-    /* Nothing to set here any more. Both output paths now own TIM4 through
-     * registers — pwm24_begin() with the DMA replay, pwm16_begin() without —
-     * so the control voltage no longer passes through analogWrite() and no
-     * longer depends on analogWriteFrequency(), which is a GLOBAL in the core
-     * and would be fought over the moment a second PWM exists. The backlight
-     * on PB5 is that second PWM. */
+    /* Both output paths own TIM4 through registers directly — pwm24_begin()
+     * with the DMA replay, pwm16_begin() without — so the control voltage
+     * does not pass through analogWrite() or depend on
+     * analogWriteFrequency(), which is a GLOBAL in the core and would be
+     * fought over the moment a second PWM exists: the backlight on PB5 is
+     * that second PWM. */
 
-    /* ---- Default control state (overwritten by EEPROM recall below) ---- */
+    /* ---- Default control state (overwritten by ring recall below) ---- */
     gCtrl.pwm_output  = DEFAULT_PWM_OUTPUT;
     gCtrl.active_algo = 0;
     gCtrl.holdover_mode = false;
@@ -383,7 +382,7 @@ void setup()
 
     /* recall user settings (PID, TZ, flags, LTIC params) */
     if (settings_recall()) {
-        g_persist_valid = true;   /* legacy flag: "settings loaded" */
+        g_persist_valid = true;   /* means "settings loaded", regardless of storage backend */
         OUT_SERIAL.println("Settings: recalled from flash ring");
     } else {
         OUT_SERIAL.println("Settings: none stored (compile-time defaults)");
@@ -404,7 +403,9 @@ void setup()
     /* Span jumper on PB14: which calibration this board is running on, and —
      * if the jumper was moved while it was off — the recalled code remapped
      * into the span it is now in. Here, after both recalls and before the
-     * write below, so the oscillator never sees a code from the wrong span. */
+     * write below, so the loop never starts from a code from the wrong span.
+     * (The DAC has carried the recalled code since the write after
+     * settings_recall() — the few milliseconds the recalls take.) */
     span_begin();
 
     /* Re-apply PWM: live_store may have overridden the settings value with a
@@ -457,9 +458,10 @@ void setup()
 
     xSysEvents = xEventGroupCreate();
 
-    /* Request calibration only when EEPROM was blank/erased.
-     * When EEPROM was valid, the recalled PWM is already close to optimal
-     * and calibration would temporarily disturb the OCXO. */
+    /* Request calibration only when no settings were recalled (a fresh or
+     * blank flash ring). When settings were valid, the recalled PWM is
+     * already close to optimal and calibration would temporarily disturb
+     * the OCXO. */
     if (!g_persist_valid)
         xEventGroupSetBits(xSysEvents, EVT_NEED_CALIBRATION);
 

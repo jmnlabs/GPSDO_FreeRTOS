@@ -31,6 +31,2213 @@ publicaron.
 
 ---
 
+## [v1.08] — publicado 2026-11-04 (build 71)
+
+Publicado como build 71: `GPSDO v1.08.71rt`. Siguen los catorce builds desde
+v1.07 (58–71), del más reciente al más antiguo, cada uno escrito tal como se
+midió. En resumen:
+
+- **La mayor parte del trabajo fue al algoritmo 13, el filtro de Kalman.**
+  Supera ahora al algoritmo 11 en la placa del autor (build 61); lee el
+  detector por debajo de su ventana y se fía menos de una lectura cuanto más
+  lejos del cero está (66); su arranque en frío ya no paga por un `KT` largo
+  (67); su controlador vuelve a trabajar con `KC` = `KT`/3 (68), y con `KF`
+  (16 s) mientras dura una perturbación (69). En la placa de Dan Wiering, con
+  `KT 1000` y frente a un rubidio: 2,9·10⁻¹² a 20–40 s y 1,5·10⁻¹³ a
+  40 000 s (build 70).
+- **El detector de fase se lee en el flanco del PPS**, de una recta a través
+  de toda la ráfaga, con el chip en silencio y el convertidor manejado por sus
+  registros (61–64): en la placa del autor su ruido blanco bajó de 2,07 a
+  1,14 ns y desapareció el pico cada 233 s. El ajuste deja fuera hasta veinte
+  conversiones perturbadas (70), y un tercio de la ráfaga cuando el detector
+  capta los 10 MHz (71); la curvatura típica de la placa sigue al nivel del
+  detector (71).
+- **Un arranque lejos del punto de trabajo se asienta** (65–66): el live store
+  guarda el punto de trabajo y su span, un anillo de flash lleno ya no pierde
+  los ajustes, y cada uno de los 264 arranques en frío del simulador se asienta
+  con un solo armado del picDIV.
+- **Del fork de Zsolt Zsiros (68):** el holdover y el picDIV necesitan el
+  pulso del GPS además del fix, `LC` arma una vez y espera, el informe va al
+  USB y al Bluetooth por separado, el túnel del GPS sigue el ritmo de un
+  receptor rápido, y un termómetro LM75 se lee y se registra.
+- **Cosas menores:** los molinillos de los displays LED ya no duplican la
+  carga de la CPU y `DAC` imprime la portadora real (67); el pin PWM se
+  mantiene bajo mientras el AD5680 maneja el EFC (69); `CT` y el módulo de
+  span solo creen los números que deben (58); `LB` cuenta qué fue de cada
+  segundo desde el arranque (63–71); el tuner dibuja la tensión de control que
+  pide el lazo (60); los comentarios del código se releyeron contra el código
+  y se quitó el código muerto (59).
+
+Build 71, `GPSDO v1.08.71rt`: dos cosas que mostraron las pruebas de saltos
+del 26–27.10 y las ráfagas de Dan del 23–28.10. El ajuste de la recta del
+detector deja fuera un tercio entero de la ráfaga cuando una de cada tres
+conversiones se aparta a la vez — un acoplamiento de los 10 MHz — en vez de
+leerla desviada varios códigos o rechazarla. La curvatura típica de
+la placa, con la que el ajuste juzga cada ráfaga, sigue ahora el nivel del
+detector cuando este se mueve, así que un salto ya no hace rechazar sus
+ráfagas por curvadas. Además, `KL` y `KT` dejan de tomar una Q en su techo
+como motivo para acortar `KT`. La compuerta del algoritmo 13 es la del build
+70: hacerla ceder al cuarto rechazo de un salto, como hacía este build en su
+primera versión, la hizo ceder siete veces en un solo salto en la placa, y
+cada versión que cedía una sola vez salía peor que el build 70 en otro sitio
+(véase Rechazado).
+
+### Cambiado (build 71)
+
+- **Una de cada tres conversiones, fuera entera.** En algunas ráfagas las
+  conversiones se suceden cada 16⅔ ciclos de los 10 MHz (en otras cada
+  ~17,7: el convertidor va con el reloj de la MCU), así que una de cada tres
+  encuentra los 10 MHz en el mismo punto de su periodo, y un detector que
+  capta sus flancos tiene un tercio de la ráfaga desplazado los mismos pocos
+  códigos. En la placa de Dan ese tercio estaba 17–30 códigos arriba (24 y
+  28.10) o 7,5 abajo (23.10), y los otros dos coincidían. Arrastraba la recta
+  un tercio de su desplazamiento, y más cuando se desvanecía a lo largo de la
+  ráfaga: el 24.10 una ráfaga salió 13 códigos alta con todas las
+  conversiones usadas, y otra tuvo 21 conversiones fuera de la recta una a
+  una y se rechazó. Ahora, en la primera recta y antes de descartar ninguna
+  conversión suelta, cada tercio se toma por la mediana de sus residuos, y el
+  más alejado de los otros dos se deja fuera si se aparta de su media más de
+  6 códigos (`LTIC_FIT_THIRD`) y tres veces el ruido propio de la ráfaga
+  (`LTIC_FIT_THIRD_SIG`; el ruido se toma alrededor de la mediana de cada
+  tercio, así que el desplazamiento no lo infla), siempre que esos dos no
+  difieran más que eso ni más que la mitad de la distancia, y dos de cada tres
+  de sus propias conversiones estén al menos a la mitad de esa distancia. No
+  cuesta ninguno de los veinte descartes, que quedan para las perturbaciones.
+  Con el ajuste del firmware, las cuatro ráfagas de Dan con ese tercio se leen
+  ahora sobre una recta por los otros dos: 24.10 A, antes rechazada; 24.10 B,
+  12,7 códigos más abajo que en el build 70; 28.10, 1,7 más abajo; 23.10,
+  2,2 más arriba. Sus otras cinco ráfagas y las once del autor se leen
+  exactamente como antes.
+- **La curvatura típica de la placa sigue el nivel.** En la placa del autor
+  la curvatura de una ráfaga no es una sola cifra: crece al bajar la lectura,
+  ~0,19 códigos por código (~0,23 por ns de fase; de −5 códigos cerca de 2340
+  a +10 cerca de 2280, 26–27.10). Un salto de frecuencia del oscilador aleja
+  la fase 60–100 ns durante minutos, y la curvatura típica lo seguía a lo
+  sumo a un treintaidosavo de código por segundo: entre dos `LB` separados 16
+  minutos, durante los dos saltos del 27.10, se rechazaron 131 ráfagas por
+  curvadas y se mantuvo 77 veces la lectura anterior, justo mientras el lazo
+  traía la fase de vuelta. Ahora se guardan también las curvaturas de las
+  últimas 15 ráfagas dentro de la banda de `LC` (`LTIC_BEND_WIN`), y cuando
+  su mediana se aparta más de 3,5 códigos de la típica, la típica pasa a ella
+  de inmediato; si no, se sigue como antes. Un modelo de esos 16 minutos (la
+  curvatura de cada segundo a partir del nivel registrado, 1,5 códigos de
+  dispersión, la compuerta como en el firmware) rechaza 270–290 siguiendo
+  como antes y 14–21 ahora; con un nivel que no se mueve, la mediana no se
+  aparta tanto ni una vez en doce horas con 2,1 códigos de dispersión (la
+  placa del autor) y 0–12 veces con 3 códigos, a cambio de ~1 % más de
+  ráfagas rechazadas.
+- **`KL` y `KT` ya no aconsejan acortar `KT` por una Q en su techo.** `KL`
+  llamaba al ratio de adaptación `wants more Q` / `wants less` y en el techo
+  decía que "innovations want a loop faster than KT"; la nota de `KT` por
+  encima de 200 s decía que se acortara si `KL` mostraba Q en su techo con la
+  fase vagando. En la placa de Dan (28–29.10) `KT 1000` se quedó en el techo
+  y aun así fue mejor que `KT 500`: ADEV plana en 2,9·10⁻¹² de 40 a 400 s,
+  donde 500 s tenía una joroba de 4·10⁻¹² a 100–150 s. Lo que empuja Q hacia
+  arriba viene tanto de la deriva lenta del lado GPS, o del detector, como del
+  oscilador, y un lazo más rápido la copia. El ratio dice ahora
+  `Q pushed up`, `Q pushed down` o `consistent`, la línea del techo dice que
+  las innovaciones son mayores de lo que explica el modelo del oscilador y
+  que eso solo no es motivo para acortar `KT` (compare la ADEV), y la nota de
+  `KT` dice que se juzgue por la ADEV, un turno con cada valor. Se corrige la
+  frase del manual "un lazo que se queda ahí todo un turno le está diciendo
+  que `KT` es más largo de lo que este oscilador soporta".
+
+### Añadido (build 71)
+
+- **`LB`** cuenta desde el arranque en cuántas ráfagas se dejó fuera un tercio
+  y cuántas veces la curvatura típica se movió de golpe (`every third
+  conversion left out N, typical bend moved N`), y para la ráfaga mostrada
+  dice qué tercio se dejó fuera y cuánto se apartaba (`every third conversion
+  from #0 left out: +29.6 codes off the other two`), o a qué distancia está
+  el más alejado (`thirds kept: the furthest -0.5 codes off the other two`).
+
+### Rechazado (build 71)
+
+- **Hacer ceder la compuerta del algoritmo 13 al cuarto rechazo de un salto.**
+  Diez rechazos seguidos son la prueba de la propia compuerta de que lo
+  erróneo es el estado y no los datos, y al comienzo de un salto el lazo se
+  quedaba quieto 18–26 s (`SP`, 26–27.10). El build 71 en su primera versión
+  hacía ceder la compuerta también al cuarto rechazo seguido, si cada uno
+  estaba del mismo lado que el anterior y no más cerca del filtro
+  (`kf_runaway_step()`). En la placa del autor (30.10, `SP` +95 LSB, `KF 16`)
+  la fase llegó a −58 ns y volvió dentro de ±10 ns a los 3,1 minutos, frente a
+  −62 ns y 4,0 minutos con +90 LSB en el build 70 — pero la compuerta cedió
+  siete veces en 80 s, con 31 lecturas rechazadas, y el PWM saltó ~30 LSB en
+  cada una. Ceder ensancha solo la fase del filtro: toma la lectura, se queda
+  con su frecuencia y en pocos segundos vuelve a alejarse. Diez rechazos ceden
+  una sola vez, porque para entonces la fase se ha alejado lo bastante como
+  para que el término de fase del controlador iguale más o menos el salto. Al
+  filtro se le puede enseñar también la pendiente de la racha (su covarianza
+  ensanchada a lo largo de la fase y la pendiente de la racha): en
+  `tools/loopsim` un salto de +95 LSB cede entonces una vez y llega a −21 ns
+  en vez de −59, y vuelve dentro de ±10 ns a los 45 s en vez de 283. Pero el
+  lazo apaga entonces una perturbación más deprisa de lo que la muestra la
+  media de 100 s de TIM2, y la prueba de confianza del detector, que espera
+  que la fase se mueva como dice esa media, condenó a un detector sano: en 8
+  de 16 reproducciones de la caída del 21.10 (en 5 de ellas el lazo quedó
+  ciego más de diez minutos, el peor 56) y en 6 de 8 pasadas de un pulso de
+  120 s con `KF 0`. Los pulsos de 10–60 s se tomaban además por saltos y se
+  pasaban (+16 ns frente a +10 con 300 LSB durante 10 s). Versiones más
+  estrechas — la pendiente a media fuerza, solo en una segunda cesión, o la
+  frecuencia sola sin su vínculo con la fase — salieron peor que el build 70
+  en 9–19 de 42 casos (21 perturbaciones, `KF 16` y `KF 0`, ocho semillas);
+  limitar las cesiones tempranas a una–tres por perturbación dejó el salto
+  8–12 ns más hondo que el build 70, y una racha de cinco a ocho siguió
+  cediendo de media 2,5–6,5 veces por salto (build 70: 1,5). Así que la
+  compuerta es la del build 70 y compila al mismo código; enseñarle la
+  pendiente espera a una prueba de confianza que tenga en cuenta la
+  perturbación (`doc/TODO_v1.06.md`, punto 178).
+
+### Verificación (build 71)
+
+- Las nueve ráfagas de Dan (21–28.10) y las once del autor (26–27.10) por
+  `ltic_fit()` del firmware, compilado como en el build 70 y en el 71: las
+  cuatro con un tercio apartado se leen como arriba, a 0,01 código de una
+  recta por los otros dos, y con la compuerta de curvatura en la típica que
+  mostró `LB` ninguna se rechaza; las dieciséis restantes salen como en el
+  build 70 hasta la última cifra.
+- Ráfagas sintéticas, mil por caso: con un tercio apartado 15–30 códigos
+  (creciente o menguante a lo largo de la ráfaga) y hasta 8 perturbaciones,
+  968–1000 se leen a menos de 5 códigos donde el build 70 leía 184–541; con
+  12–16 perturbaciones 763–984 frente a 296–471; con un tercio a 8 códigos
+  758–961 frente a 753–884. Sin tercio apartado no se deja nada fuera y los
+  dos builds coinciden ráfaga a ráfaga; con 4 códigos, una ráfaga de 5000
+  perdió un tercio. Los juegos de perturbaciones del build 70 (12–28
+  perturbaciones, cuatro semillas de mil) salen idénticos.
+- `tools/lticsim`: todas las comprobaciones pasan con 27, 5 y 100 ms de
+  caída, incluidas nueve nuevas (un tercio 30 arriba y 8 abajo, fuera; 4
+  códigos, se queda; tercios +30/−15/0, ninguno fuera; un tercio con diez
+  picos además; una curvatura que se mueve, seguida; una ráfaga rara y las
+  del raíl, no; el −8 de una placa, encontrado al arrancar); las cifras
+  anteriores del modelo son idénticas a las del build 70. Cifras nuevas: un
+  tercio apartado 8–30 códigos se deja fuera en 999–1000 ráfagas de 1000; un
+  salto que mueve la curvatura, 93 rechazadas siguiendo como antes, 7 ahora;
+  una curvatura quieta con 3 códigos de dispersión se mueve 5 veces en doce
+  horas.
+- `tools/loopsim`: `gpsdo_algorithms.cpp` compila al mismo código que en el
+  build 70 (`.text`, `.data`, `.bss` y `.rodata` byte a byte), así que cada
+  cifra del lazo es la del build 70.
+- `tools/hosttests`: los siete programas pasan (`kfdist` con las 23
+  comprobaciones del build 70); hostcheck limpio en las 20 configuraciones. La
+  RAM estática crece 396 bytes, el marco de pila del ajuste 32.
+- El código se revisó de forma independiente; se corrigieron dos comentarios
+  que afirmaban más de lo que hace el código, y la ventana de curvatura pasó a
+  impar (15), así que su mediana es siempre la curvatura de una ráfaga.
+- Las pruebas de saltos del 26–27.10 (build 70, placa del autor, `SP` +82 y
+  +90 LSB): con `KF 16` la fase llegó a −58 y −62 ns y estaba dentro de
+  ±10 ns a los 4,4 y 4,0 minutos; con `KF 0` a −86 y −96 ns, dentro de ±10 ns
+  por primera vez a los 13 y 16 minutos, se pasó +14 y +12 ns y estaba dentro
+  para siempre a los 25–27 y 32 minutos. `KF 16` sigue siendo el valor por
+  defecto.
+- En la placa del autor (29–30.10, build 71 en su primera versión; lo que se
+  queda no ha cambiado desde entonces): 18 horas sin reinicio. `LB` contó
+  después ningún tercio dejado fuera — ninguno en 21,7 h, ambos saltos
+  incluidos, y el tercio más alejado a 3,4 códigos como mucho en 24 ráfagas —
+  y 15 movimientos de la curvatura típica en esa pasada (el aterrizaje tras el
+  arranque cruza ~600 códigos de nivel), 29 tras dos saltos `SP`. Rechazadas
+  por curvadas: ~13 ráfagas en todo el salto con `KF 16` y ~29 en el de `KF
+  0`, frente a 131 en 16 minutos de los dos saltos del 27.10. En
+  funcionamiento en calma, 14 ráfagas sueltas en 17 horas se rechazaron por
+  curvadas (build 70: una en 20 horas la semana anterior); sin ningún tercio
+  fuera, es la compuerta de curvatura del build 70 — la curvatura típica solo
+  salta cuando la mediana de 15 ráfagas se aparta 3,5 códigos, y cerca del
+  enganche oscila ~0,5 código — sobre curvaturas que cerca del enganche se
+  dispersan ~1,8 códigos, frente a 1,2 el 04.10. Pila de FreqRelay: 102 de 192
+  palabras libres.
+- De nuevo en la placa del autor (31.10–1.11, el build 71 tal como queda, CRC
+  de la imagen 8EED4610): 25 horas sin reinicio. Dos saltos `SP` con
+  `KF 16`, +77 y +79 LSB: la compuerta cedió una vez en cada uno, tras diez
+  rechazos, 21 y 23 s después del salto; la fase llegó a −54 y −59 ns y
+  estaba dentro de ±10 ns a los 4,4 y 4,2 minutos, sin pasarse (build 70,
+  +82 y +90 LSB: 19 s, −58 y −62 ns, 4,4 y 4,0 minutos). `LB`: ningún tercio
+  dejado fuera en 25 h, el más alejado de 21 ráfagas a 4,3 códigos de los
+  otros dos; la curvatura típica se movió 27 veces en las primeras cinco
+  horas, aterrizaje tras el arranque incluido, 9 en los dos saltos y ninguna
+  en las 18 horas en calma que siguieron; en los saltos se rechazaron por
+  curvadas ~17 y ~11 ráfagas. En esas 18 horas, 22 ráfagas sueltas se
+  rechazaron por curvadas, y cada vez se mantuvo un segundo la lectura
+  anterior, con la fase a 1,60 ns rms (build 70 el 25–26.10: una en 20
+  horas, 1,66 ns). Sin nada dejado fuera ni movimientos, el build 71 lee
+  cada ráfaga como el build 70, y el ruido de medida que usa el filtro creció
+  esos mismos días (R, mediana 1,56 ns el 25–26.10, 1,68 el 29–30.10, 1,83
+  ahora — entre los dos últimos con el mismo código): se volvieron más
+  ruidosas las ráfagas, no la lectura.
+
+### Al publicar (2026-11-04)
+- La chuleta de comandos del tuner incluye `KC` y `KF` (algoritmo 13), `LB` y
+  `LRM` (el detector) y `MM` (algoritmo 12), que le faltaban; la `H` del
+  firmware ya los listaba.
+- El registro de arranque de los manuales muestra el rótulo del build 71, con
+  la línea `image CRC32` explicada, y el ejemplo de la barra de estado del
+  manual del tuner es del build 71; un build de la v1.08 ocupa unos 300 KB
+  (303 364 bytes), no los 265 KB que decía el manual.
+- No cambió código: el firmware es el build 71 tal como quedó el 30.10 (CRC
+  de la imagen 8EED4610 en la placa del autor).
+
+Build 70, `GPSDO v1.08.70rt`: el ajuste de la recta del detector puede dejar
+fuera veinte conversiones en vez de doce, y las notas dejan de culpar a la
+portadora del PWM de las perturbaciones de Dan. Esas perturbaciones llegan en
+pares separados unos 21 µs, cuatro o cinco por ráfaga, de algo ajeno al GPSDO
+que conmuta a unos 23 kHz: siguieron cuando el build 69 ya mantenía en bajo el
+pin del PWM, también con la retroiluminación en `BL 100`, e iban y venían
+según la hora del día (el sospechoso es su inversor solar). Con doce
+exclusiones, una ráfaga con seis pares o más se rechazaba y se mantenía la
+última lectura; con veinte se lee — a 0,2 códigos de una recta robusta, en las
+ráfagas que envió.
+
+### Cambiado (build 70)
+
+- **El ajuste del detector puede dejar fuera veinte conversiones**
+  (`LTIC_FIT_DROPS` 12 → 20). Durante 57 horas, del 23 al 25.10, una quinta
+  parte de los segundos de la placa de Dan se rechazó como "off the line" y
+  se mantuvo la última lectura. Con el ajuste del propio firmware, las dos
+  ráfagas rechazadas que envió y que llenaban los pares de perturbaciones
+  (21.10 y 25.10) se leen ahora con 18 y 15 conversiones fuera, a 0,2
+  códigos de una recta robusta; las otras seis que envió se leen exactamente
+  como antes, igual que una ráfaga limpia, que no deja ninguna fuera (la del
+  autor: 63–64 de 64 usadas). En ráfagas sintéticas con 13 a 18
+  perturbaciones de 15–50 códigos, ahora se leen 947–1000 de cada mil con
+  menos de 5 códigos de error, donde con doce se leían 0–23. Una ráfaga
+  empezada cuando el pulso aún se apagaba deja fuera hasta 18 de esas
+  conversiones en el modelo de `tools/lticsim`; más allá la rechaza su
+  curvatura, como a un pulso que aún carga.
+- **Lo que no cambia.** Una ráfaga con tantas perturbaciones puede a veces
+  asentarse en una recta desplazada unos códigos, porque el MAD con el que
+  el ajuste juzga crece con ellas; con doce pasaba igual de a menudo (0–94 de
+  cada mil de 13 a 20 perturbaciones, igual en ambos con una diferencia de
+  dos como mucho). Y de dos ráfagas con una de cada tres conversiones alta —
+  un acoplamiento de 10 MHz en la placa de Dan, 24.10 —, una sigue teniendo
+  21 conversiones fuera de la recta y se rechaza, y en la otra el
+  acoplamiento se debilita a lo largo de la ráfaga, el MAD crece con él y la
+  ráfaga entera pasa, unos 13 códigos alta, igual que con doce.
+
+### Corregido (build 70)
+
+- **Las notas sobre las perturbaciones de Dan.** Los builds 67–69 las
+  atribuían a la portadora del PWM del EFC (build 69: a su segundo armónico,
+  23,4 kHz). La portadora era real — funcionaba con `EXT` hasta que el
+  build 69 mantuvo el pin en bajo —, pero las perturbaciones no son ella:
+  siguieron con el pin en bajo. Las entradas del build 69 de abajo, el
+  manual, el README y los comentarios del código ya lo dicen.
+
+### Verificación (build 70)
+
+- Las ocho ráfagas de Dan (21–25.10) por `ltic_fit()` del firmware,
+  compilado con doce y con veinte exclusiones: las dos rechazadas por pares
+  de perturbaciones ahora se leen (18 y 15 fuera, −0,2 y 0,0 códigos de una
+  recta robusta), las dos del acoplamiento de 10 MHz salen como antes (una
+  rechazada, la otra leída unos 13 códigos alta), y las otras cuatro se leen
+  igual hasta el último dígito.
+- Ráfagas sintéticas, cuatro semillas de mil para cada número de 12 a 20
+  perturbaciones: las cifras de arriba. Con hasta 12 perturbaciones ambos
+  builds coinciden ráfaga a ráfaga.
+- `tools/lticsim`: todas las comprobaciones pasan con 27, 5 y 100 ms de
+  decaimiento. "20 picos fuera" y "21 rechazados" siguen el nuevo límite. Un
+  pulso que se apaga queda fuera hasta 18 conversiones y se rechaza en 21
+  (por su curvatura): la comprobación del modelo estaba una conversión por
+  dentro del límite, y con veinte la cola de este modelo la rechaza su
+  curvatura desde 19, así que ahora toma 18. Sus corridas de ruido y cifras
+  de rechazo son idénticas a las del build 69.
+- `tools/hosttests` como en el build 69 (7 programas); hostcheck limpio en
+  las 20 configuraciones.
+- El build 69 en las placas. En la del autor: 26 horas del 22 al 24.10 en
+  dos corridas, sin `KAL: disturbance` y sin `KF` en ninguna línea `Learn:`;
+  tras la primera hora la fase del filtro quedó por debajo de 9,4 ns (el
+  umbral es 20 ns), desviación de fase 2,1–2,3 ns como en el build 68. En la
+  V3 de Dan: el informe de `DAC` muestra `PWM pin PB9 held low`, ninguno de
+  los dos puntos de prueba del PWM tiene los 11,7 kHz, y con `KT 1000` /
+  `KC 0` la ADEV queda plana en unos 3·10⁻¹² de 8 a 400 s — el nivel de su
+  propio OCXO — donde `KT 300` / `KC 100` daban 7,5–8·10⁻¹² a 80–100 s. La
+  prueba de perturbación con `KF 16` y con `KF 0` sigue pendiente.
+
+Build 69, `GPSDO v1.08.69rt`: el controlador del algoritmo 13 se da prisa
+mientras dura una perturbación, y el pin del PWM se mantiene en bajo mientras
+el AD5680 gobierna el EFC. `KC` es una elección sobre el ruido — cuánto
+de la deriva propia del detector debe copiar el oscilador — y el build 68 lo
+hizo más lento. Un salto de la frecuencia del oscilador no es ruido, y un
+controlador lento le deja empujar la fase otro tanto. El 21.10 la placa del
+autor se encontró con uno: su raíl de 5 V cayó a 4,37 V durante tres minutos y
+el OCXO se movió 2,7·10⁻⁹ con él; con `KC 33` la fase llegó a +75 ns, pasó a
+−51 ns al volver la tensión y no estuvo dentro de ±10 ns hasta 12 minutos
+después. Ahora el controlador trabaja con `KF` (16 s) desde el momento en que
+la fase está claramente fuera hasta que lleva dos minutos en casa; reproducido
+en el simulador, el mismo suceso llega a +41/−29 ns y vuelve dentro de
+±10 ns en 5½ minutos. El funcionamiento en calma no cambia, hasta el último bit
+del PWM.
+
+Hasta el build 68 una placa en `EXT` mantenía el motor de dither funcionando en
+el pin del PWM. Dan lo encontró con el osciloscopio en la sección del PWM de su
+V3 (22.10): 11,71 kHz, la portadora de 13 bits, con su segundo armónico en
+23,4 kHz — la frecuencia de las perturbaciones de sus ráfagas de `LB`, que
+según el build 68 no podían venir de ese pin. (Tampoco vienen de él: véase el
+build 70.)
+
+### Corregido (build 69)
+
+- **El pin del PWM se mantiene en bajo mientras el AD5680 gobierna el EFC.**
+  Al arrancar se inicializa toda ruta compilada, y hasta el build 68 la no
+  seleccionada seguía haciendo lo último que se le había mandado: el AD5680,
+  un nivel de continua, inofensivo; el PWM, una portadora. La primera
+  escritura del arranque (127) llega antes de leer los ajustes, así que iba
+  por la ruta por defecto, DITH; el `EXT` leído se quedaba con todas las
+  escrituras siguientes, y el motor de dither reproducía ese 127 — con 13 bits
+  un pulso de 0,16 µs cada 85,3 µs — mientras la placa funcionara. Tras un
+  `DAC EXT` en una sesión reproducía el último código que le había mandado el
+  lazo. El puente mantiene esa portadora fuera del EFC, pero la sección del
+  filtro del PWM sigue en la placa y sigue excitada. Ahora la primera
+  escritura en `EXT` pone el compare a 0, y el pin queda en bajo todo el
+  periodo. El temporizador y el DMA siguen funcionando: `DAC DITH` o `DAC PWM`
+  vuelven a emitir el código del lazo como siempre. Un build sin motor de
+  dither tenía el mismo fallo a 1,92 kHz y tiene la misma corrección. Con
+  `EXT`, el informe de `DAC` dice
+  `PWM pin PB9 held low - no carrier while EXT is live`. Una placa en `DITH` o
+  `PWM` funciona exactamente como antes.
+- **La nota del build 68 sobre las perturbaciones de Dan era errónea.** Decía
+  que no podían venir del PWM del EFC: su placa gobierna el EFC desde el
+  AD5680, así que se dio por hecho que el pin del PWM quedaba en bajo desde el
+  arranque. No lo estaba (arriba), y 23,4 kHz es exactamente el segundo
+  armónico de la portadora de 13 bits (96 MHz / 4096). Si las perturbaciones se van con la
+  portadora lo mostrará su placa. El manual y los comentarios del código ya lo
+  dicen. (No se fueron: véase el build 70.)
+
+### Añadido (build 69)
+
+- **`KF` — el horizonte del controlador mientras dura una perturbación**
+  (algoritmo 13; por defecto 16 s, 10–250 s, `KF 0` = desactivado; se guarda
+  con `KR`/`KQ`/`KT`/`KC`). El modo se activa cuando la estimación de fase del
+  filtro supera 10 veces el ruido en calma de la placa — la R de cuando la
+  fase estaba en calma, nunca por debajo de 2 ns: 20 ns en la placa del autor,
+  donde la estimación no pasó de 10 ns en 35 horas, unos 37 ns en un detector
+  tan ruidoso como el de Dan — o cuando la compuerta de innovación cede tras
+  diez lecturas rechazadas: así es exactamente el comienzo de un salto, y el
+  21.10 las lecturas se alejaban a 2,7 ns/s de un filtro que las rechazó
+  durante 13 s. Se desactiva tras 120 s seguidos por debajo de 3 veces ese
+  ruido. Lee la estimación del filtro, no la lectura, así que un detector
+  ruidoso no lo sacude; nunca hace el controlador más lento que `KC`; y tras un
+  arranque o un armado del picDIV espera a que la fase haya estado en calma una
+  vez — un aterrizaje es cosa de la adquisición. El log dice cuándo mueve el
+  horizonte (`KAL: disturbance (|phase| 43 ns) - controller 33 -> 16 s`, luego
+  `KAL: calm for 120 s - controller 16 -> 33 s`); mientras está activo, la
+  línea `Learn:` del informe `RH` termina en `KF`, `KL` dice
+  `disturbance: yes` y `KC` muestra los 16 s vigentes. `KF` viaja en el byte
+  libre del registro del Kalman, así que el registro conserva su versión: el
+  build 68 lo sigue leyendo, y un registro del build 68 o anterior se lee como
+  `KF 16`.
+- **Por qué dos minutos, y no un horizonte que siga a la fase.** Tras un
+  salto, el error sigue vivo en la estimación de frecuencia del filtro, que
+  tarda minutos en reaprenderse, y la fase que deja es ese error por el
+  horizonte vigente. Un horizonte calculado cada segundo a partir de |x0| —
+  16 s lejos, `KC` cerca de cero, suavemente entre ambos — alcanzó los mismos
+  picos en la simulación, y ±10 ns a los 8½ minutos en vez de 5½.
+
+### Verificación (build 69)
+
+- El suceso del 21.10 en `tools/loopsim` — el perfil de frecuencia del
+  oscilador ajustado al log (−2,6·10⁻⁹ al empezar la caída, suavizándose
+  hasta −1,9·10⁻⁹, y lo contrario con un breve sobreimpulso al volver la
+  tensión), el modelo de la placa del autor del build 66, cinco semillas de
+  ruido: build 68 +78/−46 ns y de vuelta dentro de ±10 ns a los 12,1 minutos
+  (la placa registró +74,6/−51 ns y 12,0); build 69 +41/−29 ns y 5,5 minutos,
+  como `KC 16` (+41/−29, 5,2). `KF 0` da las cifras del build 68 hasta el
+  último dígito.
+- Funcionamiento en calma: siete escenarios — las dos horas antes de la
+  caída, la noche del 29.09 tal como la ejecuta `bench.py --hw` y con 4 ns de
+  deriva lenta del detector añadidos, la noche del 03.09 con 3,5 ns de ruido
+  blanco y 3 ns de ruido lento, las plantas del 26.08 y del 27.09, y el modelo
+  de la placa de Dan con `KT 300` — tres semillas cada uno, 1,14 millones de
+  segundos simulados: el modo no se activó ni una vez, y el PWM salió idéntico
+  al del build 68. `coldstart.sh` imprime lo mismo que para el build 68.
+- `tools/hosttests`: nuevo `kfdist` 23/23 — activo a 20,1 ns y no a 19,9;
+  activo cuando la compuerta cede con la fase aún en 0,3 ns; desactivado tras
+  exactamente 120 segundos en calma, y sólo seguidos; bloqueado desde un
+  reinicio o un armado hasta que la fase ha estado en calma una vez; el byte
+  de `KF` (0, como lo escribía todo build anterior, se lee como 16 s;
+  10–250 s sobreviven al viaje de ida y vuelta). Seis copias rotas a propósito
+  fallan 1–4 de las 23 cada una. Los otros cinco, como en el build 68.
+- `tools/hosttests`: nuevo `dacpark` 15/15 — `pwm_park()` y `dac_emit()`
+  sacados de `gpsdo_dac.cpp` y compilados dos veces, con el motor de dither y
+  con el temporizador simple: el arranque en el orden del firmware deja el
+  motor en 0 (el build 68 dejaba 127) y el compare del temporizador simple en
+  0; una hora en `EXT` rellena las tablas una sola vez; `DAC DITH`, `DAC PWM` y
+  `DAC EXT` pasan el código del lazo y vuelven a aparcar; el escalado del
+  AD5680 no cambia. Cuatro copias rotas a propósito fallan 2–6 de las 15.
+- hostcheck limpio en las 20 configuraciones.
+- Considerado y descartado: un horizonte más lento que `KC` mientras la fase
+  está cerca de cero. En la simulación actúa como un `KC` algo más largo — un
+  5 % menos de ADEV a 1–16 s y un 2 % más a 256–1024 s en el modelo de la
+  placa del autor, un 15–20 % menos a 1–64 s en el de Dan — y el `KT 200` del
+  build 60 mostró que la simulación favorece a los controladores lentos. Una
+  noche con `KC 50` en la placa es la prueba más limpia.
+- En la placa, por confirmar: una noche con `KF 16` como las noches con
+  `KC 33` (ningún `KAL: disturbance` en el log), y una perturbación — un
+  escalón de la alimentación, por ejemplo — con `KF 16` y con `KF 0`; y en la
+  V3 de Dan con `EXT`, nada a 11,7 kHz en la sección del PWM, y qué hace en
+  `LB` el número de ráfagas rechazadas como "off the line". (Véase el
+  build 70.)
+
+Build 68, `GPSDO v1.08.68rt`: la referencia del GPS tiene que ser un pulso
+además de un fix, `LC` arma el picDIV una vez y espera a la fase en lugar de
+armarlo seis veces, el informe de telemetría va al USB y al Bluetooth por
+separado, el túnel del GPS sigue el ritmo de un receptor rápido, un termómetro
+LM75 se lee y se registra, y el controlador del algoritmo 13 vuelve a `KC` =
+`KT`/3. Los cuatro primeros cambios, y la idea del LM75, vienen del fork de
+Zsolt Zsiros (ZsZs73), que se encontró cada uno de ellos en su propia placa —
+gracias, Zsolt. El último viene de dos noches y un día en la placa del autor
+con `KC 33` frente a una noche con `KC 16` (15–17.10): la mitad de movimiento
+del PWM y 1,7 veces menos ruido de frecuencia a 4–16 s, lo mismo desde 256 s.
+
+### Corregido (build 68)
+
+- **El holdover necesita el pulso además del fix.** El holdover automático
+  empezaba cuando se perdía el fix y terminaba cuando volvía. Pero un receptor
+  de tiempo en Time Mode da su posición fija como válida sin señal alguna, y
+  Zsolt vio a su placa salir del holdover con esa posición y sin pulso. Ahora
+  la referencia es un fix Y un pulso cuyo intervalo el OCXO midió como
+  plausible: el holdover empieza cuando se pierde el fix o tras 10 s sin pulso
+  (`GPS 1PPS lost — auto-holdover engaged`), y termina sólo cuando el fix ha
+  vuelto con 10 s de pulsos sin interrupción — uno o dos pulsos de una antena
+  que va y viene ya no lo terminan. La primera referencia tras el arranque se
+  sigue tomando en el acto. Y como salir del holdover lleva ahora esos 10 s,
+  un bloqueo ocupado ya no se hace pasar por una referencia perdida: una
+  pasada de 200 ms que no consigue leer el fix se queda con el último que leyó
+  (hasta el build 67, 5 ms de espera fallida para leerlo contaban como fix
+  perdido, lo que entonces costaba una pasada y ahora costaría esos 10 s), y un
+  cambio de los indicadores de holdover se anuncia, y se da por hecho, sólo
+  cuando se ha hecho de verdad.
+- **Un holdover manual sigue siendo manual aunque se pierda la referencia.**
+  Hasta el build 67 una pérdida durante `MH` lo convertía en un holdover
+  automático, que la vuelta del fix terminaba después: el GPS terminaba el
+  holdover del operador. Ahora la pérdida se anuncia (`GPS fix lost — manual
+  holdover kept`, o `GPS 1PPS lost — …`) y el holdover queda para que lo
+  termine `MD`.
+- **El picDIV se arma sólo con un pulso al que sincronizarse.** Todo armado —
+  el que pide el lazo y los del propio `LC` — necesita ahora un fix y un pulso
+  en los últimos 1,5 s (`picDIV: no GPS fix or no 1PPS - arming deferred until
+  both are back`): sin pulso en su entrada Sync el divisor se quedaría parado.
+  `LC` se salta sin él su primer armado, como ya hacía sin fix, y en lugar de
+  armar a ciegas para la rampa abandona con el código del lazo restaurado
+  (`LC: ERROR no GPS fix or no 1PPS to sync the picDIV to — aborting.`).
+- **Un host USB que no lee ya no detiene el informe en modo paralelo.** Con
+  `GPSDO_BLUETOOTH_PARALLEL` (activo por defecto) el informe pasaba por el tee,
+  y el tee toma un puerto que dice no tener sitio por un puerto que no está —
+  pero un host conectado que ha dejado de leer da el mismo cero, con la cola
+  llena. El tee contestaba entonces con el sitio del UART y escribía en los dos
+  puertos, en la cola llena del USB: justo el bloqueo que la rutina de
+  escritura del informe existe para evitar. Ahora cada puerto se escribe por su
+  cuenta, primero el Bluetooth, cada uno con su propio presupuesto — 25 ms para
+  el USB, como antes, y 200 ms para el UART, que se vacía a 57600 baudios lo
+  escuche quien lo escuche, así que recibe un informe entero incluso detrás de
+  un búfer lleno (un build sólo con Bluetooth recibe también los 200 ms). El
+  desplazamiento avanza lo que `write()` aceptó de verdad, no lo que se le
+  ofreció, y una escritura que no acepta nada — USB sin terminal abierto, o
+  sin host — termina en el acto el intento en ese puerto.
+- **El túnel del GPS sigue el ritmo de un receptor rápido.** Movía un byte en
+  cada sentido por milisegundo: suficiente a 9600 baudios, no a 38400 (el
+  valor por defecto de un ZED-F9T), donde cualquier ráfaga NMEA de más de ~350
+  bytes desbordaba el búfer de recepción de 256 bytes y u-center veía tramas
+  rotas. Ahora vacía en cada pasada el búfer del receptor, y pasa los bytes del
+  host tan deprisa como los acepta el búfer de transmisión del UART — nunca
+  más deprisa, así que una subida grande desde u-center (una configuración, un
+  firmware) no puede retener la tarea en una escritura que espera al UART.
+- **Las notas del build 67 atribuían las perturbaciones de Dan a la portadora
+  del PWM del EFC.** Son una onda cuadrada de 23,4 kHz — justo lo que daría el
+  dither de 12 bits (96 MHz / 4096). Pero su placa compila el dither de 13 bits
+  por defecto (11,7 kHz), selecciona el AD5680 desde el arranque, así que el
+  pin del PWM se queda en bajo, y el PWM de la retroiluminación del TFT va a
+  19,2 kHz: de dónde vienen aún no se sabe. La entrada del build 67 más abajo,
+  el manual, el README y los comentarios del código lo dicen ahora; el ajuste
+  nunca dependió de ello.
+
+### Cambiado (build 68)
+
+- **`LC` arma el picDIV una vez y espera a la rampa.** Hasta el build 67 lo
+  rearmaba un máximo de seis veces, hasta que un aterrizaje cayera dentro de la
+  banda del detector, en la creencia de que una sincronización deja la fase a
+  un lado u otro del flanco del GPS, al azar. No es así: el flanco del divisor
+  va ligado a su propio reloj de instrucciones, y un rearme aterriza donde
+  aterrizó el anterior (modelo de la placa del build 66). Una placa cuyos
+  aterrizajes caen por debajo de la banda fallaba por eso los seis intentos
+  igual, y cada comprobación llegaba 6 s después de soltar, 5–6 s después de
+  la sincronización — 30–36 ns de barrido a 6 ns/s, frente a los ~39 ns del
+  umbral de 0,10 V —, así que incluso un aterrizaje justo en el flanco se
+  rechazaba cada vez. El barrido alarga el intervalo, así que `LC` arma ahora
+  una vez y deja que el barrido meta la fase en la banda: desde 100 ns al otro
+  lado del flanco en ~24 s tras el aterrizaje, durante dos minutos como mucho
+  (`LC: ramp wait … s, V = …` cada 10 s), con un segundo armado si se agotan.
+  Un aterrizaje dentro de la banda sigue en el acto, como antes; uno por debajo
+  entra por abajo, así que el tránsito es la rampa entera. Del fork de Zsolt,
+  donde `LC` pasa en su placa; los aterrizajes de la placa del autor caen en la
+  banda, así que su `LC` funciona como antes.
+- **`KC` 0 = auto vuelve a ser `KT`/3** (33 s con el `KT 100` por defecto;
+  `KT`/6, 16 s, en los builds 61–67). La fase registrada, por la que se eligió
+  `KT`/6, es la lectura del detector, y un controlador rápido la mejora copiando
+  en el oscilador el propio vagabundeo lento del detector — y lo que sale de la
+  placa es el oscilador. Lo que hace el oscilador es el PWM integrado: los pasos
+  del código por los hercios por LSB, cuya ADEV coincidió en unos pocos por
+  ciento, de 4 a 400 s, con la medida de la placa de Dan frente a un rubidio
+  (14.10). En la placa del autor, en una sola sesión, `KC 16` una noche y luego
+  `KC 33` dos noches y un día:
+
+  | | `KC 16` | `KC 33` |
+  |---|---|---|
+  | cambios del PWM por hora | 1349 | 664–744 |
+  | ADEV del PWM integrado, 4 s | 1,85e-11 | 1,05–1,12e-11 |
+  | 16 s | 3,68e-11 | 2,11–2,32e-11 |
+  | 64 s | 4,41e-11 | 3,51–3,72e-11 |
+  | 256 s | 3,08e-11 | 2,76–3,23e-11 |
+  | desviación típica de la fase registrada | 1,83 ns | 2,14–2,30 ns |
+
+  Una placa que guardó un `KC` propio lo conserva; `KC 0` toma el nuevo valor
+  por defecto. La ayuda y las respuestas del comando `KC` dicen `KT/3`.
+
+### Añadido (build 68)
+
+- **Termómetro de la familia LM75** (`GPSDO_LM75`, activo por defecto;
+  dirección `GPSDO_LM75_ADDR`, 0x48): un LM75A/B, PCT2075, TMP75/175, TMP1075
+  o cualquier chip con el registro de temperatura del LM75, leído con `Wire` a
+  secas — sin biblioteca. Se detecta al arrancar como los demás sensores
+  (`HW: LM75 sensor OK (I2C 0x48)` o `not found`), se lee cada 2 s bajo el
+  bloqueo del bus y se registra en la línea de sensores del informe legible
+  (`RH`), tras `CPU:`, como `LM75:<°C>C` con tres decimales: pasos de 1/8 °C
+  en un LM75A, un LM75B de NXP o un PCT2075, de 1/16 °C en un TMP1075, de
+  1/2 °C en los chips de 9 bits (el LM75 original, un TMP75/175 tal como
+  arranca). `LM75:---` cuando lleva 6 s sin contestar. Una lectura que ninguno
+  de estos chips podría enviar — con alguno de los cuatro bits bajos a uno, o
+  fuera de −55…125 °C — cuenta como falta de respuesta, así que un INA219
+  configurado en 0x48 no se toma por uno; un ADS1x15 o un PCF8591 en esa
+  dirección sí puede (cambie la dirección, o compile sin él). De momento nada
+  en las pantallas, y el informe tabulado (`RD`) conserva sus columnas. Pegado
+  a la caja del OCXO pone en cada registro la temperatura del propio oscilador
+  junto a la fase.
+
+### Verificación (build 68)
+
+- hostcheck limpio en las 20 configuraciones — una fila nueva compila la
+  placa del autor sin el LM75, que compilan ahora todas las demás, y las filas
+  de la placa del autor llevan ahora el AD5680 (`GPSDO_DAC_EXT`) y
+  `GPSDO_GPS_TIMING`, como sale la placa; con `-Wall -Wextra -Wshadow
+  -Wdouble-promotion` sobre cada unidad de traducción de la configuración por
+  defecto, los mismos 181 avisos que en el build 67. Código unos +1,4 kB, RAM
+  estática +16 bytes; el marco de la tarea de sensores 48 bytes (8), y la
+  escritura del informe llega a 48 bytes de profundidad en la tarea de
+  pantalla (32).
+- Nuevo `tools/hosttests` (`run.sh`): el código nuevo sacado tal cual del
+  firmware y ejecutado en un PC. `holdover` 80/80 — una posición congelada sin
+  pulso entra en holdover a los 10 s, un pulso irregular (3 s sí, 2 s no) nunca
+  lo termina, uno regular lo termina a los 10 s; `MH` sigue siendo manual a
+  través de la pérdida y la vuelta de la referencia; un bloqueo ocupado 10 s no
+  es un fix perdido, y un cambio que retrasa se hace, y se anuncia, una sola
+  vez; el picDIV espera a un pulso; y todo ello otra vez a través del
+  desbordamiento de `millis()`. `lcland` 67/67 — un aterrizaje a +500 ns sigue
+  en el acto, a +2 ns a los 2 s de espera, 100 ns al otro lado a los 19 s de
+  espera (~24 s tras el aterrizaje), 400 ns a 4 ns/s a los 105 s; un segundo
+  armado cuando se agota la primera espera; un aterrizaje por encima de la
+  banda, o uno que no llega a entrar, acaba en un abandono limpio con el código
+  restaurado; sin referencia no se arma nada, y perdida la referencia no hay
+  segundo armado. Sobre el mismo modelo, los seis intentos del build 67
+  rechazan todo aterrizaje repetible por debajo de +9 ns (en una placa de +3 a
+  +9 ns, según en qué punto del segundo se suelte). `report` 20/20 — un CDC que
+  nadie vacía cuesta sus 25 ms y no acepta nada, un puerto USB sin host no
+  cuesta nada, una escritura corta no pierde nada, un UART detrás de un búfer
+  lleno recibe el informe entero en 200 ms donde los 25 ms de antes cortaban la
+  cola, y en modo paralelo un USB atascado no le cuesta nada al Bluetooth.
+  `lm75` 32/32 — cada resolución, los dos signos, los extremos del rango, el
+  orden de los bytes, el registro de un INA219 rechazado, un bus que falla.
+  `tunnel` 14/14 — a 9600, 38400 y 115200 baudios no se pierde ningún byte del
+  receptor, y 20 KB subidos desde u-center pasan sin una sola escritura en un
+  búfer de transmisión lleno. Cada una de diecisiete copias rotas a propósito
+  falla su prueba: `holdover` 4–25 de sus 80 comprobaciones (sin la racha de
+  pulsos al salir 10, sin mirar el pulso 25, un bloqueo del GPS ocupado leído
+  como fix perdido 6, `MH` convertido en automático 9), `lcland` 10–21 de 67,
+  `report` 2 de 20, `lm75` 2–11 de 32 (los bytes intercambiados 11), `tunnel`
+  3–8 de 14 (un byte por pasada, como en el build 67, 8).
+- `KC` en la reproducción calibrada (`tools/loopsim/bench.py`, cuatro plantas
+  nocturnas): movimiento del DAC −40 %, ADEV del oscilador −33 % a 10 s y −21 %
+  a 30 s, igual a 100 s, +7 % a 300–1000 s, desviación típica de la fase 0,54
+  frente a 0,50 ns; en el escenario de la placa (`--hw`) 822 cambios del PWM
+  por hora frente a 1468. `coldstart.sh`: todos los arranques se asientan con
+  un armado, 0–15 s más tarde que en el build 67 (las manos más lentas cierran
+  los últimos nanosegundos más tarde). Con `KC 16` `bench.py` da las cifras del
+  build 67 al dígito.
+- `tools/algoswitch`, `railwatch` (17/17), `livestore` (49/49 y 3/3),
+  `flashring`, `spansim` y `lticsim` imprimen exactamente lo mismo que para el
+  build 67.
+- En la placa, por confirmar: `HW: LM75 sensor` al arrancar y `LM75:` en el
+  informe; `LC` como antes; con la antena desconectada `auto-holdover engaged`,
+  y al volver a conectarla `disengaged` unos 10 s después de que vuelvan los
+  pulsos; lo mismo bajo `MH` — `manual holdover kept` y el holdover todavía
+  activo después; una noche con `KC 0` como las noches con `KC 33`.
+
+Build 67, `GPSDO v1.08.67rt`: los molinillos de los displays LED dejan de
+duplicar la carga del procesador, una ráfaga del detector con las
+perturbaciones de una onda cuadrada se lee, el arranque en frío del algoritmo
+13 ya no paga por un `KT` largo, y el informe `DAC` imprime la portadora que la
+placa tiene de verdad. En la placa del autor la cifra de CPU estaba en 55–56 %
+durante todo el survey-in frente a 27 % después, y la tarea de pantalla, con
+41–49 % del procesador frente a 24 %, era la mayor parte de la diferencia. Los
+listados `LB` de Dan (14.10) mostraron un tercio de sus ráfagas rechazadas como
+"off the line", y cada una llevaba un par de perturbaciones en cada flanco de
+una onda cuadrada de 23,4 kHz. Y el `KT` largo que quiere su OCXO tranquilo
+alargaba un arranque en frío a media hora en el modelo de su placa. Con
+`KT 100` el lazo funciona bit a bit como el build 66.
+
+### Corregido (build 67)
+
+- **Los molinillos LED ya no duplican la carga de CPU.** Durante el
+  calentamiento, el survey-in y `C`/`CT` la tarea de pantalla se despierta
+  cada 150 ms para mover los molinillos del TM1637 o del HT16K33, y hasta el
+  build 66 cada uno de esos despertares ejecutaba la tarea entera: la cabecera
+  de la TFT reconstruida y enviada, la OLED y la LCD redibujadas — seis o
+  siete veces por segundo, para mostrar lo que cambia una vez. La escritura al
+  LED era lo de menos (~1,2 ms en el HT16K33 a 100 kHz, 5–8 ms por bit-bang en
+  un TM1637 de 6 dígitos). Ahora un despertar que no causó ninguna
+  notificación, durante una animación, mueve los dígitos LED y nada más; una
+  notificación (el PPS, una frase de hora del GPS) sigue ejecutando la pasada
+  completa, y también cualquier despertar 1,1 s después de la última completa,
+  así que ninguna pantalla espera su actualización más que antes (las banderas
+  de animación se leen de nuevo tras la espera, así que la pantalla de una
+  animación que acaba de terminar no se queda puesta). Fuera de una animación
+  cada despertar es una pasada completa, como era.
+- **Se lee una ráfaga con perturbaciones encima** (`LTIC_FIT_DROPS` 8 → 12). Un
+  detector que capta una onda cuadrada recibe un par de perturbaciones, una
+  hacia abajo y otra hacia arriba, en cada uno de sus flancos: en la placa de
+  Dan 15–30 códigos cada 21,3 µs (23,4 kHz), cuatro o cinco pares en cada
+  ráfaga de 90 µs. (Esta entrada la llamó primero la portadora del PWM del EFC.
+  No lo es — véase el build 68.) El ajuste deja fuera una conversión que se
+  aparta de la recta y vuelve a ajustar, y con ocho de esas exclusiones se
+  rechazaba un tercio de sus ráfagas y se conservaba la lectura anterior. Por
+  el propio ajuste del firmware, sus dos ráfagas rechazadas se leen ahora con
+  11 y 9 conversiones fuera, a 1,5 códigos como mucho de una recta robusta
+  (Theil–Sen), y la aceptada se lee como antes. Una ráfaga limpia no excluye
+  nada, así que una placa sin esa perturbación lee exactamente como antes. Un
+  caso cambia con ello: una ráfaga empezada mientras el pulso aún se apagaba
+  durante sus nueve a doce primeras conversiones, que el build 66 rechazaba,
+  las tiene ahora excluidas como las perturbaciones y se lee tan bien como una
+  limpia (por el ajuste del firmware, 200 ráfagas ruidosas de cada longitud:
+  mediana del error 0,3–0,4 códigos, como limpia). Más allá de las exclusiones,
+  o curvada como curva la recta un pulso que aún carga, se rechaza como antes.
+- **El arranque en frío del algoritmo 13 ya no paga por un `KT` largo.** `KT`
+  dice cuánto tiempo puede confiarse en la frecuencia propia del oscilador, y
+  uno tranquilo lo quiere largo — en la placa de Dan el modelo lo sitúa en
+  300–1000 s. Hasta el build 66 ese mismo número fijaba además todo lo que el
+  lazo hace antes de asentarse por primera vez: el horizonte del control, la
+  primera estimación de Q (R/KT³), la hipótesis sobre la frecuencia, la
+  frecuencia que espera la puerta de armado y hasta dónde proyecta un
+  aterrizaje, cuántas lecturas promedia antes de que mande `KC` y, a través de
+  ellas, la paciencia de la prueba de bloqueo y la salida de emergencia de la
+  puerta de armado. Con
+  `KT 1000` cada una de esas cosas salía diez veces más lenta o mil veces más
+  estrecha, un arranque en frío tardaba 28–41 minutos en el modelo, y como
+  `KT` se guarda, el único remedio era `KT 100` antes de cada reinicio. La
+  captura usa ahora `KT` sólo hasta 100 s (`kf_acq_horizon`); el seguimiento
+  — el techo de Q R/KT³, el `KC` por defecto `KT`/6, el ruido de
+  envejecimiento, el límite de un `KQ` fijado — conserva el `KT` tecleado. Con
+  100 s o menos no cambia nada.
+- **`DAC` imprime la portadora real.** El informe dividía un reloj de
+  temporizadores supuesto de 100 MHz; el núcleo STM32duino hace funcionar el
+  F411 de la BlackPill a 96 MHz (cristal de 25 MHz, PLL N 192, P 2, para que el
+  USB tenga 48 MHz), así que cada portadora impresa salía un 4 % alta —
+  12 207 Hz por los 11 719 del motor de 13 bits, 24 414 por los 23 438 del de
+  12. El reloj se lee ahora del RCC (`pwm24_timer_hz()`) y se imprime junto a
+  la portadora. Nada más dependía de él: el dither promedia ciclo de trabajo,
+  y al ciclo de trabajo el reloj le da igual. Los comentarios que decían
+  100 MHz dicen lo que la placa usa (el PWM de la retroiluminación 19,2 kHz,
+  el PWM simple de 16 bits 1,92 kHz con 50 000 pasos).
+- **La anonimización de posición del tuner atrapa una línea dañada.** El
+  enlace serie pierde a veces un byte, y una línea de posición que perdió sus
+  primeros caracteres o su salto de línea ya no empieza por `Lat:`. Una
+  captura del 07.10 conservó dos líneas así enteras: una que empezaba a mitad
+  de la latitud y otra en `at: `, con la siguiente línea `Up:` pegada. Además
+  de las formas exactas, una línea pierde ahora el número tras cualquier
+  etiqueta `Lat:` o `Lon:` (con sus cifras enteras o sin ellas — por debajo de
+  10 grados un byte perdido se lleva la única), los números justo antes de
+  `Lon:` y de `Alt:`, el número tras `Alt:`, las formas cortas en cualquier
+  sitio, también etiquetas pegadas a la línea anterior, y — en una línea con
+  las palabras del propio informe — todo número con forma de coordenada (de
+  cuatro a siete decimales). La línea normal sale byte a byte como antes.
+
+### Cambiado (build 67)
+
+- La nota del comando `KT` por encima de 200 s ya no dice que un horizonte
+  largo "sigue mal": era cierto para el OCXO del autor, que deriva rápido, y
+  falso para uno tranquilo. Dice en cambio qué vigilar — Q en su techo en `KL`
+  con la fase vagando significa acortarlo — y que un arranque en frío captura
+  a 100 s diga lo que diga `KT`.
+- El HT16K33 tiene caché de escritura, como el TM1637: una trama (cuatro
+  dígitos y los dos puntos) sale sólo cuando cambia, así que un despertar que
+  volvería a enviar la misma trama no toca el bus. Sólo se recuerda una
+  escritura que el display confirmó, y cada 10 s el chip se configura de nuevo
+  (oscilador, display, brillo) y se reenvía la trama, así que un módulo que
+  sufrió una caída de tensión — vuelve apagado, con el oscilador parado — se
+  enciende de nuevo en segundos en vez de quedar a oscuras hasta un reinicio.
+- `tools/lticsim`: las pruebas con perturbaciones siguen a `LTIC_FIT_DROPS`
+  (tantas como deja pasar se excluyen, una más se rechaza); `run.sh` se lo pasa
+  al modelo, y dos pruebas siguen a un pulso que se apaga (una conversión menos
+  de las que alcanzan las exclusiones: excluido; una más: rechazado). El nuevo
+  `tools/redact_test.py` comprueba la anonimización del tuner con coordenadas
+  inventadas y, si se le dan logs, muestra lo que cambia en telemetría real.
+  hostcheck tiene una decimonovena fila, la placa del autor con el HT16K33, que
+  la configuración por defecto activa y ninguna fila compilaba; su stub conoce
+  el reloj APB1. `tools/carrier.py` calcula a 96 MHz.
+- El manual: la sección de los dígitos LED, el párrafo de la ráfaga
+  (conversiones excluidas, y a qué apuntan muchas ráfagas rechazadas),
+  `KT`/`KC` y el apéndice D.3, y la portadora en `DAC`; las tablas de
+  portadoras del README a 96 MHz; README_TUNER sobre la anonimización. La
+  línea del firmware nombra el build 67.
+
+### Verificación (build 67)
+
+- hostcheck limpio en las 19 configuraciones (arm-none-eabi, cortex-m4); con
+  `-Wall -Wextra -Wshadow -Wdouble-promotion` en todas las unidades de la
+  configuración por defecto, los mismos 181 avisos que el build 66. Flash
+  +514 bytes, RAM estática +19; el marco de la tarea de pantalla 312 bytes
+  (304), los del ajuste de ráfaga (104) y de `kalman_ctl()` (608) sin cambios.
+- `tools/loopsim/coldstart.sh`, build 66 frente a build 67: los tres bloques
+  idénticos, arranque por arranque. `bench.py run --hw`: idéntico hasta el
+  dígito — algoritmo 13 2,40 ns, parte lenta 0,88 ns, ADEV 4,08e-12 a 1024 s,
+  1468 cambios de PWM por hora, y los algoritmos 11 y 12 como antes.
+- `KT` en un modelo de la placa de Dan (3 ns de ruido blanco del detector, un
+  tercio de los segundos con la lectura repetida, un OCXO tranquilo), 18
+  arranques en frío en 0 y ±300 LSB: `KT 100` idéntico al build 66 (mediana
+  375 s, el peor 464); `KT 300` mediana 392 s, el peor 508 (build 66: 761 y
+  12 082); `KT 1000` mediana 540 s, 355–737 (build 66: 2090, 1689–2466). Un
+  armado en cada arranque. Enganchado, seis semillas tras los primeros 5000 s:
+  la ADEV de 1 a 4096 s y la actividad del PWM a menos del 1 % del build 66 con
+  `KT 300` y `1000`, idénticas con `100`; con `KQ` fijado en 1e-5 o 1e-4 a
+  `KT 1000`, el mismo límite que el build 66 y las mismas cifras con un 0,1 %
+  de diferencia como mucho.
+- `tools/lticsim`: las 22 pruebas pasan con cada una de las tres constantes de
+  decaimiento — 12 perturbaciones excluidas y 13 rechazadas, un pulso que se
+  apaga durante 11 excluido y durante 13 rechazado, el que carga durante 12
+  rechazado por su curvatura — y las estadísticas de rechazo son las de antes.
+  Las tres ráfagas de Dan por el ajuste cortado de este árbol: las dos
+  rechazadas se leen 2366,53 y 2359,76, la tercera 2367,29 como antes; las
+  ráfagas del autor de tres logs se leen como antes hasta el dígito.
+- Los despertares del bucle de pantalla, modelados: con el PPS y una frase del
+  GPS, dos pasadas completas por segundo (como fuera de una animación) y cinco
+  sólo de LED; sin ninguna notificación, una pasada completa cada 1,2 s (antes
+  1,1 s); el HT16K33 escrito unas cinco veces por segundo con un molinillo, una
+  vez por segundo mostrando la hora.
+- `tools/redact_test.py`: la línea del informe exactamente como antes; las dos
+  formas dañadas del 07.10 y otras nueve pierden toda coordenada (ni tres
+  decimales con su parte entera, ni cuatro tras el punto, ni cinco seguidos);
+  quince líneas más de telemetría sin cambios, tres de ellas con las palabras
+  del informe. En 30 568 informes dañados sintéticos — uno o dos bytes
+  perdidos, ráfagas de 3–16 perdidas, líneas cortadas, pegadas o empezadas a
+  medias — no sobrevive nada de una coordenada, donde el build 66 dejaba pasar
+  17 161. En seis logs reales (unos 1,7 millones de líneas) sólo cambian las
+  dos líneas dañadas del 07.10, y después ninguna línea lleva un número a
+  menos de 0,05° de la posición del receptor.
+- `tools/algoswitch`, `railwatch` (17/17), `livestore` (49/49 y 3/3),
+  `flashring` y `spansim` imprimen exactamente lo que imprimían con el
+  build 66.
+- Una revisión independiente del código encontró dos fallos, ambos corregidos
+  antes de que el build saliera: la primera versión de la anonimización aún
+  dejaba pasar uno o dos bytes perdidos (una longitud por debajo de 10 grados
+  sin su cifra entera, una línea empezada dentro de la longitud), y la semilla
+  de Q de la captura movía también, en el seguimiento, el límite de un `KQ`
+  fijado con un `KT` por encima de 100 s. Entraron también sus puntos menores:
+  las banderas de animación leídas de nuevo tras la espera, el HT16K33
+  reconfigurado en cada refresco, la prueba exacta del divisor de APB1, la
+  fila del HT16K33 en hostcheck, las pruebas del pulso que se apaga y la frase
+  corregida sobre él, `tools/carrier.py` a 96 MHz.
+- En la placa, por confirmar: durante el survey-in y el calentamiento la cifra
+  de `CPU` cerca de 28 % en vez de 55 % (`SW`: la tarea de pantalla cerca de
+  24 %), los molinillos igual de fluidos; `DAC` mostrando `carrier 11719 Hz
+  (timer 96.0 MHz)`; los contadores de `LB` como antes en la placa del autor;
+  y una noche con `KT 100` como la del build 66.
+
+Build 66, `GPSDO v1.08.66rt`: el algoritmo 13 lee su detector por debajo de la
+ventana, da a una lectura menos peso cuanto más lejos del cero está, no toma
+fase de una lectura que el detector sólo repitió, y arma según el rango que
+puede leer. Los dos arranques del build 65 del 07.10 (11:49 y 17:33) empezaron
+en frecuencia, desde el punto de trabajo que había guardado el live store —
+las reparaciones del build 65 haciendo su trabajo — y aun así tardaron 17 y
+22 minutos en enganchar, cuando un arranque en frecuencia debería tardar unos
+pocos. Ninguno se veía en el simulador, que sorteaba el aterrizaje de cada
+armado y leía el detector como una recta, igual de ruidosa en sus bordes que
+en su cero, con una lectura nueva cada segundo. `tools/loopsim` modela ahora
+el divisor, la rampa y las lecturas de esta placa; con ellos el build 65 deja
+sin asentar 46 de 264 arranques en frío, con hasta 78 armados, y el build 66
+asienta todos, con un armado. En la simulación el lazo enganchado no cambia ni
+en una cifra, y tampoco la sacudida tras un reinicio.
+
+### Corregido (build 66)
+
+- **El algoritmo 13 lee la rampa por debajo de la ventana.** Una lectura del
+  detector cuenta como fase sólo dentro de 0,55 del span de `LC` a cada lado
+  del cero. Por encima del cero eso es correcto: la curva RC se aplana hacia
+  su alimentación, y una lectura ahí arriba puede corresponder a varias fases.
+  Por debajo, la curva está en su punto más empinado — la lectura exagera la
+  fase (a las 17:33 cayó 538 ns mientras el PWM, integrado, movió la fase 243)
+  pero sigue siendo unívoca hasta donde el pulso da la vuelta y la lectura
+  salta arriba. Y por debajo del cero es donde aterriza el divisor de esta
+  placa. Un armado sólo puede mover el flanco del divisor en pasos enteros de
+  su propio reloj, así que los aterrizajes caen en una ventana de unos 450 ns
+  (de −830 a −375 ns de fase verdadera en esta placa), y rearmar un divisor ya
+  sincronizado lo deja donde estaba. A las 11:49 el primer aterrizaje leyó
+  −1070 ns, por debajo de la ventana, y con el oscilador en frecuencia cada
+  rearme aterrizó en el mismo sitio (−1106 → −1103, −1099 → −1099, −1117 →
+  −1118): cuatro armados y 800 s de `NOPH`, hasta que la fase derivó al paso
+  siguiente (−438). El algoritmo 13 toma ahora también una lectura por debajo
+  de la ventana, hasta 0,9 del span por debajo del cero (0,445 V en esta
+  placa) y nunca bajo 0,15 V (la última lectura antes de que el pulso diera la
+  vuelta a las 17:33 fue 0,114 V), por quince veces más ruidosa que una en el
+  cero (punto siguiente). La pantalla y los demás algoritmos se atienen a la
+  ventana.
+- **Una lectura hacia los bordes cuenta menos.** La R del filtro es el ruido
+  del detector en el cero, donde el filtro pasa la vida — 1,2 ns en esta
+  placa. Hacia los bordes el mismo detector tenía ~11 ns de ruido a −900 ns y
+  10–17 ns por debajo de la ventana, y además la lectura en línea recta se
+  equivoca ahí hasta en un tercio. A las 17:33 el armado aterrizó en −909 ns,
+  las dos primeras lecturas diferían en 19 ns, y con el contador aún mudo tras
+  el reinicio la frecuencia estaba totalmente abierta: el filtro tomó el par
+  por una pendiente de 16,7 ns/s, el lazo llevó el PWM 519 LSB (0,17 Hz) tras
+  ella, y la fase se salió de la rampa. Ahora, más allá de un cuarto de la
+  banda — y nunca dentro de `LAT`, de modo que un lazo enganchado se pondera
+  exactamente como antes con cualquier detector — una lectura se toma por más
+  ruidosa cuanto más lejos está: diez veces en el borde de la banda, quince
+  por debajo de la ventana. Reproducidos sin esto, los arranques en frío de la
+  placa siguen asentándose, pero algunos tardan ~1100 s, arman dos veces y
+  llevan el PWM 1084 LSB más allá del punto de trabajo.
+- **Una lectura repetida no es una nueva.** Cuando una ráfaga no puede leerse
+  en su flanco, el firmware publica de nuevo la última lectura, hasta tres
+  segundos seguidos, y hace lo mismo durante un segundo cuando su puerta de
+  valores atípicos retiene un salto: un segundo de cada mil en lock, pero el
+  30–38 % mientras la fase se enganchaba tras un aterrizaje (07.10, ambas
+  capturas). El algoritmo 13 tomaba cada una como fresca — una segunda medida
+  de una fase vieja — y en un enganche, donde la fase se mueve varios ns/s, la
+  lectura se quedaba quieta y luego saltaba, y la puerta 4σ rechazaba los
+  saltos: 35 y 57 rechazos en los dos enganches, la lectura congelada en
+  −548,7 ns durante cuatro segundos. Ahora un segundo repetido no da fase al
+  filtro: ni actualización, ni aterrizaje, ni estimación de R, y en la prueba
+  de seguimiento sólo el movimiento que ese segundo debía traer. Tampoco es un
+  hueco — el detector no se ha callado — así que el veredicto de lock y los
+  20 minutos del live store siguen corriendo; más de cuatro seguidos, más de
+  lo que el firmware repite de una vez (tres ráfagas sin leer y un salto
+  retenido), sí lo es. La tendencia dice `KEPT`. En la reproducción sobre el
+  modelo de la placa, las lecturas rechazadas antes del primer lock bajan de
+  26 de mediana (230 como mucho) a 2 (42); sin este punto serían 15 (61).
+- **La puerta de armado se guía por el rango que el lazo lee.** Una vez que ha
+  visto aterrizar un armado, la puerta deja pasar el siguiente sólo si ese
+  aterrizaje, llevado un horizonte a lo largo de la deriva medida, sigue
+  siendo legible — y quería el aterrizaje dentro de ±media banda. A las 17:33,
+  tras un aterrizaje en −909 ns, rechazó todo armado durante 1000 s, hasta el
+  escape ciego (el paso forzado de la puerta tras diez horizontes sin fase).
+  Por debajo del cero el rango llega ahora hasta el suelo de la cola. En las
+  reproducciones no cambia nada — con la cola leída, el build 66 no rearma —
+  pero una puerta que discrepa del lazo sobre lo que se puede leer es un
+  bloqueo esperando su momento.
+
+### Cambiado (build 66)
+
+- **La tendencia del algoritmo 13 puede decir `KEPT`**: el detector repitió su
+  última lectura y el filtro no tomó fase de ella (arriba). Alrededor de un
+  segundo de cada mil en lock y uno de cada tres durante un enganche; el
+  veredicto de lock no cambia por ello. `tools/gpsdo_tuner.py` da su
+  significado junto a la etiqueta de estado.
+- `tools/loopsim`: el divisor, la rampa y las lecturas de esta placa, cada uno
+  como un mando — `LOOPSIM_RAMP=<Vsat>` (el detector como carga RC: por debajo
+  del cero la lectura se adelanta a la fase, y más allá del ancho propio del
+  cero el pulso da la vuelta y lee arriba), `LOOPSIM_LANDQ=<L>:<Q>` (un armado
+  aterriza en pasos enteros del reloj del divisor, desde donde estaba la
+  fase), `LOOPSIM_EDGEN=<ns>` (ruido que crece lejos del cero) y
+  `LOOPSIM_KEPT`, `LOOPSIM_KEPT0=<p>` (segundos que publican de nuevo la
+  última lectura; con cualquier mando del modelo de placa activo, un salto que
+  retiene la puerta de valores atípicos también cuenta como uno). Con todos
+  apagados el harness reproduce las ejecuciones del build 65 al segundo.
+  `coldstart.sh` ejecuta un tercer bloque con los valores de esta placa
+  (3,15 V, 380:450 ns, 12 ns, 0,35).
+- El manual: el algoritmo 13 llama `NOPH` a un segundo sin fase desde el
+  build 51, y el manual aún decía `HOLD` en cuatro sitios — corregido, con
+  `KEPT` añadido a la lista de tendencias y tres puntos nuevos en el Apéndice
+  D.4 (por debajo de la ventana, los bordes, una lectura repetida). La línea
+  de firmware nombra el build 66.
+
+### Verificación (build 66)
+
+- hostcheck limpio en las 18 configuraciones (arm-none-eabi, cortex-m4); con
+  `-Wall -Wextra -Wshadow -Wdouble-promotion` en todas las unidades, los
+  mismos 182 avisos que el build 65.
+- `tools/loopsim/coldstart.sh`, build 65 frente a build 66: los dos bloques
+  con aterrizaje sorteado (04.10, 07.10) salen como antes con dos segundos de
+  diferencia como mucho — 149–483 s, un armado cada uno; en el tercero, con el
+  divisor, la rampa y las lecturas de esta placa, el build 65 deja 7 de 33
+  arranques sin asentar (77 armados) y tarda 10,4 h en otro más, y el build 66
+  asienta todos en 263–587 s con un armado.
+- Fuera del árbol, el mismo modelo de placa con 24 semillas para cada uno de
+  0, ±300, ±800, ±1498, ±3000 y ±6000 LSB: el build 65 deja 46 de 264
+  arranques sin asentar, con hasta 78 armados; el build 66 asienta los 264,
+  mediana 281–510 s según el desplazamiento, el peor 587 s, un armado cada
+  uno, primer lock en 261–495 s de mediana. El PWM nunca pasa más de 340 LSB
+  del punto de trabajo (el bache conocido justo tras el lock, sin cambios; el
+  build 65 hasta 736). Las piezas por separado, 24 semillas en cinco
+  desplazamientos: sin la cola 27 de 120 no se asientan (78 armados); sin la
+  ponderación de los bordes todos se asientan, pero en hasta 1125 s, con dos
+  armados y el PWM 1084 LSB más allá; con las lecturas repetidas tomadas como
+  frescas los tiempos se mantienen y los rechazos no (arriba); con la puerta
+  de armado antigua no cambia nada.
+- Con la K de `CT` a 0,5, 0,7, 1,4 y 2 veces la de la planta (modelo de placa,
+  doce semillas en ocho desplazamientos): el build 66 asienta los 384 con un
+  armado cada uno, el peor 911 s (K × 2); el build 65 deja uno sin asentar (K
+  × 2, −6000 LSB, 75 armados) y tarda hasta 1750 s (K × 0,5, tres armados).
+  Con la K por encima de la de la planta el build 66 es más lento en todos los
+  desplazamientos — con K × 2 hasta 1,7 veces (−300 LSB: 562 s de mediana
+  frente a 324) — y con la K por debajo, en la mayoría de los negativos.
+- El precio, en la placa de 3000 ns del harness, cuyo raíl se lee dentro de la
+  banda a través de la puerta de valores atípicos: un arranque desde el raíl a
+  300 LSB se asienta en 466 s de mediana frente a 396 (el peor 596 frente a
+  429, hasta tres armados), un arranque a 1500 ns en 442 s frente a 397; las
+  medianas de los demás arranques se mueven como mucho 18 s, sus peores casos
+  hasta 72 s. Todo ello es la ponderación de los bordes: sin ella las cifras
+  son las del build 65 al segundo. En el modelo de esta placa los arranques en
+  frecuencia se asientan en 263–277 s frente a 217–226 del build 65 (las tres
+  semillas de `coldstart.sh`; con 24 semillas la mediana es 281 s frente a
+  248, con 4 arranques del build 65 sin asentar).
+- Un detector congelado, con el lazo llamado como en la placa: dentro de la
+  ventana (+300 y +1295 ns, en frecuencia y fuera de ella) como antes,
+  2,5–12 mHz rms en la segunda mitad; congelado justo por debajo (−1700 ns en
+  la placa de 3000 ns, donde el build 65 no lo leía en absoluto y mantenía la
+  frecuencia en 0,2–0,5 mHz rms), el build 66 lo lee ahora como cualquier
+  lectura congelada de dentro, y sale peor que todas ellas — 14,5–15,4 mHz
+  rms, sd de fase 650–700 ns: un coste asumido a sabiendas. Los raíles quedan
+  fuera de la cola: el de arriba está sobre el cero, 0 V bajo el suelo.
+- Ni un segundo de `NOPH` tras los primeros 2000 s en 72 reproducciones de
+  12,5 h, con el aterrizaje del 07.10 y con el modelo de placa (el build 65
+  con el modelo de placa: cuatro ejecuciones que nunca se asentaron, 43 092 s
+  cada una).
+- `bench.py run --hw`: algoritmo 13 2,40 ns, parte lenta 0,88 ns, ADEV
+  4,08e-12 a 1024 s, 1468 cambios de PWM por hora — las cifras del build 65
+  hasta el último dígito, igual que los algoritmos 11 y 12 y las cuatro
+  plantas anteriores, con la salida fina y con una de 16 bits. La sacudida
+  tras un reinicio en el escenario del build 54: 9 / 28 / 9 / 22 / 9 LSB (16
+  bits 9 / 28 / 9 / 21 / 9; con el lazo arrancando como en la placa 19 / 14 /
+  19 / 21 / 19), sin cambios.
+- `tools/algoswitch`, `lticsim`, `railwatch` (17/17), `livestore` (49/49 y
+  3/3), `flashring` y `spansim` imprimen exactamente lo mismo que para el
+  build 65.
+- Pila: `kalman_ctl()` 608 bytes (antes 584); el camino más profundo de la
+  tarea Control sigue siendo la escritura del anillo (1728 bytes), el del
+  lazo 736. Flash +0,9 kB, RAM estática +12 bytes.
+- Una revisión independiente del código no encontró fallos; sus sugerencias se
+  incorporaron: un segundo repetido sigue sumando su movimiento esperado en la
+  prueba de seguimiento, más de cuatro segundos repetidos seguidos cuentan
+  como hueco, la prueba de la cola lee exactamente la tensión de la que salió
+  la fase (la lectura la publica otra tarea), la ponderación de los bordes
+  nunca empieza dentro de `LAT`, `KEPT` pasó a ser una palabra de tendencia, y
+  `coldstart.sh` no deja entrar un `LOOPSIM_KEPT0` del shell en sus dos
+  primeros bloques.
+- En la placa, por confirmar: un arranque en frío y un reinicio por software
+  directamente en `LA 13` arman una vez y enganchan en menos de diez minutos,
+  sin `NOPH` tras el armado más allá de sus cuatro segundos deliberados;
+  durante el enganche `KEPT` en alrededor de un tercio de los segundos y casi
+  ningún `REJ`; un aterrizaje por debajo de la ventana (una lectura bajo
+  ~1,0 V en el log) enganchado en vez de rearmado; en lock `KEPT` una vez cada
+  mil segundos más o menos; y `SW` mostrando aún margen en la pila de Control.
+
+Build 65, `GPSDO v1.08.65rt`: tres correcciones para un arranque lejos del
+punto de trabajo — dos halladas en la primera ejecución del build 64 en la
+placa (04.10), la tercera en el primer arranque del propio build 65 (07.10);
+el punto de trabajo, junto con el tramo al que pertenece, guardado por el live
+store; un anillo de flash que ya no pierde los ajustes al llenarse (con el
+punto de trabajo guardado, ocurriría cada pocos meses) y en el que escribe una
+sola tarea a la vez; guardados de ajustes que ya no se deshacen entre sí y un
+`CR` que borra una vez; `LC` dejando el código del lazo donde lo encontró; un
+aviso cuando un lazo va de un extremo del DAC al otro; y la descarga del
+condensador del detector documentada como lo que es. La corrección del propio
+build 64 aguantó su primera noche (23:30–08:00, algoritmo 13, 47,3–48,2 °C):
+el contador de curvaturas de `LB` apenas se movió — 209 rechazos en 56 726 s
+desde el arranque, que las lecturas congeladas del registro sitúan en los
+primeros minutos tras el arranque — y solo un segundo de cada mil publicó una
+lectura mantenida, cuando la noche del build 63 mantuvo uno de cada nueve. Es
+la mejor noche registrada en esta placa: desviación típica de la fase 1,64 ns,
+suelo blanco 0,94 ns, parte lenta 0,90 ns, R 1,32, ADEV 1,6e-9 a 1 s, 2,8e-12
+a 1024 s y 7,0e-13 a 4096 s (build 63: 1,77, 1,15, —, 1,51, 1,9e-9, 3,0e-12,
+—), el PWM cambiando 1316 veces por hora (1525), el mayor paso de un segundo
+al siguiente 6,2 ns, ningún paso por encima de 10 ns y ninguna lectura
+rechazada por el filtro de Kalman.
+
+### Corregido (build 65)
+
+- **El algoritmo 13 engancha desde lejos en lugar de oscilar de un raíl al
+  otro.** El primer arranque del build 64 salió con el PWM en 42429, 1469 LSB
+  (0,47 Hz) del punto de trabajo de la placa (~40960 — el código que guardaba
+  el live store era antiguo, véase más abajo), con el picDIV aún sin
+  sincronizar, y `LA 13` se tecleó durante el survey-in: el enganche quedó por
+  entero en manos del algoritmo 13, solo con el TIM2. Llevó el PWM de un raíl
+  al otro, 1 ↔ 65535 y −12,8 ↔ +8,4 Hz, con un periodo de diez minutos,
+  durante hora y media, y nunca se acercó lo bastante en frecuencia como para
+  armar el divisor. La causa es el límite a la rapidez con que puede cambiar
+  la corrección de cada segundo, presente desde la v1.07 para que un reinicio
+  no sacuda el oscilador: limitaba la frenada igual que la aceleración. En el
+  registro la corrección cambia ~5 LSB cada segundo durante toda la oscilación
+  (el límite: 516 LSB en el horizonte de adquisición de 100 s), así que un PWM
+  lanzado a unos cientos de LSB por segundo no podía pararse y se pasaba más o
+  menos toda la distancia que debía recorrer. Desde un desvío pequeño los
+  términos de fase y de TIM2 lo amortiguan; desde uno grande cada oscilación
+  superaba a la anterior. El límite ahora solo frena el crecimiento desde cero
+  (y una inversión, que pasa por cero); la corrección puede reducirse tan
+  rápido como pida el filtro. Reproducido con los números de esta placa —
+  detector en el raíl, el contador contando como cuenta, la puerta de valores
+  atípicos del firmware, el lazo arrancando solo con la media de 100 s llena,
+  como arranca en la placa, el divisor aterrizando más o menos donde aterrizó
+  el 04.10 (−449 ns; la simulación sortea −450 ± 150 ns) —, el build 64 falla
+  desde ±800 LSB con todas las semillas y a ±300 con algunas; con esta
+  corrección se asienta cualquier arranque hasta ±6000 LSB (±1,9 Hz), pero
+  desde lejos despacio y con hasta seis armados: lo que lo hace rápido es el
+  punto siguiente. El lazo enganchado no cambia, ni tampoco la sacudida tras
+  un reinicio contra la que se puso el límite (véase Verificación). No se
+  había visto antes porque la placa suele arrancar con el algoritmo 11 y pasar
+  al 13 una vez enganchada, como antes de esa noche.
+- **El algoritmo 13 ya no gobierna con una fase que nadie ha medido, y una
+  media atrasada ya no condena a su detector.** El primer arranque del propio
+  build 65 (07.10: un reinicio por software directo al algoritmo 13 con el
+  viejo 42429, a 1498 LSB — 0,48 Hz — del punto de trabajo, el detector en el
+  raíl) no había enganchado cuando se lanzó `CT` 14 minutos después: cuatro
+  armados, hasta el 37,7 % de las lecturas rechazadas y, desde ~540 s, solo
+  `NOPH`, con el detector leyendo dentro de la banda. La reproducción de
+  arriba no lo mostraba porque llamaba al lazo desde el primer segundo,
+  mientras que la placa lo llama solo con la media de 100 s llena; por ese
+  camino el filtro toma la frecuencia de la cuenta de un segundo suavizada y
+  armaba ya a los ~14 s, antes de que el suavizado se pusiera al día — un
+  armado que la placa nunca hace. Reproducida como la ejecuta la placa, la
+  mañana sale casi segundo a segundo (PWM mínimo 38377 a 263 s frente a 38395
+  a 264, primer armado a 273 s frente a 273, 100 rechazos hasta 400 s frente a
+  99, segundo armado a 410 s frente a 409) y solo se asienta tras ~41 minutos;
+  desde +800 LSB acaban igual dos arranques de cada doce. Cuatro fallos en
+  cadena. Con el detector en el raíl el filtro llevaba una fase construida con
+  su propia estimación de frecuencia — las primeras lecturas del contador le
+  escribieron de −3 a −7 µs — y la anulaba en el horizonte, llevando el
+  oscilador 0,8 Hz hacia el otro lado (PWM 42429 → 38395 con un punto de
+  trabajo de 40931). La puerta de armado leía la media de 100 s, que pasó por
+  cero con el oscilador aún 0,77 Hz desviado, y armó sobre una fase que barría
+  a 77 ns/s. La prueba de seguimiento comparaba el detector con la misma media
+  atrasada — esperaba +1269 ns en una ventana en la que la fase se movió +189
+  — y tras tres ventanas así dejó sin voz a un detector sano durante la media
+  hora que dura su caducidad; los armados siguientes no podían devolverle la
+  confianza. Y las lecturas del contador se predecían con media variación de
+  retraso, lo que solo vale para una rampa recta. Ahora: no hay estado de fase
+  hasta la primera lectura del detector tras un reinicio o un armado, o tras
+  10 s sin ninguna, así que el control es solo de frecuencia mientras no haya
+  fase; sin fase, una lectura del contador rechazada diez veces seguidas se
+  adopta en vez de recortarse, y la varianza de la frecuencia no puede afirmar
+  más de lo que permite la K de `CT`; la media de 100 s se lleva al segundo
+  actual, exactamente, con las correcciones que el lazo ha anotado, para la
+  actualización del contador, la prueba de seguimiento (redondeado al paso del
+  contador, 0,01 Hz) y la puerta de armado (que debe pasar con un cuarto de
+  esa corrección hacia cada lado — una K desviada un cuarto); y una lectura
+  que salta cuando el divisor se resincroniza devuelve la confianza, algo que
+  uno congelado no puede hacer. Reproducido: cualquier arranque de ±300 a
+  ±6000 LSB se asienta en 327–480 s de mediana, como mucho 543 s, con dos
+  armados como máximo (antes: 342–3305 s, como mucho 4298 s, hasta seis
+  armados); el arranque de la mañana se asienta en 429 s con un armado, y en
+  el camino su PWM se detiene a 5 LSB del punto de trabajo en vez de pasarse
+  2500; con la K de `CT` entre la mitad y el doble de la de la planta, todos
+  los arranques se asientan (como mucho 1462 s, frente a 11 177 s). Un
+  detector congelado sostiene la frecuencia mejor, no peor (2,5–12 mHz rms
+  frente a 6–26), el lazo enganchado no cambia ni en una centésima de
+  nanosegundo, y tampoco la sacudida tras un reinicio.
+- **La curvatura propia de la placa se aprende solo de ráfagas que leen la
+  rampa.** El build 64 promediaba la curvatura de cada ráfaga tomada en el
+  flanco, estuviera donde estuviera. Un detector contra su raíl no es una
+  rampa: la ráfaga baja ~160 códigos en sus primeros 50 µs y luego queda
+  plana, una «curvatura» de unos +70 códigos. A lo largo de la primera
+  ejecución del build 64 (2,7 h en el raíl) la curvatura típica subió a +20, y
+  cada vez que la fase cruzaba la ventana las ráfagas propias de la placa (−3
+  a −4) se rechazaban como «bent unlike the board's bursts»: la lectura
+  quedaba congelada hasta 7 s seguidos y se publicaba como válida. El arranque
+  de la noche mostró lo mismo en miniatura — 150 s en el raíl antes del primer
+  armado, y después lecturas congeladas de 3 a 4 s durante los siete minutos
+  siguientes. Ahora una ráfaga cuenta solo si su recta cae dentro de la banda
+  medida por `LC` (cero ± 0,55 del tramo barrido, la ventana en la que una
+  fase se considera válida; sin `LC`, solo se excluyen los raíles).
+- **Un código archivado bajo el tramo equivocado se remapea desde el tramo en
+  el que está.** El registro del tramo (los ajustes) y el código (el live
+  store) son dos escrituras, y el arranque remapeaba un código recuperado
+  desde el tramo que nombra el REGISTRO. Hay dos maneras de que discrepen,
+  ambas reproducidas en `tools/spansim` en una placa con los dos tramos
+  calibrados: un corte de alimentación entre las dos escrituras tras mover el
+  puente (el registro dice el tramo nuevo, el código sigue siendo del viejo) y
+  un fallo al guardar el propio registro en un movimiento (el registro dice el
+  tramo viejo, el código ya es del nuevo). El build 64 arrancaba el primero a
+  1,2e-7 de la frecuencia — el código del tramo viejo en el camino nuevo — con
+  23 µs de fase por recuperar y el enganche tras 1112 s, y el segundo
+  remapeando un código que no lo necesitaba: a −11785, recortado a 1, 9,4e-8
+  fuera, 41 µs de fase, 1483 s. La ranura del live store dice ahora en qué
+  tramo está su código, y el arranque remapea desde ahí: el build 65 arranca
+  los dos a −9,7e-13 y −3,0e-13. Una ranura escrita por el build 64 o anterior
+  no tiene ese byte y el arranque la trata exactamente como antes.
+- **Un anillo de flash lleno ya no borra los ajustes.** Los ajustes (`ES`, la
+  K de `CT`, el registro del tramo), el registro de Kalman (KR/KQ/KT) y los
+  datos live comparten un sector con nivelación de desgaste, y cuando se
+  agotaban sus 255 ranuras el anillo borraba el sector y volvía a escribir
+  solo la ranura que lo había llenado. La ranura más reciente de cada uno de
+  los otros tipos se iba con las viejas: el siguiente arranque salía con los
+  valores por defecto — «Settings: none stored», sin el algoritmo, `CT` ni
+  KR/KQ/KT — o, si lo llenaba un `ES`, sin la calibración de `LC`. El fallo
+  viene de cuando los ajustes pasaron al anillo, y no se veía porque el anillo
+  tardaba mucho en llenarse: con los algoritmos 11–13 solo escribían en él los
+  guardados, `LC` y los movimientos del puente. Guardar el punto de trabajo
+  (más abajo) llevaría a una vuelta en pocos meses en una placa que deriva.
+  Ahora una vuelta lee la ranura más reciente de cada tipo antes del borrado y
+  las vuelve a escribir después, y luego la nueva. Un borrado que falla, una
+  cabecera que no se relee bien y una copia que no se programa tienen cada uno
+  un segundo intento; solo un corte de alimentación durante el borrado o en
+  los pocos milisegundos siguientes, o una flash que falle dos veces, las
+  pierde aún. Además, una ranura que un programado fallido dejó a medio
+  escribir ahora se salta: hasta el build 64 cada escritura posterior, `ES`
+  incluido, volvía a ella y volvía a fallar hasta el siguiente arranque.
+- **Al anillo escribe una sola tarea a la vez.** Escriben en el anillo la
+  tarea de control (el live store, la K de `CT`, el registro del tramo) y la
+  CLI (`ES`, KR/KQ/KT, `CR`), y nada las separaba. Un guardado del live store
+  que cayera en los pocos milisegundos de un `ES` — la tarea de control
+  adelantándose a la CLI entre dos palabras de una ranura — ponía las dos
+  escrituras en esa misma ranura: hasta el build 64 cada escritura posterior
+  fallaba hasta el siguiente arranque. Ahora que una ranura estropeada se
+  salta (arriba), cada escritor seguiría adelante, la ranura siguiente
+  quedaría en blanco detrás de la más reciente y el siguiente arranque
+  empezaría a escribir ahí, encima de los registros escritos después: un
+  registro de ajustes guardado y leído bien desaparecería un reinicio más
+  tarde. En mitad de una vuelta, la misma colisión podía deshacer el traslado.
+  Ahora la escritura, la lectura y el borrado del anillo toman un mutex, y un
+  arranque sigue después de la última ranura que recibió algún bit, no desde
+  la primera en blanco. La carrera es anterior al build 65; la encontró la
+  segunda revisión independiente de este build, inyectando un segundo escritor
+  en cada operación de flash de una escritura.
+- **`LC` deja el código del lazo donde lo encontró.** Las tres salidas de `LC`
+  restauraban el pin pero no `gCtrl.pwm_output`, donde el barrido mantiene su
+  propio código para las pantallas. El lazo parte de ese valor (y su camino
+  fino del pin solo mientras ambos coinciden en un LSB), así que tras cada
+  `LC` el primer paso del lazo volvía al código del barrido — 0,06 Hz fuera,
+  ~190 LSB en la placa del autor — y el guardado que pide un `LC` aprobado
+  guardaba ese código como punto de trabajo. Ahora cada salida restaura los
+  dos, fracción incluida, como un `CT` fallido. Anterior al build 65; lo
+  encontró la misma revisión.
+- **Dos guardados de ajustes a la vez ya no se deshacen el uno al otro.** Un
+  guardado parcial (`ES PID`, `ES TZ` y los demás, los guardados automáticos,
+  un movimiento del puente, el de `CT`) lee el registro de ajustes más
+  reciente, cambia su grupo y vuelve a escribir el registro entero, y guardan
+  tanto la CLI como la tarea de control. Entrelazados, la segunda escritura
+  partía del registro que la primera aún no había sustituido, y el grupo de la
+  primera volvía a lo que era — un movimiento del puente durante un `ES PID`
+  dejaba en la flash el PID antiguo. El bloqueo del anillo hace entera cada
+  lectura y cada escritura, no el par; ahora un bloqueo propio del almacén de
+  ajustes hace de cada guardado de ajustes una sola lectura y una sola
+  escritura. Anterior al build 65 (TODO 159 (l)).
+- **`CR` borra una vez, conserva el contador de borrados y dice cuándo ha
+  funcionado.** El borrado vaciaba el sector, y el formateo que venía después
+  no encontraba cabecera, tomaba el anillo por ajeno y lo borraba otra vez,
+  contando los borrados desde 1 — y como un anillo recién formateado no tiene
+  datos, el borrado se daba por fallido: cada `CR` imprimía «ring erase FAILED
+  (flash locked?)». Ahora un solo borrado y una cabecera nueva, el contador
+  sigue (`EW` sigue contando), y el mensaje dice que el anillo se borró.
+  Anterior al build 65.
+
+### Cambiado (build 65)
+
+- **El live store guarda el punto de trabajo.** Hasta el build 64 el código
+  solo se escribía junto con la deriva o la amortiguación aprendidas, y los
+  algoritmos 11–13 no las mueven: el anillo del autor guardó 42429 durante
+  semanas mientras el lazo trabajaba en ~40960, así que cada arranque en frío
+  empezaba a 0,47 Hz del punto de trabajo — y por eso el primer arranque del
+  build 64 llegó a pedirle al algoritmo 13 un enganche largo. Ahora el código
+  se guarda por sí mismo cuando se ha alejado más de 0,02 Hz del guardado —
+  con la K de `CT`, 62 LSB en la placa del autor y ~818 en el tramo REDUCED
+  del desplazador de nivel V3, donde 64 LSB fijos (1,6e-10) habrían guardado
+  más o menos una vez al día; 64 LSB en una placa sin `CT` — y el lazo lleva
+  20 minutos enganchado sin interrupción y sin que nada más que él mueva el
+  código. El veredicto de enganche del lazo solo cambia en su siguiente paso,
+  así que cada una de estas cosas vuelve a empezar los 20 minutos: un código
+  que se mueve más de 256 LSB entre dos pasadas de 200 ms; un código tecleado
+  con `SP`, `up` o `dp`, aunque sea de un LSB (la CLI se lo dice al live
+  store); y cualquier tramo que la tarea de control pasó en otra cosa — `C`,
+  `CT` y `LC` corren en ella durante minutos, sin que las pasadas del live
+  store los vean. Nunca en holdover, nunca mientras un movimiento del puente
+  del tramo sigue en curso (antirrebote, guardado, ancla o CT pendiente) y no
+  más a menudo que cada 20 minutos, como los demás valores live. Los
+  algoritmos 0–9 no tienen enganche y nunca guardan un código de esta manera.
+  La ranura crece de 27 a 28 bytes con el byte del tramo. Una escritura que
+  falla se reintenta a los 20 minutos, no en cada pasada de 200 ms como antes,
+  y un guardado pedido (tras `LC` o un movimiento del puente) la espera en
+  lugar de perderse. Una ranura empaquetada mientras el mutex de control
+  estaba ocupado más de 50 ms no se escribe en esa pasada: hasta el build 64
+  salía con el código por defecto, 32767, en lugar del del lazo.
+- **Un lazo que va de raíl a raíl lo dice.** La oscilación del build 64 duró
+  hora y media sin que nada dijera que lo era: `NOPH` y un PWM que estaba
+  donde estuviera ese segundo. Cuando el código que el lazo pone en el DAC
+  llega a un extremo del rango y luego al otro sin enganche entre medias, cada
+  una de esas pasadas se anuncia ahora una vez en la consola — `LOOP: rail to
+  rail with no lock - PWM 65483 -> 52 in 181 s (swing 1, algorithm 13):
+  diverging, not pulling in. LA 11 pulls in from far off.` (con el algoritmo
+  11 termina en «Check CT and LPOL.», sin el detector en «Check CT.») — y la
+  línea de telemetría muestra `RAILS` en lugar de la palabra de tendencia
+  hasta que el lazo engancha, cambia el algoritmo, algo que no es el lazo
+  mueve el código o pasan 30 minutos sin tocar ningún extremo. Lo que se
+  vigila es adónde va el código, no a qué velocidad: un enganche honrado desde
+  lejos hace correcciones grandes durante lo que haga falta y puede quedarse
+  minutos contra un extremo, pero no llega al otro. Solo cuentan los pasos del
+  propio lazo: un código puesto entre dos pasos por `SP`, `CT`, `LC` o un
+  movimiento del puente reinicia la vigilancia, así que `SP 30` y después
+  `SP 65500` no son una pasada. Solo avisa; decide el operador.
+- **El condensador del detector se descarga tras cada lectura, con cualquiera
+  de los dos detectores — y los comentarios y la documentación ya lo dicen.**
+  `GPSDO_LTIC_ACTIVE_RESET` estaba activado en la configuración de serie
+  mientras su comentario, `gpsdo_tasks.cpp` y el manual decían que con el
+  detector RC clásico de Kaashoek se dejara apagado, porque «se limpia solo
+  por la fuga», y que poner PA1 a nivel bajo «corrompe la carga que se mide».
+  Lo segundo nunca fue cierto de una descarga hecha después de leer la ráfaga
+  (~0,2 ms tras el flanco; el pulso dura alrededor de un microsegundo en
+  enganche y como mucho ~3 µs dentro de la banda). Lo primero solo vale
+  mientras la fuga es rápida: en una placa sin resistencia de descarga (la del
+  autor no la tiene; el original de Lars con HC4046 descarga el condensador
+  por 1 MΩ) la fuga es, muy probablemente, la corriente inversa del Schottky —
+  decenas de ms a 48 °C (los 1,4–1,5 ms de «decay» que muestra `LB` son sobre
+  todo el consumo del propio conversor) —, que en una placa fría baja varias
+  veces y podría dejar parte de la carga de un segundo bajo la lectura del
+  siguiente. El código no cambia; los comentarios, la tabla de interruptores y
+  la parte 3.3 del manual y las notas del detector en el README recomiendan
+  ahora la descarga para ambas variantes.
+- `tools/loopsim`: `coldstart.sh` ejecuta los arranques en frío del
+  algoritmo 13 con el detector en el raíl a desvíos de hasta ±6000 LSB con los
+  números de una placa, y falla si alguno no se asienta (con un segundo árbol,
+  imprime los dos). Perillas nuevas: `LOOPSIM_LNV`, `LOOPSIM_LZO`,
+  `LOOPSIM_LRN`, `LOOPSIM_KP7` (el `LC` y el `CT` de una placa),
+  `LOOPSIM_CNT=1` (el contador arrastra su fracción de una puerta a la
+  siguiente; el redondeo por defecto lee exactamente cero por debajo de medio
+  hercio) y `LOOPSIM_GATE=1` (la puerta de valores atípicos del firmware).
+  Desde el primer arranque del propio build 65 llama además al lazo solo con
+  la media de 100 s llena, como la tarea de control (`LOOPSIM_FULL100=1`,
+  nueva — sin ella el algoritmo 13 armaba un arranque a 0,47 Hz ya a los
+  ~14 s, por un camino que la placa nunca toma), y reproduce, además del
+  aterrizaje del 04.10, el del 07.10 (−665 ± 110 ns). El aterrizaje del
+  divisor ahora también quita el raíl, que con una banda más estrecha que
+  ~2800 ns se quedaba puesto para siempre.
+- `tools/spansim`: la ranura del live store lleva su tramo como en el
+  firmware, y un escenario nuevo reproduce los dos casos de corte de
+  alimentación descritos arriba (`livestop`, `setfail`).
+- Nuevo: `tools/livestore` ejecuta el `gpsdo_live_store.cpp` del firmware
+  contra un anillo en memoria, `tools/railwatch` el vigilante de
+  `gpsdo_health.cpp` y `tools/flashring` el núcleo del anillo
+  (`gpsdo_flash_ring_core.c`) sobre un sector en RAM que se comporta como una
+  flash NOR.
+- `tools/lticsim`: el arnés ejecuta también `ltic_bend_track()`.
+- `tools/gpsdo_tuner.py`: la etiqueta de estado conoce `RAILS` — da su
+  significado y se pone en rojo.
+- La línea de firmware del manual nombra el build que describe (65; seguía
+  diciendo 59).
+
+### Verificación (build 65)
+
+- hostcheck limpio en las 18 configuraciones (arm-none-eabi, cortex-m4);
+  ningún aviso nuevo con `-Wall -Wextra` en los archivos cambiados.
+- `tools/loopsim/coldstart.sh`, build 64 frente al build 65, tres semillas a
+  desvíos de 0, ±300, ±800, ±1469, ±3000 y ±6000 LSB, con el lazo arrancando
+  con la media de 100 s llena, para el aterrizaje del 04.10 y el del 07.10: el
+  build 64 se asienta desde 0, desde ±300 en siete arranques de doce y desde
+  nada mayor; el build 65 desde todos, en 149–482 s y con un armado cada uno.
+  El build 65 anterior a las correcciones del 07.10 también se asentaba desde
+  todos, pero en hasta 3338 s y con hasta seis armados.
+- La sacudida tras un reinicio contra la que se puso el límite en el build 54,
+  en el escenario del propio build 54 (planta nocturna del 03.09, cinco
+  semillas de ruido, el mayor paso de un segundo en el primer minuto, LSB):
+
+  | | s1 | s2 | s3 | s4 | s5 |
+  |---|---|---|---|---|---|
+  | antes del build 54 | 48 | 78 | 175 | 120 | 16 |
+  | build 64 | 13 | 27 | 9 | 19 | 10 |
+  | build 65 | 9 | 28 | 9 | 22 | 9 |
+
+  El build 64 reproduce las cifras del build 54 al dígito; el build 65 no es
+  ni mejor ni peor. Lo mismo con salida de 16 bits (`LOOPSIM_FINE=0`): 13 /
+  27 / 9 / 19 / 11 frente a 9 / 28 / 9 / 21 / 9. Las correcciones del 07.10
+  dejan estas cifras como están, con cualquiera de las dos salidas; con el
+  lazo arrancando con la media llena, como en la placa, su primer minuto da
+  19 / 14 / 19 / 21 / 19 LSB antes y después de ellas.
+- `bench.py run --hw` (el escenario calibrado contra la placa): algoritmo 13
+  2,40 ns, parte lenta 0,88 ns, ADEV 4,08e-12 a 1024 s, como en el build 64,
+  con 1468 cambios de PWM por hora frente a 1475; algoritmos 11 y 12
+  idénticos. En las cuatro plantas anteriores las medias geométricas del
+  algoritmo 13 coinciden dentro del 1 % (fase y ADEV dentro del 0,25 %); con
+  salida de 16 bits el mayor movimiento individual del DAC en toda una
+  ejecución baja de 2,6 a 2,3 LSB.
+- Fuera del árbol, `loopsim` con el lazo arrancando como en la placa, con los
+  números de esta placa, para las correcciones del 07.10: doce semillas por
+  desvío de ±300 a ±6000 LSB, ambos aterrizajes — las cifras de arriba; con la
+  K de `CT` a 0,5; 0,7; 0,8; 1; 1,25; 1,4 y 2 veces la de la planta, todos los
+  arranques se asientan (mediana 434–597 s frente a 541–926, como mucho 1462 s
+  frente a 11 177); un detector congelado (+300 y +1295 ns, en frecuencia y
+  fuera de ella) 2,5–12 mHz rms en la segunda mitad de la ejecución frente a
+  6–26, desviación de la fase 143–545 ns frente a 191–1794; en la placa con
+  banda de 3000 ns, cuyo raíl se lee dentro de la banda a través de la puerta
+  de valores atípicos, los arranques a 0–300 LSB se asientan en 391 s de
+  mediana frente a 482 (como mucho 578 s frente a 4431) y los de 800–3000 LSB
+  en 479 s, cuando antes 40 de 72 no se asentaban nunca; ni un segundo de
+  `NOPH` tras los primeros 2000 s en 72 ejecuciones de 12,5 h (ruido blanco y
+  el de `--hw`; antes cinco, todas de arranques a +1498 que no habían
+  enganchado). Las piezas por separado: el retraso exacto sustituido por la
+  media variación dejó sin asentarse 6 de 60 arranques con K 1,4 veces la de
+  la planta; sin la cota de P11, con K 0,5 y 0,7 veces la mediana fue de 1352
+  y 788 s en lugar de 597 y 454; sin la confianza devuelta en el aterrizaje,
+  los arranques pequeños de la placa de 3000 ns tardaron 2307 s de mediana,
+  tres de 72 nunca; sin el redondeo en la prueba de seguimiento, una noche
+  ruidosa perdió su detector durante 30 minutos.
+- `tools/lticsim/run.sh`: tres comprobaciones nuevas — las ráfagas del raíl
+  no enseñan curvatura, las de la banda sí, también tras 600 s en el raíl —
+  19/19 a τ 5, 27 y 100 ms; con el seguimiento del build 64 fallan la primera
+  y la tercera. Los números del modelo son idénticos a los del build 64.
+- `tools/spansim/run.sh`: cada escenario anterior a este build imprime
+  exactamente lo que imprimía el build 64; el nuevo da las cifras de arriba.
+- `tools/livestore/run.sh`: 52/52 — una ranura de 27 bytes del build 64 se
+  carga con el tramo desconocido; no se escribe ningún código antes de 20
+  minutos de enganche ininterrumpido, tras una interrupción, por 64 LSB, en
+  holdover, con el tramo en curso, justo después de `SP` (aún «enganchado»),
+  durante una calibración ni en los 20 minutos siguientes (doce minutos sin
+  pasada, el código dejado a 186 LSB), ni tras un `SP`, `up` o `dp` demasiado
+  pequeño para la prueba de salto (`up1` incluido); 65 LSB tras 20 minutos sí,
+  como ranura de 28 bytes que nombra su tramo; una placa aún sin ranura guarda
+  su primer código tras el enganche; una escritura que la flash rechaza se
+  intenta una vez y luego no durante 20 minutos, y un guardado pedido la
+  espera en lugar de perderse; con el mutex de control ocupado no se escribe
+  nada, y la pasada siguiente escribe el código del lazo; el umbral sigue a la
+  K de `CT` — 62 LSB en la placa del autor, 818 en un tramo REDUCED, 64 LSB
+  sin `CT`. Con el código anterior a la segunda revisión fallan siete de las
+  comprobaciones añadidas con ella.
+- `tools/railwatch/run.sh`: 17/17 — la oscilación del 04.10 se anuncia en su
+  primera llegada al otro extremo y hasta un enganche; un enganche que pasa
+  diez minutos contra un extremo, el mismo extremo dos veces, un enganche
+  entre los extremos, un cambio de algoritmo, 30 minutos entre los extremos,
+  `SP 30` y después `SP 65500` con el lazo sosteniendo el código, y una
+  restauración entre los extremos quedan en silencio; tras un `SP` a un
+  extremo, la carrera del propio lazo hasta el otro se anuncia, y un `SP`
+  termina un episodio. Reproducido sobre el registro del 04.10 habría hablado
+  872 s después del encendido y catorce veces hasta `LA 11`; en las 15,7 h de
+  la noche y en los 33 arranques en frío simulados del build 65 (cada desvío
+  de la lista de arriba, tres semillas, contados como nunca enganchados), ni
+  una vez; en los veinte arranques del build 64 que nunca se asentaron (todas
+  las semillas a ±1469, ±3000 y ±6000, una a +800 y otra a −800), en los
+  veinte.
+- `tools/flashring/run.sh` (nuevo): el núcleo del anillo del firmware sobre un
+  sector en RAM que se comporta como una flash NOR — 1000 escrituras live a lo
+  largo de tres vueltas conservan el único registro de ajustes y de Kalman, un
+  reinicio lee los tres, una vuelta provocada por `ES` conserva el registro
+  live más reciente, 8000 escrituras aleatorias de cualquier tipo y longitud a
+  lo largo de treinta vueltas con reinicios entre medias leen siempre el más
+  reciente de cada tipo, una ranura estropeada por un programado fallido se
+  salta, también la última, un arranque sigue después de la última ranura
+  escrita y no desde una en blanco dejada detrás de ella, una vuelta reintenta
+  una vez un borrado fallido, una cabecera fallida (con error, o corta sin él)
+  y una copia fallida, y el borrado de `CR` borra una vez y conserva el
+  contador: 17/17. El núcleo del build 64 falla 13 de ellas.
+- Fuera del árbol, sobre el núcleo del anillo: el arnés de la segunda revisión
+  pone un corte de alimentación, un fallo de la flash o un segundo escritor en
+  cada operación de flash de una escritura — tras el cambio del arranque
+  ninguna escritura posterior cae ya sobre una ranura escrita (antes lo hacían
+  288 ejecuciones con un segundo escritor y 6 con un corte que dejó ranuras en
+  blanco entre otras escritas); un segundo escritor dentro del núcleo sigue
+  perdiendo registros, y eso es lo que deja fuera el mutex. Con un fallo de la
+  flash en cualquier operación de una escritura ya no se pierde ningún
+  registro — antes de los reintentos, 51 pérdidas tras un reinicio y 183
+  dentro de la sesión. Un corte de alimentación en cada una de las 370
+  operaciones de flash de una secuencia de escrituras a través de una vuelta
+  nunca lee un valor que no se escribió, y el anillo siempre arranca y acepta
+  escrituras.
+- Pila: `kalman_ctl()` 584 bytes, `ltic_read_fast()` 64 y `ltic_fit()` 104,
+  sin cambios; en la tarea de control `live_store_tick()` 88 (antes 56) y
+  `health_watch_loop()` 16; el camino de escritura del anillo tiene 1112 bytes
+  de profundidad en lugar de 1048 (`fr_write()` 64 + `fr_put()` 1048, frente a
+  `fr_write()` 1048) — en las tareas de control y de CLI, a comprobar con
+  `SW`. Flash +2,4 kB (0,7 kB de ellos las correcciones del 07.10); RAM
+  estática +1,6 kB, de ellos 1,5 kB el búfer del anillo para los registros que
+  traslada, y dos mutex, el del anillo y el del almacén de ajustes, unos
+  160 bytes de heap (el build 64 en la placa del autor ocupaba 49,5 kB
+  estáticos de 128 kB).
+- En la placa, por confirmar: un arranque en frío directamente en `LA 13` — o
+  `LA 13` tecleado durante el survey-in — engancha sin pasarse del punto de
+  trabajo, arma el divisor una vez y se asienta en menos de diez minutos, sin
+  ninguna línea `LOOP:`; tras él `LB`, varias veces seguidas, muestra
+  «typical» cerca de −3 a −4, casi ningún rechazo por curvatura y ninguna
+  lectura rechazada, y el registro ninguna lectura congelada tras el armado; a
+  los 20 minutos de enganche el live store escribe una ranura nueva, y en el
+  siguiente arranque `Initial PWM=` queda cerca de 40960 en lugar de 42429;
+  tras un `LC` el PWM de la línea de telemetría vuelve a donde estaba antes; y
+  `SW` sigue mostrando margen en las pilas de las tareas Control y CLI.
+
+Build 64, `GPSDO v1.08.64rt`: dos correcciones de la lectura en el flanco, tras
+la primera noche del build 63 en la placa (algoritmo 13, 47,8–49,4 °C) y 70
+`LB` tecleados a la mañana siguiente. La corrección del build 63 funcionó:
+entre las 23:30 y las 08:00, como para el build 62, el mayor salto de la fase
+de un segundo al siguiente fue de 6,5 ns (build 62: 22 ns, con 98 saltos de
+más de 10 ns) y el filtro de Kalman no rechazó ninguna lectura (54). Pero la
+noche no fue más tranquila — desviación típica de la fase 1,77 ns, ruido
+blanco 1,15 ns, ADEV 1,9e-9 a 1 s y 3,0e-12 a 1024 s (build 62: 1,74; 1,14;
+2,0e-9; 2,9e-12) — y uno de cada nueve segundos publicó una lectura
+mantenida, cuando la noche del build 62 mantuvo más o menos una de cada
+setenta. Los contadores de `LB` dijeron por qué: de 61 380 s, 7064 ráfagas
+rechazadas por su curvatura (11,5 %), 75 por demasiadas conversiones fuera de
+la recta (todas en los primeros 80 minutos), ninguna por otro motivo.
+
+### Corregido (build 64)
+
+- **La puerta de curvatura cuenta desde la curvatura propia de la placa.**
+  Toda ráfaga en la placa se curva: cada conversión se lleva ~2,8 códigos de
+  la carga del condensador (0,12 %), así que la ráfaga baja ~180 códigos — el
+  «decay ~1.4 ms» de `LB` es sobre todo eso, no la fuga — y la recta que pasa
+  por ella falla en el flanco por unos pocos códigos, igual cada segundo. Las
+  70 ráfagas que mostró `LB` el 04.10 se curvaban −3,1 códigos de mediana, con
+  una dispersión de 1,2. Contada desde cero, como hasta el build 63, la cola
+  de esa distribución se rechazaba como curvada (5 de las 70, cada una como
+  las demás), y cada rechazo mantenía la lectura anterior. Cuánto se curvan
+  las ráfagas de una placa no es fijo — con la misma puerta, la noche del
+  build 62 mantuvo más o menos una lectura de cada setenta y la del build 63
+  una de cada nueve —, así que el firmware ahora la sigue: un promedio, de
+  ~32 s, de la curvatura de cada ráfaga tomada en el flanco (también las
+  rechazadas, o un cambio no podría seguirse), cada una contando como mucho
+  1 código, empezando desde cero al arrancar (el −3 de una placa queda a medio
+  código unos dos minutos después). Una ráfaga se rechaza solo si su
+  curvatura difiere de ese promedio en más de 3,5 códigos y en 5 sigmas de su
+  propio ruido — la misma prueba que antes, contada desde la curvatura de la
+  placa en lugar de desde cero. Contando desde −3,1, de las 70 se rechaza como
+  mucho una en vez de cinco: la que una transmisión serie había subido ~20
+  códigos.
+- **La línea de comandos guarda silencio alrededor del flanco.** Con `LB`
+  tecleado 70 veces en menos de tres minutos, la lectura del flanco siguiente
+  salió de 8 a 20 ns alta 30 veces: los ~3 kB de `LB` aún estaban saliendo por
+  la UART del Bluetooth (57600 baudios, ~0,5 s) cuando llegaba el flanco, y
+  una ráfaga tomada entonces quedaba ~20 códigos más alta. El filtro de Kalman
+  rechazó 27 lecturas en esos minutos (una en toda la noche anterior) y su R
+  subió de 1,50 a 3,64. Ahora la CLI retiene su salida desde 150 ms antes de
+  cada flanco (predicho como para la ráfaga) hasta 2 ms después; el búfer de
+  512 bytes de la UART del Bluetooth se vacía en ~90 ms. No se pierde nada: un
+  listado largo como `LB` sale con una breve pausa cada segundo. Sin flanco
+  del que predecir no hay pausa. El informe periódico no se retiene; sale
+  justo después del flanco.
+
+### Cambiado (build 64)
+
+- `LB` muestra la curvatura propia de la placa tras la de la ráfaga (`bend
+  -3.32 (typical -3.10)`), y una ráfaga rechazada por ella como «bent unlike
+  the board's bursts».
+
+### Verificación (build 64)
+
+- hostcheck limpio en las 18 configuraciones (arm-none-eabi, cortex-m4); sin
+  avisos nuevos con `-Wall -Wextra` en los ficheros modificados.
+- `tools/lticsim/run.sh` tiene dos comprobaciones nuevas — una ráfaga curvada
+  5 códigos se rechaza contando desde cero y pasa contando desde el −5 propio
+  de una placa, y una curvada 6 códigos más allá se rechaza —, 16/16 con τ 5,
+  27 y 100 ms; y una línea nueva en el modelo: las ráfagas curvadas como las
+  de la placa (−3,1 códigos, con 2,1 códigos de ruido de una conversión a la
+  siguiente) se rechazan el 2,3–2,5 % de las veces contando desde cero, nunca
+  contando desde su propia curvatura. Los demás números del modelo son
+  idénticos a los del build 63.
+- Pila de FreqRelay: `ltic_fit()` 104 bytes de marco (antes 96),
+  `ltic_read_fast()` sin cambios en 64, así que el pico (la lectura y el
+  ajuste) es 8 bytes más hondo; `ltic_quiet_now()` en la tarea de la CLI, 8.
+  RAM estática +20 bytes; flash +2,3 kB, casi todo la espera de la CLI,
+  insertada en cada una de sus llamadas de salida.
+- No hace falta un `LC` nuevo: una ráfaga cuya recta se sostiene se lee como
+  antes.
+- En la placa, por confirmar: el contador de curvatura de `LB` casi quieto, y
+  con él las lecturas mantenidas; «typical» cerca de −3 en esta placa; y `LB`
+  tecleado una y otra vez sin dejar ninguna lectura rechazada.
+
+Build 63, `GPSDO v1.08.63rt`: una corrección y unos contadores, tras la primera
+noche del build 62 en la placa (algoritmo 13, 23:30–08:00, a los mismos
+47,5–48,5 °C que las noches anteriores). Con la lectura en el flanco, el ruido
+blanco del detector bajó a 1,14 ns (build 61: 1,64; build 60: 2,07), la
+desviación típica de la fase a 1,74 ns (2,65; 2,63) y el ruido de medida R del
+filtro de Kalman a 1,41 (2,27; 2,43); la ADEV de la fase es 2,0e-9 a 1 s
+(2,8e-9; 3,6e-9) y 2,9e-12 a 1024 s (4,5e-12 en ambos), y el PWM cambió 1330
+veces por hora (1860; 1791). El pico cada 233,24 s desapareció: una prueba de
+periodicidad sobre esa rejilla da 68 para el build 61 y 0 para el build 62.
+Quedaron picos sueltos de hasta ~20 ns, 55 en la noche.
+
+### Corregido (build 63)
+
+- **Una lectura mantenida conserva su propia corrección del diente de
+  sierra.** Cuando se mantiene la lectura de un segundo — el flanco no
+  captado o la recta rechazada (hasta 3 s seguidos), o un salto que la puerta
+  de valores atípicos retiene —, la tensión publicada es la de un pulso
+  anterior, pero el build 62 le asociaba el qErr del pulso nuevo, tanto para
+  el lazo (`ubx_timtp_latch()`) como para la pantalla. En un segundo en el que
+  el diente de sierra del receptor saltaba, la fase saltaba con él: en los 97
+  picos de ese registro Vphase es igual que un segundo antes y qErr no.
+  Alrededor del 1,3 % de los segundos de la noche fueron mantenidos. El filtro
+  de Kalman rechazaba esos picos (~6 por hora), así que el lazo apenas los
+  notaba; el registro y la pantalla, sí. Ahora una lectura mantenida conserva
+  el qErr fijado con ella (`ubx_timtp_latch_keep()` solo avanza el número de
+  pulso). Reproducido sobre el registro de esa noche: desviación típica de la
+  fase 1,74 → 1,57 ns, su mayor salto 23 → 8 ns, ADEV a 1 s −23 %. Lo mismo
+  vale en `LRM 0`, cuya puerta emparejaba igual un salto retenido con el qErr
+  nuevo.
+
+### Cambiado (build 63)
+
+- **`LB` cuenta qué pasó con cada segundo desde el arranque**, para que de
+  dónde vienen los segundos mantenidos — uno de cada cien, al azar, cosa que
+  ninguna ráfaga suelta muestra — pueda leerse en la placa. El flanco:
+  captado, llegó antes (un flanco antes de que la ráfaga estuviera lista),
+  perdido, TIM2 (no llegó), no intentado (sin segundo para predecir, un
+  flanco aún sin leer, el túnel abierto). La recta: aceptada, o rechazada por
+  pocas conversiones, demasiadas fuera de la recta, curvatura u otro motivo
+  (la temporización de la ráfaga, TIM2, fuera de escala). Después, cuántas
+  veces se mantuvo la lectura anterior y los segundos sin flanco nuevo. Para
+  la última ráfaga `LB` dice también por qué se rechazó su recta. Los
+  contadores viven solo en RAM y no se guardan; el informe periódico no
+  cambia.
+
+### Verificación (build 63)
+
+- hostcheck limpio en las 18 configuraciones (arm-none-eabi, cortex-m4); sin
+  avisos nuevos con `-Wall -Wextra` en los ficheros modificados.
+- `tools/lticsim/run.sh` comprueba ahora también el motivo que da el ajuste
+  en cada rechazo, tal como lo imprime `LB`: TIM2 parado y fuera de escala —
+  otro; 15 conversiones — pocas; nueve picos — fuera de la recta; un pulso
+  aún activo durante 12 conversiones y una curvatura de 6 códigos —
+  curvatura. 14/14 con τ 5, 27 y 100 ms, y las cifras del modelo idénticas a
+  las del build 62.
+- Pila de FreqRelay: `ltic_edge_sync()` 48 bytes de marco (antes 40),
+  `ltic_read_fast()` sin cambios, 64, así que el máximo (la lectura y el
+  ajuste) no cambia. RAM estática +96 bytes: los contadores y su copia en la
+  CLI.
+- En la placa, por confirmar: ningún pico de un segundo donde salta qErr en
+  el registro de una noche, y los contadores de `LB` dicen de qué motivo
+  vienen los segundos mantenidos.
+
+Build 62, `GPSDO v1.08.62rt`: el detector de fase se lee en el propio flanco del
+PPS, con el chip en silencio y el convertidor manejado directamente por sus
+registros. La recta del build 61, registrada en la placa durante una noche, bajó
+el ruido blanco del detector de 2,06 a 1,61 ns — y, con una lectura tan limpia,
+dejó ver un pico de un segundo de +10…16 ns cada 233,24 s, en ambos modos de
+lectura: el batido del segundo del GPS con el tick de 1 ms del RTOS (el reloj
+del MCU se desvía 4,29 ppm en esa placa), que una vez por periodo ponía el
+tick, y lo que éste despertaba, sobre el pulso de carga. Ninguna aritmética
+sobre la ráfaga lo quita; el build 62 aparta el chip del pulso.
+
+### Cambiado (build 62)
+
+- **LTIC: la ráfaga se toma en el flanco, con el chip en silencio.**
+  `vFreqRelayTask` predice el siguiente flanco a partir de las dos últimas
+  capturas (TIM2 cuenta el OCXO, así que su último segundo dice dónde terminará
+  el siguiente, con un tick de error), duerme hasta 1–3 ms antes y espera con
+  el planificador detenido. Desde 10 µs antes del flanco hasta 5 µs después
+  todas las interrupciones quedan enmascaradas y la tarea consulta ella misma
+  el indicador de captura: en el pulso no corre más que ese bucle — ni tick,
+  ni tarea, ni interrupción. Son ~15 µs por segundo (35 como mucho, si el
+  flanco se retrasa). La interrupción de captura se ejecuta en cuanto termina
+  la ráfaga.
+- **El convertidor se maneja por sus registros, no con `analogRead()`.** Un
+  `analogRead()` tarda 54,5 µs en la placa — en cada llamada inicializa el
+  ADC, lo resetea y le para el reloj —, así que las dieciséis conversiones del
+  build 61 iban de 64 a 942 µs tras el flanco. Ahora son 64 conversiones de
+  ~1,4 µs, con el mismo tiempo de muestreo (15 ciclos) y reloj (PCLK2/4) que
+  usa `analogRead()`, la primera 5 µs tras el flanco, ~90 µs en total
+  (`LTIC_EDGE_N`, y `LTIC_ADC_CHANNEL` junto al pin en `gpsdo_config.h`).
+  Corren dentro de una sección crítica de FreeRTOS: el tick, los
+  temporizadores y la interrupción de captura esperan a que acabe la ráfaga,
+  pero los puertos serie y el USB, que en este núcleo están por encima del
+  nivel del RTOS, siguen funcionando — un GPS a 115200 baudios no pierde nada.
+  Una conversión que alguno de ellos alargó queda fuera de la recta (de cada
+  una se registran el comienzo y la duración). El ADC queda como lo deja
+  `analogRead()`, y las lecturas de `ControlTask` no cambian; su parada del
+  planificador alrededor de ellas es lo que mantiene el convertidor libre
+  cuando llega el flanco. Con el túnel del GPS abierto (`T`), cuya velocidad
+  decide el usuario, no se espera al flanco.
+- **Una conversión de VREFINT ~60 µs antes del flanco**, con los 20 µs de
+  muestreo que VREFINT necesita. Cada conversión empieza repartiendo carga
+  entre el condensador de muestreo del ADC (~4 pF) y el nodo de 1 nF — un
+  0,4 % de lo que ese condensador guardaba de su conversión anterior, hasta ~9
+  códigos. Ahora es lo mismo cada segundo, y no lo que dejaron Vctl, Vcc o la
+  ráfaga anterior.
+- **La recta se lee en el flanco, t = 0** — la carga que entregó el pulso,
+  antes de que se fugara nada. La lectura ya no depende del ritmo de la fuga
+  (`LB` midió τ ≈ 27–30 ms, no los ~5 ms que suponía el código; la fuga de un
+  Schottky crece con la temperatura) ni de lo que tarda una conversión;
+  `LTIC_TREF_US` desaparece. Modelado con los anchos de código medidos
+  (`tools/lticsim`, τ 27 ms, ruido del ADC 1,0–1,5 LSB): error por lectura
+  1,18–1,56 LSB con la mediana, 0,37–0,47 con la recta en el flanco; no
+  linealidad junto al punto de enganche 0,22 → 0,07 LSB rms. La ráfaga abarca
+  sólo ~7 códigos, así que la escalera del ADC la suaviza el ruido y no la
+  descarga, y la pendiente local allí es 1,09 (la mediana: 0,95). Sin la
+  conversión de VREFINT el modelo da 1,01 LSB.
+- **Cuando el flanco no se puede cazar así** — los dos primeros tras el
+  arranque, un flanco adelantado o perdido, un despertar retrasado, el túnel
+  abierto — la misma ráfaga se toma en cuanto la interrupción de captura
+  despierta la tarea, medida desde el flanco capturado y leída igualmente en
+  t = 0 (modelo: sd 0,91 LSB, nivel a 0,04 LSB de la lectura en el flanco).
+  Sólo que el pulso no encontró el chip en silencio, así que esa lectura se
+  retiene: se conserva la anterior hasta 3 segundos seguidos y después se usan
+  las tardías. Una ráfaga en la que la recta no puede apoyarse — menos de 16
+  conversiones, más de 8 fuera de la recta, TIM2 sin contar, un comienzo más
+  de 300 µs tras su flanco, un resultado fuera de la escala del ADC o, en una
+  ráfaga tomada en el flanco, una curvatura real (5σ frente al ruido propio de
+  la ráfaga) que valga más de 3,5 códigos en el flanco — se retiene igual y
+  luego cede a la mediana de la ráfaga, llevada hasta el flanco por la
+  pendiente de la última recta (desde no más de 1 ms). Un segundo sin flanco
+  nuevo (el tiempo límite de 2 s) recibe la mediana, como antes.
+- **`LRM 0` es la lectura del build 60, sin cambios** (dieciséis
+  `analogRead()` desde 50 µs, su mediana, sin esperar al flanco), para un A/B.
+  Los dos modos leen la fuga en momentos distintos — t = 0 frente a ~470 µs,
+  un 2 % del nivel —, así que una calibración `LC` pertenece al modo en que se
+  hizo: ejecute `LC` una vez tras actualizar. `LB` imprime la ráfaga: tomada en
+  el flanco o tarde, la recta en el flanco, su pendiente y la constante de
+  fuga que implica, su dispersión y curvatura, el código de VREFINT y las 64
+  conversiones con sus tiempos desde el flanco y su duración.
+- La lectura de arranque en `SensorTask` desaparece; `vFreqRelayTask` es la
+  única tarea que la llama.
+
+### Verificación (build 62)
+
+- hostcheck limpio en las 18 configuraciones (arm-none-eabi, cortex-m4); los
+  archivos cambiados compilan sin avisos con `-Wall -Wextra`.
+- `tools/lticsim/run.sh`, reescrito para la lectura en el flanco, ejecuta el
+  propio `ltic_fit()` del firmware: un TIM2 parado y 15 conversiones se
+  rechazan; las conversiones alargadas, uno y cuatro picos y un juego 80/40/20
+  quedan fuera, nueve picos se rechazan; un pulso que sigue durante las 5
+  primeras conversiones queda fuera, durante 12 se rechaza; una curvatura de 6
+  códigos se rechaza en el flanco y no se filtra en una ráfaga tardía; la curva
+  propia de la fuga pasa; un resultado fuera de escala se rechaza; las cifras
+  de arriba con τ 5, 27 y 100 ms. Ninguna ráfaga, en el flanco o tardía, se
+  rechaza con ruido del ADC de 0,2 a 2 LSB; una curvatura de 6 códigos se
+  rechaza el 97 % de las veces con 1,5 LSB.
+- Dos revisiones de un subagente. Aplicado: las conversiones sacadas de la
+  ventana totalmente enmascarada (mantenían todas las interrupciones apagadas
+  ~110–170 µs, bastante para desbordar la UART del GPS a 115200), las
+  conversiones alargadas descartadas, el tiempo de muestreo de VREFINT, el
+  filtro de curvatura sólo para ráfagas tomadas en el flanco (en las tardías
+  lleva demasiado lejos la curvatura aparente), la mediana de reserva llevada
+  al flanco, la predicción abandonada tras un segundo sin flanco, el túnel
+  respetado.
+- Pila de FreqRelay (192 palabras): `ltic_read_fast()` 64 bytes de marco (48
+  antes), `ltic_edge_sync()` 40 más `ltic_burst()` 40, los 96 del ajuste sólo
+  tras la ráfaga; la ráfaga se escribe directamente en el registro estático que
+  lee `LB` (arm-none-eabi `-fstack-usage`). RAM estática +~0,8 kB, sobre todo
+  ese registro y su copia en la CLI.
+- En la placa, por confirmar: `LB` dice "taken at the edge", su primera
+  conversión ~5 µs tras el flanco, la fuga ~27–30 ms como antes (mucho más
+  corta indicaría que el propio convertidor carga el nodo), y los picos cada
+  233,24 s desaparecidos del registro de una noche.
+
+Build 61, `GPSDO v1.08.61rt`: los valores por defecto del build 60 para los
+algoritmos 12 y 13, deshechos donde la placa demostró que eran erróneos. Se
+eligieron en una simulación sin el ruido rápido del propio oscilador, y los
+registros de esa misma semana dieron a ambos algoritmos aproximadamente el
+doble de ruido de fase que al algoritmo 11. El algoritmo 13 supera ahora al
+algoritmo 11 en la placa. Y el detector de fase se lee de una recta a través de
+toda la ráfaga, en un instante fijo tras el flanco, en vez de una sola
+conversión.
+
+### Cambiado (build 61)
+
+- **Algoritmo 13: de nuevo `KT` 100 s, y `KC` 0 = auto = `KT/6` (16 s; en el
+  build 60 era `KT`, antes `KT/3`).** Medido en la placa, una noche cada uno:
+  desviación típica de la fase registrada 2,63 ns frente a 2,73 del algoritmo
+  11, ADEV a 1024 s 4,4e-12 frente a 4,7e-12 y a 4096 s 1,11e-12 frente a
+  1,17e-12; la media de 64 s 1,07 ns frente a 1,13. El coste es el movimiento
+  del DAC: el PWM cambia unas 2,5 veces más a menudo que con el algoritmo 11,
+  de 1 a 4 LSB. `KT 200` / `KC` = `KT` del build 60 había registrado 5,62 ns.
+  Durante las 24,5 h de ese registro, también de día (placa a 47,8–51,7 °C),
+  la desviación por horas se mantuvo en 2,4–2,9 ns. Una placa conserva lo
+  guardado, y teclear cualquiera de `KR`, `KQ`, `KT` o `KC` guarda los cuatro:
+  una placa en la que se tecleó alguno con el build 60 arranca con `KT 200`
+  (`KC` auto 33). `KL` lo muestra; `KT 100` y `KC 0` restauran el valor por
+  defecto.
+- **Algoritmo 12, modo tranquilo (`MM 1`): los niveles cortos ya no necesitan
+  el triple de su límite, y el nivel desde el que el término de frecuencia se
+  aplica entero queda fijo en 128 s en vez de seguir a `MR`.** En la placa, el
+  modo tranquilo del build 60 registró 6,07 ns con `MR 7` y 9,51 con `MR 10`,
+  frente a 2,73 del algoritmo 11 esa misma semana: los niveles cortos
+  respondían a la deriva rápida del propio oscilador y, frenados, la dejaban
+  pasar; con `MR 10` la frontera se movía a 1024 s y reducía a la mitad el
+  término de frecuencia por debajo. En la simulación calibrada (abajo): 5,2 ns con
+  `MR 7` y 5,1 con `MR 10` (build 60: 6,9 y 9,3; `MM 0`: 6,1 y 5,6), con el PWM
+  moviéndose cinco veces menos que con el algoritmo 11. El algoritmo 12 sigue
+  sin alcanzar al algoritmo 11. La rampa (1 LSB/s) y la retirada exacta en el
+  cruce por cero se mantienen. Por debajo de `MR 6` ninguna corrección llega a
+  128 s, así que allí el término sigue a la mitad (en la simulación, `MR 5` no
+  pierde nada con ello: 5,1 ns frente a 5,3).
+- **LTIC: la fase se lee de una recta a través de toda la ráfaga, no de su
+  mediana.** Las dieciséis conversiones tras cada flanco no son dieciséis
+  miradas a una misma tensión: el condensador se descarga (~5 ms) y la ráfaga
+  dura ~350 µs, así que los códigos caen más de cien y su mediana es sin más la
+  conversión central en el tiempo — una sola conversión, en el instante que
+  dejara el despertar de la tarea. Eso costaba por partida doble. En 24,6 h de
+  lecturas registradas cerca del punto de enganche los códigos del ADC distan
+  mucho de ser iguales — un código múltiplo de 4 mide 2,4 LSB de media, el que
+  está tres por encima 0,1 — así que el lazo se apoyaba en una escalera con
+  peldaños de ~3 ns; y la descarga convierte cada microsegundo de la lectura en
+  ~0,4 ns. Ahora cada conversión lleva marca de tiempo de TIM2, el contador que
+  capturó el flanco; se ajusta una recta a la ráfaga frente a esos tiempos (se
+  dejan fuera las llamadas que alargó una interrupción y las conversiones lejos
+  de la recta) y se lee 200 µs después del flanco (`LTIC_TREF_US`, donde caía la
+  mediana, así que una calibración `LC` sigue valiendo). En el modelo con los
+  anchos de código medidos (`tools/lticsim`, que ejecuta el ajuste del propio
+  firmware): error por lectura 1,3–1,7 → 0,14–0,30 LSB (aquí 0,85 ns por LSB),
+  no linealidad cerca de cero 0,20 → 0,03 LSB rms, un despertar 60 µs tarde
+  27 → 0,7 LSB; con una fuga veinte veces más lenta, de dos a tres veces mejor
+  que la mediana, y ocho veces con una cinco veces más rápida. Las conversiones
+  lejos de la recta se juzgan con medianas, así que varias perturbaciones no
+  pueden esconderse unas tras otras. Una ráfaga en la que la recta no puede
+  apoyarse — sin flanco reciente, TIM2 parado, menos de 8 conversiones o más de
+  4 fuera de la recta, un resultado fuera de la escala del ADC — vuelve a la
+  mediana; una que empezó más de 150 µs tarde, donde la recta se apartaría de la
+  descarga, conserva la lectura anterior (tres segundos seguidos como máximo).
+  `LRM 0|1` alterna entre ambas para un A/B (no se guarda; cada arranque empieza
+  con la recta), `LB` muestra la última ráfaga.
+- **CLI:** `KC` muestra `auto = KT/6`; la indicación de `KT` da 100 s como
+  valor por defecto y vuelve a aparecer por encima de 200 s, y la de un `KC`
+  largo por encima de 60 s (el build 60 había movido ambas a 400 s); la de un
+  `KC` corto ya no dice que la fase es óptima a 20–30 s (en la simulación
+  calibrada sigue mejorando por debajo de 16 s, unos pocos por ciento a cambio
+  de mucho más movimiento); `MM` muestra `calm: ramped`.
+- **Simulador del lazo, calibrado contra la placa.** Nueva planta
+  `plant/20260929_algo11_night.csv`; `bench.py run --hw` la reproduce con el
+  ruido rápido del oscilador restituido (`LOOPSIM_RWFM=0.1`) y la deriva
+  medida del detector (`LOOPSIM_DNOISE=1.5`, `LOOPSIM_DTAU=45`), puntuando
+  como se puntúa un registro. Reproduce las cuatro ejecuciones de esa semana
+  con un margen del 20 %, en el mismo orden, y predijo el resultado del
+  algoritmo 13 de arriba antes de que la placa lo midiera. `LOOPSIM_LD` fija
+  la amortiguación del algoritmo 11, junto a los demás mandos `L*`.
+
+### Verificación (build 61)
+
+- hostcheck limpio en las 18 configuraciones; `tools/loopsim/run.sh` y
+  `tools/algoswitch/run.sh` se ejecutan; la comprobación de tipos en el enlazado
+  está limpia.
+- `tools/lticsim/run.sh`: un flanco caducado y un TIM2 parado se rechazan; uno,
+  dos y cuatro picos de 20 códigos, un juego 80/40/20 y una llamada alargada se
+  dejan fuera; una ráfaga tardía queda marcada; las cifras de arriba con 1, 5,
+  20 y 100 ms. La pila de FreqRelay (192 palabras) no se toca: los búferes de la
+  ráfaga son estáticos, el marco de `ltic_read_fast()` ocupa 48 bytes como antes
+  y los 56 del ajuste sólo existen tras la ráfaga (arm-none-eabi
+  `-fstack-usage`). Con `LRM 0` la lectura publicada es la mediana y la puerta
+  decide exactamente como antes. La interrupción de captura guarda ahora también
+  el valor de TIM2 del flanco, que la lectura usa en lugar de leer CCR3 ella
+  misma (eso borraría el indicador de captura).
+- `bench.py run --hw`, tres semillas (desviación de la fase registrada /
+  ADEV 1024 s / cambios de PWM por hora): algoritmo 11 2,49 / 4,2e-12 / 729;
+  algoritmo 13 2,40 / 4,1e-12 / 1475; algoritmo 12 5,18 / 9,0e-12 / 141.
+- Las cuatro plantas nocturnas anteriores con el mismo ruido (`bench.py run`,
+  fase real, dos semillas): sin inestabilidad; algoritmo 13 1,65–1,69 ns,
+  algoritmo 12 4,5–5,3 ns con `MR 7` y 4,2–5,2 con `MR 10`.
+
+Build 60, `GPSDO v1.08.60rt`: los algoritmos 12 y 13, más tranquilos por
+defecto, y el sintonizador dibuja la tensión de control que ordena el lazo. Por
+el camino apareció un fallo del simulador del lazo que hacía parecer a ambos
+algoritmos peores de lo que son — la inestabilidad del algoritmo 13 con
+horizontes largos era del simulador, no del lazo.
+
+### Cambiado (build 60)
+
+- **Algoritmo 12: modo tranquilo, el nuevo por defecto (`MM 1`; `MM 0` es la
+  ruta original, sin cambios).** Con la fase ya dentro de `LAT`: los niveles
+  por debajo del que está justo bajo `MR` (bajo 128 s con `MR 7`) necesitan el
+  triple de su límite, así que siguen atendiendo un error grande en el acto
+  pero ya no pulsan con la deriva del detector; de ese nivel hacia arriba el
+  término de frecuencia se aplica entero en vez de a la mitad; la salida
+  avanza hacia una corrección a no más de 1 LSB por segundo (un cambio de más
+  de 32 LSB — adquisición, FLL, rearme — sigue siendo inmediato); y el cruce
+  por cero retira exactamente el slew aplicado, por la ruta fina, donde antes
+  lo redondeaba y perdía la fracción. Reproducido sobre cuatro plantas
+  nocturnas, dos semillas: ADEV a 10 s 1,6e-11 → 8,5e-12 con detector blanco y
+  3,7e-11 → 1,8e-11 con la deriva del detector medida en el banco; mayor
+  movimiento individual 9–18 LSB → 1 LSB; error de fase dentro de un 10 %;
+  adquisición sin cambios. El algoritmo 11 sigue más tranquilo a 10–100 s —
+  los pulsos son la forma en que este algoritmo mueve la fase. `MM` se guarda
+  con `ES ALGO12`, en un byte de relleno del bloque de ajustes (tamaño sin
+  cambios; un registro anterior lo lee como no fijado = tranquilo).
+- **Algoritmo 13: `KT` 200 s (antes 100) y `KC` 0 = auto = `KT` (antes
+  `KT/3`).** Con `KC` 33 el controlador mete en el oscilador la deriva lenta
+  del propio detector — 2,6 ns con τ ≈ 45 s, medida en el banco. Reproducido
+  con esa deriva: ADEV a 10 s 2,9e-11 → 6,3e-12 y a 100 s 3,5e-11 → 1,4e-11,
+  a la par del algoritmo 11 (6,3e-12, 1,4e-11) y mejor desde 300 s (1,3e-11
+  frente a 1,7e-11); sd de fase real 4,2 ns frente a 5,9 del algoritmo 11; el
+  DAC se mueve cinco veces menos. Con detector blanco supera al algoritmo 11
+  en todo τ de 10 a 1000 s. El costo es la adquisición: unos 8½ minutos tras
+  un rearme en vez de 3½. `KT 100` y `KC 33` restauran el ajuste anterior; una
+  placa con `KT`/`KC` guardados conserva lo guardado. El aviso de `KT` pasa de
+  200 a 400 s y el de `KC` de 60 a 400 s.
+- **Sintonizador: los paneles de tensión de control dibujan `Vcmd` = código
+  PWM / 65536 × `DV`, la tensión ordenada, en lugar de la lectura del ADC
+  `Vctl`.** La lectura lleva cerca de 1 mV de ruido, unos veinte LSB, mientras
+  que un lazo asentado mueve el código en uno o dos, así que el panel mostraba
+  el ADC y no el lazo. `DV` se lee al conectar; `Vctl` sigue en los campos en
+  vivo y en el log.
+- **Simulador del lazo.** `LOOPSIM_MM` elige el modo del algoritmo 12;
+  `LOOPSIM_RWFM` añade a la planta un paseo aleatorio de frecuencia, para un
+  oscilador más ruidoso que el de origen; el volcado gana una columna `det`,
+  la fase tal como la ve el detector; y `tools/loopsim/bench.py` puntúa
+  configuraciones sobre todas las plantas nocturnas y varias semillas de
+  ruido (sd de fase, actividad del DAC, mayor movimiento, ADEV 10–1000 s).
+
+### Corregido (build 60)
+
+- **Simulador del lazo: `gpsdo_dac_last16f()` estaba definido como `float` en
+  `tools/loopsim/loopsim.cpp` y `tools/algoswitch/switchsim.cpp`, frente al
+  `double` que declara el firmware.** Nada avisó — ninguno de los dos incluye
+  la cabecera — y el `fine_base()` del firmware leía el registro de retorno
+  como double: un valor cercano a la verdad, así que creíble, pero errado
+  hasta en un LSB en cada corrección de los algoritmos 12 y 13. El estado de
+  frecuencia del algoritmo 13 arrastraba un error de varios LSB y sus
+  horizontes largos parecían inestables (`KT 1000` en la planta de una noche:
+  sd de fase 777 ns) sin serlo (9 ns). Una placa nunca tuvo este fallo; allí
+  la definición es `double`. Los barridos anteriores de `KT`/`KC` que dieron
+  por inestable un `KC` largo corrieron sobre él. Hallado con
+  `g++ -flto -Wlto-type-mismatch`, que ahora muestra limpios el firmware (tres
+  configuraciones de placa) y los tres simuladores.
+
+### Verificación (build 60)
+
+- `MM 0` con `KT 100` / `KC 33` reproduce el build 59 bit a bit en el
+  simulador (volcados y resúmenes idénticos, algoritmos 12 y 13, dos plantas).
+- hostcheck limpio en las 18 configuraciones; `tools/loopsim/run.sh`,
+  `tools/algoswitch/run.sh` y `tools/spansim/run.sh` se ejecutan.
+- Adquisición desde el raíl, con la fase a 1300 ns y con la frecuencia a 50 o
+  200 LSB: el algoritmo 12 se asienta como antes (a 200 LSB, antes: 1091 s
+  frente a 3042).
+
+Build 59, `GPSDO v1.08.59rt`: sin cambio funcional. Los comentarios del sketch
+se revisaron contra el código y se actualizaron, y se eliminó código muerto;
+cada unidad de traducción se preprocesa al mismo flujo de tokens que en el
+build 58, así que el programa compilado es el mismo.
+
+### Cambiado (build 59)
+
+- **Comentarios fuente actualizados, código sin tocar (build 59).** Cada
+  comentario largo y cada uno que nombraba una fecha, un build o una persona —
+  unas 10 000 de las 12 000 líneas de comentarios del sketch — se revisó contra
+  el código; cambiaron 31 archivos. La historia — fechas, números de build,
+  quién midió qué, "antes" — se quitó o se trasladó aquí (véase *Historia
+  trasladada de los comentarios del código* más abajo); toda cifra medida que
+  justifica una constante permaneció, expresada como un hecho sobre el
+  hardware. Se corrigieron afirmaciones que el código contradecía, entre ellas:
+  los ajustes y el estado aprendido viven en el anillo de flash, no en la
+  EEPROM (cabecera del sketch, notas de LRN y LTIC); la cabecera de
+  `gpsdo_algorithms.cpp` enumera los algoritmos 0-13 en lugar de "diez
+  algoritmos (0-9)"; las notas de coeficientes de los algoritmos 3-8 dan los
+  valores por defecto que realmente tiene `g_pid[]` (varias citaban ajustes más
+  antiguos, y el algoritmo 7 un conjunto "optimizado por AG" que ya no tiene);
+  el campo de datos de un slot de flash es [6..509], 504 bytes (`FR_PAYLOAD`),
+  no [4..509]; las estadísticas de CS corren con cuatro constantes de tiempo,
+  no tres; `LC` no tiene el paso "reducir el desplazamiento a la mitad y
+  reintentar" y dirige su barrido a 6 ns/s, no 4 o 1,5; el informe se escribe
+  en fragmentos presupuestados, no en un único `Serial.write()`.
+- **Código muerto eliminado (build 59).** Macros de configuración que ningún
+  código lee y que parecían ajustes: `LTIC_NS_PER_VOLT` (un "respaldo" que nada
+  usaba — `LC` es la única fuente de ns/V), `LTIC_CAL_PWM_OFFSET` (`LC` deriva
+  su empuje de la ganancia calibrada), `LTIC_DISCHARGE_MS`,
+  `LTIC_DET_PERIOD_NS` y `AUTHOR_NAME`. `PIN_TFT_*` y `PIN_BT_*` solo
+  documentaban un cableado que se fija en otro sitio (`User_Setup.h` de
+  TFT_eSPI, el `Serial2` del núcleo); ahora son un comentario que lo dice.
+  También desaparecen: macros de pantalla sin uso (`TFT_COL_LABEL`,
+  `TFT_COL_LVAL`, `TFT_COL_RVAL`, `HPAL_NOTICE`), identificadores de registro
+  de flash duplicados (`FR_REC_LIVE`, `FR_REC_SETTINGS`, `FR_MAGIC0`) y
+  comentarios que describían código que ya no existe.
+- **Cómo se comprobó el "sin cambios" (build 59).** Cada unidad se preprocesó
+  en las 18 configuraciones de hostcheck y 21 más (sensores, OLED, LCD, TM1637,
+  ILI9341, u-blox simulado, el generador de 2 kHz, NMEA detallado, …) — juntas
+  alcanzan cada línea de código del sketch salvo una lectura de registro CMSIS
+  — y su flujo de tokens se comparó con el del build 58: idéntico en los 918
+  builds unitarios. hostcheck queda limpio en las 18 filas, y las funciones que
+  las herramientas de prueba extraen del fuente se siguen extrayendo.
+
+### Historia trasladada de los comentarios del código (build 59)
+Estos hechos solo constaban en los comentarios del código fuente, hasta que el
+build 59 los eliminó del código.
+
+**Algoritmo 12**
+- El valor por defecto de `arm_holdoff` cambió de 15 a 60 muestras.
+- El estimador de ruido blanco solía estar condicionado por
+  `g_mlacc_gain <= 0.0f` junto con la construcción de la tabla de umbrales;
+  ahora se ejecuta siempre.
+- El término de frecuencia del algoritmo 12 se eliminó después de que unas
+  mediciones de ruido tempranas y erróneas parecieran ir en su contra, y se
+  restauró una vez corregido el propio estimador de sigma.
+
+**Algoritmo 13**
+- El 28.08, al cambiar del algoritmo 10 al algoritmo 11 la referencia de fase
+  quedó leyendo +1272 ns (2719 LSB).
+- Una ejecución del 29.08 mostró el estimador R subiendo hasta unos 33 (frente
+  a un suelo blanco de 6,4) durante un enganche de fase que introdujo unos 110
+  ns de movimiento ordenado en cada ventana de 16 s; el filtro desconfió del
+  detector durante unas dos horas después, mientras la sd de fase mejoraba de
+  11,19 ns a los diez minutos a 3,36 ns en la última hora.
+- El techo de Q era originalmente un multiplicador plano de 8× sobre el valor
+  semilla; funcionaba solo por suerte, ya que la razón R/semilla difiere de una
+  placa a otra (2,5× en una, 6,8× en otra), antes de sustituirse por el límite
+  `R/KT³` basado en el horizonte.
+- Antes de que existiera `s_kf_locked`, nada podía decir si el algoritmo 13
+  estaba enganchado salvo recurriendo a un promedio de frecuencia de diez mil
+  segundos.
+- El retardo del estimador R cambió de diferenciar el detector a 1 s a hacerlo
+  a 16 s (`KF_R_LAG`), para abordar la deriva del cero del detector vista en un
+  desajuste banco-simulador; la confirmación en hardware seguía pendiente
+  cuando se escribió esto.
+- Una versión anterior del comentario de `KC`/`KT` sostenía que separar los
+  horizontes del controlador y del estimador requeriría `Sg` medido desde el
+  oscilador — una referencia que esta placa no tiene; ese razonamiento era
+  erróneo, y la separación no lo necesitaba.
+
+**CLI**
+- Un build anterior componía las líneas de telemetría a partir de fragmentos de
+  `cli_puts()`/`cli_putfloat()`, que salían corruptos por el cable; ahora las
+  líneas se componen antes de enviarse.
+- Guardar mediante `ES FLAGS` solía ser la forma recomendada de persistir estos
+  ajustes, pero solo guardaba el interruptor on/off, así que un reinicio no
+  sobrevivía de forma fiable a un ciclo de alimentación.
+
+**GPS**
+- Faltaban 19200 baudios en la lista de candidatos de autobaudios, así que una
+  placa configurada a esa velocidad nunca se detectaba. El orden de los
+  candidatos también importaba antes — con la coincidencia de un solo byte `$`,
+  una placa a 38400 se detectaba erróneamente como 57600 en las 24 pruebas
+  simuladas — hasta que la detección pasó a validar el checksum completo, tras
+  lo cual el orden dejó de importar.
+- Un cuelgue de configuración UBX de "3 intentos, todos fallan" se rastreó
+  hasta que siempre se cambiaba a 38400 baudios antes de enviar comandos UBX,
+  mientras que un módulo GY-NEO6MV2 NEO-6M arranca por defecto a 9600 baudios;
+  el comando llegaba a una velocidad que el módulo no escuchaba y no recibía
+  ACK.
+- El emparejamiento de telemetría por `ppscount` se añadió como corrección de
+  la auditoría de v0.95; antes, `qErr` podía aplicarse al pulso equivocado,
+  desplazado un número aleatorio de pulsos.
+- Una trama de configuración ZED-F9T anterior estaba corrupta: un valor
+  duplicado de `fixedAltVar` se codificó por error como dos bytes "reservados"
+  adicionales (payload de 38 bytes en vez de 36), así que el checksum no
+  coincidía y el módulo la descartaba en silencio, agotando el tiempo de los
+  tres intentos de configuración; los campos que faltaban eran
+  `cnoThreshNumSVs` y `cnoThresh`.
+- El código inicial de inicialización del GPS asumía a ciegas la velocidad del
+  módulo al arrancar, y cambiar de velocidad con `PUBX,41` no producía ACK
+  hasta corregirlo con un vaciado completo de TX, una espera de 150 ms y un
+  vaciado de RX; `taskYIELD()` antes de arrancar el planificador resultó
+  inseguro en este puerto. Los dos retardos de arranque de 3000 ms de `setup()`
+  se redujeron a uno de 500 ms, y la detección de autobaudios pasó de sondear
+  activamente cada candidato a escuchar primero de forma pasiva, con un
+  respaldo activo de 350 ms.
+- Un diseño de holdover anterior reiniciaba la línea base en cada PPS, lo que
+  en una simulación con un 2% de pulsos perdidos a lo largo de una hora perdía
+  77 s; el umbral de doble acreditación se probó a 500 ms antes de fijarlo en
+  750 ms.
+- Una captura del 02.09 encontró que el emparejamiento SAW solo tenía éxito el
+  23% de las veces (8439 de 36757, frente a 36755 tramas en 10 h) — lo que
+  significa que el algoritmo 13 había estado gobernando sobre el diente de
+  sierra sin corregir durante unas tres cuartas partes de cada ejecución, pese
+  a que la pantalla mostraba la fase corregida.
+- Una captura de dos días (01–02.09) midió el efecto de fijar la lectura de
+  fase en el punto de muestreo de la ruta de la pantalla en vez de la lectura
+  propia y más tardía del lazo: el suelo de ruido de la primera diferencia bajó
+  de 13,25 ns (con un desplazamiento de un pulso) a 2,55 ns.
+
+**Ajustes y flash**
+- La biblioteca EEPROM se eliminó del proyecto en el build v0.96.
+- La opción de persistencia `GPSDO_EEPROM` se eliminó en v1.00, en favor del
+  anillo de flash.
+- `gpsdo_settings_store.h` sustituyó a las funciones de EEPROM emulada de
+  STM32duino que antes vivían en `gpsdo_state.cpp`; una escritura de estado
+  completo en la EEPROM era lo que un `ES TZ` deliberado arriesgaba a machacar.
+- `SETTINGS_VER` ha seguido el crecimiento del formato de ajustes: v2 añadió
+  los campos LTIC-Lars, v3 las ventanas de amortiguación FA, v4 el indicador
+  LT, v5 el bloque del algoritmo 12, y v6 las escalas de salida DV/AV.
+- El versionado del formato de ajustes pasó por un simple incremento de versión
+  y luego por un `else-if` propio por cada `SETTINGS_VER` con un `offsetof`
+  escrito a mano, antes de asentarse en el suelo `SETTINGS_V6_BYTES` (build 49)
+  que permite a un campo nuevo saltarse el incremento de versión.
+- El anillo de flash de ajustes/estado está siempre activo desde v0.96, sin
+  interruptor en tiempo de ejecución ni ruta de respaldo a EEPROM emulada.
+
+**Pantallas**
+- El DAC externo AD5680 y la pantalla TM1637 solían ser mutuamente excluyentes
+  en tiempo de compilación por un choque de pines; ahora un `#undef` automático
+  resuelve el conflicto, de modo que ambos pueden compilarse juntos.
+- La tarea de pantalla solía leer Vphase y descargar PA1 (drenaje abierto)
+  desde su bucle de sensores de 2 s — demasiado tarde para un pico de menos de
+  un milisegundo, y corrompía la carga.
+- La banda de onda de la pantalla de bienvenida solía dibujarse directamente en
+  el panel en cada redibujado; más tarde se elevó a su posición actual al
+  eliminarse la barra de cabecera que había encima.
+- La lista de comprobación de hardware al arrancar solía forzar `show=true`
+  incondicionalmente para el OLED y la fila de sensores, así que aparecían en
+  la lista incluso en builds donde no estaban compilados.
+- La pantalla solía mostrar códigos de estado cortos (`SVIN`, `CAL`) en lugar
+  de los nombres de procedimiento completos que usa ahora.
+- Una versión anterior no aplicaba relleno de ceros al campo PWM de la
+  pantalla, razonando que el formato de ancho fijo lo hacía innecesario; en la
+  práctica el último dígito conservaba fragmentos visibles del valor anterior
+  en el panel.
+- Los patrones de codificación de la pantalla de estado TM1637 coinciden con el
+  diseño de firmware original (previo a RTOS) de André Balsa.
+
+**Calibración (CT/LC)**
+- En un detector de fase HC74 ancho, un umbral fijo de 5 ns solía dejar el
+  factor de amortiguación atascado en su suelo mientras la deriva seguía
+  oscilando.
+- La cabecera solía citar una cifra típica de ~5 µHz/LSB de la hoja de datos
+  del NDK ENE3311B; la medición en este diseño encontró un desvío de unas 70×,
+  y la cabecera ahora indica cifras medidas en su lugar.
+
+**Otros**
+- Una lista de pines anterior nombraba erróneamente PA4, PA6, PA9 y PA10 como
+  también libres para el DAC externo; esos cuatro eran incorrectos y la lista
+  se eliminó.
+- El riesgo de desbordamiento int8 de `g_time_offset` se señaló en una
+  auditoría de v0.95, mucho antes de corregirse ampliando el campo a
+  `g_time_offset_min` (int16, minutos).
+
+Build 58, `GPSDO v1.08.58rt`: los primeros días del build 57 en el prototipo
+V3 de Dan Wiering, con las dos posiciones del span calibradas por primera vez
+sobre una misma referencia. Ningún lazo cambia; lo que cambia es de qué
+números están dispuestos a fiarse el módulo de span y `CT`.
+
+### Corregido (build 58)
+- **Un par del span se mide solo con códigos que son nulos (build 58).** El
+  build 57 tomaba el código que el lazo de la posición antigua tenía en el
+  momento del cambio como el nulo de esa posición siempre que el lazo dijera
+  estar enganchado, y el banco de Dan destapó tres maneras en que eso no
+  basta. En **holdover** el lazo no gobierna, y un lazo que no corre tampoco
+  actualiza su indicador de enganche, de modo que el indicador sigue diciendo
+  lo que decía antes. Un **código puesto a mano** (`SP`, `up`/`dp`) queda bajo
+  un indicador de enganche que todavía no se ha enterado. Esas dos salieron de
+  lo que se hacía en el banco — lecturas de DMM en holdover, sobre códigos
+  puestos con `SP` — y tarde o temprano habrían guardado un par falso. La
+  tercera guardó dos: en un banco cableado a mano el desplazador puede entrar
+  en el camino del EFC o salir de él antes de que PB14 lo siga, el lazo
+  engancha entonces sobre la planta de una posición con el nombre de la otra,
+  y su código es **el nulo de la otra posición** — `FULL 54295 = REDUCED 54156`,
+  tomado con el desplazador ya fuera y PB14 todavía en REDUCED, y
+  `FULL 38660 = REDUCED 39051`, con el desplazador de vuelta y PB14 todavía en
+  FULL. El cambio siguiente calcula a través de ese par hasta donde este diga:
+  1,4e-7 fuera, con el segundo.
+
+  Ahora no se toma ancla en holdover, manual o automático, ni se completa
+  en él; tampoco después de `SP`, `up1`/`up10` o `dp1`/`dp10` hasta que el lazo
+  se haya visto sin enganche; y cada posición guarda su **nulo** — el código en
+  que `CT` encontró los 10 MHz, renovado por cada par medido desde entonces y
+  mostrado por `SPAN` — y un código se toma como nulo de una posición solo si
+  está a no más de 5e-8 (0,5 Hz) de él y no más cerca del nulo de la otra; las
+  dos distancias en hercios, cada una a través de la K de su posición. A no
+  más de 5e-9 de su propio nulo un código se acepta esté cerca de lo que esté: una
+  placa cuyos dos nulos caen casi en el mismo código lo rechazaría todo, y un
+  par tomado sobre un código así se equivoca como mucho en eso. Se prueban las
+  dos mitades del par, y la mitad de la posición antigua otra vez cuando el
+  nulo de la nueva ya se conoce — que es lo que atrapa un par como el primero,
+  donde FULL no tuvo nulo propio hasta el `CT` que lo completó; y cuando la
+  posición antigua aún no tiene nulo, su ancla hace de nulo al probar el
+  enganche nuevo. Cada rechazo se dice en la consola, y un rechazo de la
+  prueba del nulo da sus distancias.
+
+  **Simulado.** `tools/spansim` gana un operador (`mh`/`md`, `sp:N`,
+  `clr:0|1`) y un PB14 que puede sujetarse haga lo que haga el puente, y cinco
+  casos — el cuarto en una placa cuya calibración FULL es anterior a este
+  build y no tiene nulo, los demás en una cuyas dos posiciones tienen su propio
+  `CT`. Tras cada uno, un cambio limpio muestra cuánto vale el par guardado:
+
+  | | build 57 | build 58 |
+  |---|---|---|
+  | holdover, `SP 52000`, cambio, `MD` — el cambio siguiente aterriza en | 3,3e-8 | 3,6e-12 |
+  | `SP 52000` con el lazo corriendo, cambio inmediato | 3,3e-8 | 1,3e-12 |
+  | desplazador dentro, PB14 sujeto en alto, luego suelto | 1,2e-7 | 8,6e-12 |
+  | PB14 sujeto en bajo con el desplazador aún fuera | 3,0e-8 | 1,3e-12 |
+  | desplazador fuera, PB14 sujeto en bajo, `SPAN CLR FULL`, `CT` | par falso guardado | ninguno |
+
+  En el último caso el cambio siguiente aterriza 3,0e-8 fuera en los dos
+  builds — el par falso casualmente apenas movía el código, y sin par el código
+  se conserva —, así que lo que los distingue es el par falso que queda en la
+  flash.
+
+  Los nulos vienen de `CT` y solo de `CT`; un par medido renueva un nulo contra
+  el que acaba de pasar la prueba y nunca crea uno. Un registro escrito antes
+  de este build no tiene ninguno, y hasta el siguiente `CT` en una posición su
+  código enganchado se toma como siempre — así que en una placa calibrada con
+  el build 57 un `CT` en cada posición activa la prueba. `SPAN CLR` olvida el
+  nulo de la posición junto con su K. El precio de la prueba del nulo más
+  cercano: un oscilador que desde la última renovación de su nulo se ha movido,
+  en hercios, más de la mitad del camino hacia el nulo de la otra posición —
+  unos 3e-8 en la placa de Dan, cuyos dos nulos distan 15 000 códigos — se toma
+  por la planta equivocada, lo que cuesta un par no medido en ese cambio, nunca
+  uno erróneo. Se guarda en 4 bytes añadidos al final del bloque de ajustes
+  (396 → 400 bytes, sin cambio de versión, comprobado con `offsetof` en
+  arm-none-eabi); el build 57 lee el registro y los descarta.
+- **Un `CT` que falla devuelve al lazo su código (build 58).** Cada salida por
+  error reescribía el código guardado en el estado de control — que el barrido
+  mantiene en su punto actual para las pantallas —, así que un `CT` fallido
+  dejaba el oscilador en el último código del barrido en vez de donde lo tenía
+  el lazo. Importa sobre todo en el `CT` automático de una posición del span
+  que no tiene el suyo, reintentado hasta cuatro veces con el lazo corriendo,
+  y en un cambio del puente advertido durante un `CT`, que entonces se
+  calculaba — y podía anclarse — desde el punto del barrido. Ahora se restaura
+  el código que `CT` encontró en el pin al empezar, los promedios de
+  frecuencia, que describen el barrido, se vacían y la estadística de
+  correcciones se reinicia, como tras un `CT` que sale bien.
+- **`LRN` lee su argumento entero (build 58).** Usaba `atoi()`, que lee las
+  cifras que puede y descarta el resto: `LRN 1e3` **activaba** el aprendizaje
+  (leía 1), `LRN ON` lo **desactivaba** (sin cifras, 0), `LRN 2500.7` ponía
+  2500. `0` y `1` son ahora exactamente las dos palabras que conmutan el
+  autoaprendizaje, y cualquier otra cosa tiene que leerse entera como número:
+  el rango del detector en ns, 2…1e9, con decimales y exponente. Otras
+  palabras se rechazan, con las formas que se aceptan. `LRN R` guarda el
+  reinicio en el acto, en los datos vivos, en vez de sugerir `ES FLAGS`, que
+  solo guarda el interruptor — el reinicio duraba hasta el siguiente apagado,
+  salvo que los datos vivos se guardaran antes. El campo `LRN` del
+  sintonizador rechaza un rango por debajo de 2 y envía decimales normales:
+  para un millón escribía `1e+06`, que v1.06 y v1.07 leían como 1,
+  aprendizaje activado.
+
+### Cambiado (build 58)
+- **La segunda pasada de `CT` lee promedios de 100 segundos, sobre los mismos
+  0,8 Hz en cualquier posición del span (build 58).** `avg10` es la cuenta de
+  diez segundos dividida entre diez: pasos de 0,1 Hz y, como diferencia de dos
+  capturas, un error de hasta un paso (σ ≈ 0,04 Hz) — cerca del 7 % de K sobre
+  los 0,8 Hz de la segunda pasada. La K salía a saltos: REDUCED en la placa de
+  Dan leía 0,8 o 0,9 Hz a lo largo de su barrido (40873, 36331 y 37113 LSB/Hz)
+  y nada entre medias. Cada punto de la segunda pasada es ahora una media de
+  100 s tomada entera tras el asentamiento — los promedios se vacían cuando la
+  salida se ha asentado y se leen cuando hay 100 segundos nuevos — con pasos de
+  0,01 Hz. Un Monte Carlo del contador con 0–20 ns de jitter en el 1PPS da una
+  dispersión de K en la segunda pasada del 7–9 % antes y por debajo del 1 %
+  ahora.
+
+  Y la separación ya no se mantiene en al menos los 20 480 LSB de la primera
+  pasada, lo que en la posición FULL de la placa de Dan daba 1,8 Hz sobre 1,3 V
+  de EFC frente a 0,8 Hz sobre 0,5 V en REDUCED: dos tramos distintos de una
+  curva del oscilador que no tiene por qué ser recta (1,41 Hz/V medidos sobre
+  uno, 1,74 sobre el otro, con la resolución de `CT` incluida). Una excursión
+  constante en hercios es un tramo constante de la curva alrededor del nulo,
+  así que las dos posiciones se miden ahora sobre el mismo. La segunda pasada
+  solo corre con plantas suaves (K por debajo de 0,12 mHz/LSB); allí dura unos
+  ocho minutos en vez de tres, y la cuenta atrás los incluye.
+
+### Documentación (build 58)
+- **Las K de las dos posiciones difieren 3,3–3,6 veces, no de cuatro a
+  cinco.** Medido sobre una misma referencia en la placa de Dan: 11378 LSB/Hz
+  en el span completo, 37113 y 40873 en el reducido. El divisor es 4,03:1
+  (DMM); el camino completo entrega el 94,7 % de la tensión del DAC a la
+  entrada EFC del oscilador (unos 785 kΩ frente a los 44 kΩ del camino), lo
+  que deja 3,8 veces; el resto es la curva de sintonía y la resolución de
+  `CT`. Corregido en los manuales, los README, la ayuda del sintonizador y los
+  comentarios del código, con una nota en la entrada de v1.07 más abajo.
+- Manuales: las reglas del par, el nulo en `SPAN`, la duración de `CT`, las
+  formas de `LRN`, qué guarda los datos vivos en el acto; el rango de K
+  aceptado es 0,01–2 mHz/LSB (aún decía 0,02); las dos peculiaridades de `LRN`
+  listadas para v1.07 desaparecen con las correcciones. README: la sección de
+  `CT` (la segunda pasada, el rango 0,01–2 mHz/LSB — decía 0,1 — y el guardado
+  automático del grupo PID, donde aún mandaba ejecutar `ES`), las filas de
+  `LRN` y `LPOL` (`LPOL 0` es «sin fijar», no «auto»). La línea de estado de
+  ejemplo del README del sintonizador nombra v1.08.58rt.
+- Comentarios: `span_begin()` corre antes de escribir el código del que arranca
+  el lazo, no antes de la primera escritura del DAC — el código recuperado está
+  en el DAC los pocos milisegundos que duran las lecturas; la rama de telemetría
+  que llamaba al algoritmo 10 «no un lazo LRN» (corre con el feed-forward de
+  LRN, aprendido en LOCK y aplicado en todos los estados); el nick de Dave se
+  escribe Solder_Junkie en todas partes.
+- `TOOL_VERSION` del sintonizador es 1.08.
+
+**Actualizar desde v1.07:** no hay que hacer nada — los ajustes se conservan.
+Para activar la prueba de nulos en una placa calibrada antes del build 58,
+ejecute `CT` una vez en cada posición del span.
+
+---
+
 ## [v1.07] — publicado 2026-09-24 (build 57)
 
 Publicado como build 57, la primera versión que lleva su build en el nombre:
@@ -45,8 +2252,9 @@ medidas, no cuando estaban escritas.
   midió 8209 LSB/Hz con el span completo y 40873–46711 con el reducido, entre
   5,0 y 5,7 veces más — aunque la cifra del span completo es anterior al cambio
   de una referencia de 5 V por una de 4,096 V, y con una misma referencia las
-  dos posiciones difieren en el divisor, 4,1–4,7 veces. De ese número sale cada
-  coeficiente del lazo, así que
+  dos posiciones difieren en el divisor, 4,1–4,7 veces *(así se creía al
+  publicar; medido después sobre una misma referencia: 3,3–3,6 veces, véase
+  v1.08)*. De ese número sale cada coeficiente del lazo, así que
   hasta ahora una placa cuyo puente cambiaba de posición seguía con la
   calibración de la otra hasta que alguien repetía `CT`. El segundo polo del
   puente va ahora a **PB14** (puesto = a masa = REDUCED; quitado, o sin cablear
@@ -3171,7 +5379,7 @@ medidas, no cuando estaban escritas.
   ganó un párrafo sobre elección de módulo GNSS: los clones chinos de u-blox
   ignoran la configuración binaria y algunos pierden el auto-baud con el
   chorro de tramas sin respuesta, hasta que la nueva sonda tras el túnel `T`
-  los rescata (informe de campo: Solder Junkie). Nuevo conmutador de
+  los rescata (informe de campo: Solder_Junkie). Nuevo conmutador de
   compilación `GPSDO_FAKE_UBLOX` (apagado por omisión): solo sonda de baud,
   cero configuración UBX — el lazo no pierde nada esencial, al PPS nunca le
   importó UBX; desaparecen el silenciado de NMEA, el modo estacionario, el

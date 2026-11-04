@@ -1,7 +1,7 @@
 /**
  * gpsdo_config.h — Compile-time configuration
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.68rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -12,8 +12,8 @@
  * priorities and stack sizes are controlled here.  Sanity checks enforce
  * mutual exclusion rules (e.g. LCD 20x4 and TM1637 cannot coexist).
  *
- * OUT_SERIAL macro routes all user-facing output to Serial2 when
- * GPSDO_BLUETOOTH is defined, or to Serial (USB) otherwise.
+ * OUT_SERIAL routes user-facing output to the USB+Bluetooth tee, to
+ * Serial2, or to Serial (USB), depending on the comms switches below.
  */
 #pragma once
 
@@ -31,23 +31,21 @@ extern "C" {
 
 /* ── Version ───────────────────────────────────────────────────────────
  * THE NAME IS "GPSDO vX.YY.NNrt": the release below, NN the build —
- * BUILD_SERIAL in gpsdo_build_id.h, so a bump renames the firmware by itself —
- * and "rt" for the FreeRTOS lineage the old "-rtos" suffix marked (build 56
- * alone spelled it vX.YY-rtNN). The build is appended in the sketch
- * (g_fw_version, see gpsdo_build.h) and not here, because the sketch is the
- * only unit that includes gpsdo_build_id.h: that is what keeps a bump from
- * recompiling every file that includes this one.
+ * BUILD_SERIAL in gpsdo_build_id.h, so a bump renames the firmware by
+ * itself — and "rt" for the FreeRTOS lineage. The build is appended in
+ * the sketch (g_fw_version, see gpsdo_build.h) and not here, because the
+ * sketch is the only unit that includes gpsdo_build_id.h: that is what
+ * keeps a bump from recompiling every file that includes this one.
  * Wherever the firmware names itself, print g_fw_version, not this. */
 #define PROGRAM_NAME     "GPSDO"
-#define PROGRAM_VERSION  "v1.07"
+#define PROGRAM_VERSION  "v1.08"
 
 /* ---- Serial output macro ----
- * OUT_SERIAL routes user-facing output to Serial2 (Bluetooth) or Serial
- * (USB). It depends on GPSDO_BLUETOOTH, so it is defined LATER in this file,
- * AFTER all feature switches — otherwise GPSDO_BLUETOOTH would not yet be
- * visible here and OUT_SERIAL would always resolve to USB. See the
- * "Derived macros" section below. */
-#define AUTHOR_NAME      "J. M. Niewinski (jmnlabs)"   /* this firmware's author (ASCII for serial) */
+ * OUT_SERIAL routes user-facing output to Serial2, Serial (USB) or a
+ * combined tee. It depends on the comms feature switches, so it is
+ * defined LATER in this file, AFTER all feature switches — otherwise
+ * those switches would not yet be visible here and OUT_SERIAL would
+ * always resolve to USB. See the "Derived macros" section below. */
 #define ORIG_AUTHOR_NAME "Andre Balsa"   /* author of the original GPSDO v0.06c (ASCII for serial) */
 
 /* ── Feature switches ────────────────────────────────────────────────── */
@@ -63,13 +61,6 @@ extern "C" {
 /* ── TM1637 clock display — select exactly one, or comment both out ──── */
 //#define GPSDO_TM1637_6           /* 6-digit TM1637: HH:MM:SS               */
 //#define GPSDO_TM1637             /* 4-digit TM1637: HH:MM                  */
-/* Brightness was buried in gpsdo_tasks.cpp as a bare setBrightness(1) with a
- * comment claiming "5/7". The argument is 0..7, so the code was asking for the
- * second-dimmest setting the part has while the comment described something
- * five times brighter — and the first person to fit one of these displays had
- * no reason to suspect the firmware rather than the module. Here, beside the
- * switch that enables the display and next to HT16K33_BRIGHTNESS below, is
- * where somebody would look for it. Reported by Dave (Solder_Junkie). */
 #define TM1637_BRIGHTNESS   4    /* 0 (dim) .. 7 (max)                     */
 
 /* ── HT16K33 clock display — 4-digit 7-seg with colon, I2C ────────────
@@ -128,12 +119,8 @@ extern "C" {
 //#define GPSDO_TFT_ST7789         /* ST7789  240x320 SPI TFT */
 #define GPSDO_TFT_ILI9488        /* ILI9488 320x480 SPI TFT (480x320 landscape) */
 
-/* TFT control pins (documentation — actual config is in User_Setup.h) */
-#define PIN_TFT_SCK   PA5
-#define PIN_TFT_MOSI  PA7
-#define PIN_TFT_RST   PB15
-#define PIN_TFT_DC    PB12
-#define PIN_TFT_CS    PB13
+/* TFT control pins, for wiring — TFT_eSPI's User_Setup.h sets them, not this
+ * file: SCK PA5, MOSI PA7, RST PB15, DC PB12, CS PB13. */
 
 /* ── OLED page alternation: seconds per page ─────────────────────────── */
 #define OLED_PAGE_SWITCH_SECS   10u   /* flip between page A and B every N seconds */
@@ -145,6 +132,18 @@ extern "C" {
 #define GPSDO_AHT10
 #define GPSDO_BMP280_I2C
 #define GPSDO_INA219
+/* GPSDO_LM75 - an LM75-family thermometer on I2C (build 68): LM75A/B,
+ * PCT2075, TMP75/175, TMP1075, any part with the LM75's temperature
+ * register - for instance glued to the OCXO's can. Probed at boot like the
+ * sensors above ("HW: LM75 sensor ..."); when it answers, the human-readable
+ * report (RH) carries "LM75:<degC>C" after CPU on its sensor line. Not on any
+ * display yet, and not in RD, whose columns stay as they are.
+ * GPSDO_LM75_ADDR is the 7-bit address: 0x48 with A2..A0 low, up to 0x4F.
+ * Another chip at that address can pass for one - an ADS1x15 or a PCF8591
+ * at 0x48 (an INA219 strapped there is told apart): on such a board move
+ * the address or comment this out. */
+#define GPSDO_LM75
+#define GPSDO_LM75_ADDR   0x48
 //#define GPSDO_BLUETOOTH
 /* GPSDO_BLUETOOTH_PARALLEL — USB + Bluetooth at the same time: telemetry, CLI
  * and boot output mirror to BOTH ports, and commands are accepted from either.
@@ -187,9 +186,9 @@ extern "C" {
  *
  * ZED-F9T (Gen9) is also supported: ubx_start_survey_in() additionally tries
  * a CFG-VALSET (CFG-TMODE-* keys) variant, and the monitor falls back to
- * NAV-SVIN (0x01 0x3B) when TIM-SVIN does not answer. Tested on real hardware
- * by EEVblog user danieljw. The legacy CFG-NAV5 sent for stationary mode may
- * NAK on an F9T; that is tolerated (the survey-in path is independent).
+ * NAV-SVIN (0x01 0x3B) when TIM-SVIN does not answer. Verified on real
+ * ZED-F9T hardware. The legacy CFG-NAV5 sent for stationary mode may NAK
+ * on an F9T; that is tolerated (the survey-in path is independent).
  *
  * Survey-in ends when EITHER limit is met (whichever comes first):       */
 #define GPSDO_GPS_TIMING     /* u-blox timing rx: LEA-6T / LEA/NEO-M8T / ZED-F9T */
@@ -205,20 +204,19 @@ extern "C" {
  * Enable this ONLY if the detector hardware is fitted; a counter-only board
  * leaves it commented out and uses algorithms 0-9. See doc/MANUAL_*.md 1.3. */
 #define GPSDO_LTIC           /* Lars' TIC: read Vphase on PA1, discharge 1nF capacitor */
-/* GPSDO_EEPROM removed in v1.00: persistence is 100% flash ring
- * (settings_store + live_store, sector 7). See doc/FLASH_RING_BRINGUP_*. */
 /* ---- Control-voltage output --------------------------------------------
  * Default is the 16-bit PWM on PIN_VCTL_PWM: about 50 uV per step at 3.3 V,
  * near 2.7e-11 fractional on a 5.3 Hz/V oscillator.
  *
  * GPSDO_DAC_EXT switches to the external AD5680 SPI DAC (18-bit, external
  * REF5045 reference): about 17 uV per step, near 9e-12 fractional, with no
- * filter delay in the loop. Bit-banged on PIN_DAC_SCK/MOSI/CS (PB0/PB2/PB4,
- * Dan Wiering's PCB routing; PB2 is BOOT1 - keep the MOSI trace pull-up free).
- * TM1637 and the 2 kHz generator are skipped at compile time when this is on.
+ * filter delay in the loop. Bit-banged on PIN_DAC_SCK/MOSI/CS (PB0/PB2/PB4;
+ * PB2 is BOOT1 - keep the MOSI trace pull-up free). TM1637 and the 2 kHz
+ * generator are skipped at compile time when this is on.
  *
- * No hardware SPI is needed: the DAC is written once per second, so bit-banging
- * costs microseconds. See gpsdo_dac_ext.h for the pin proposal and the reasoning. */
+ * No hardware SPI is needed: the DAC is written once per second, so
+ * bit-banging costs microseconds. See gpsdo_dac_ext.h for the pin
+ * proposal and the reasoning. */
  
 /* GPSDO_PWM_DITHER replaces the plain 16-bit PWM with a shorter PWM whose duty
  * is dithered from period to period, giving 24 bits after the filter. Idea from
@@ -226,24 +224,25 @@ extern "C" {
  * interrupt, so it costs no measurable CPU.
  *
  * The point is the carrier, not the extra bits. At 13 bits the carrier is
- * 12.2 kHz against 2 kHz now, which lets the filter corner move from 0.7 Hz to
- * 4.2 Hz for the same ripple — a six-fold shorter time constant, and filter delay
- * goes straight into the loop as phase lag.
+ * 11.7 kHz against 1.9 kHz now (96 MHz timers), which lets the filter corner
+ * move from 0.7 Hz to 4.0 Hz for the same ripple — a six-fold shorter time
+ * constant, and filter delay goes straight into the loop as phase lag.
  *
  * Same pin (PB9, TIM4 CH4), so the existing filter and wiring are unchanged.
  * Costs 2 x 2^(24-N) x 2 bytes of RAM: 8 KB at 13 bits, 16 KB at 12. */
 #define GPSDO_PWM_DITHER
-#define GPSDO_PWM_DITHER_BITS  13   /* 12 = 24.4 kHz/16 KB, 13 = 12.2 kHz/8 KB */
+#define GPSDO_PWM_DITHER_BITS  13   /* 12 = 23.4 kHz/16 KB, 13 = 11.7 kHz/8 KB */
 
 #define GPSDO_DAC_EXT
 
 /* ---- EFC span jumper on PB14 -------------------------------------------
  * A board with the EFC level shifter runs its oscillator over the full control
- * span or a reduced one, and the two have different plants — CT's K moved
- * 5.0-5.7x between them on Dan Wiering's prototype. With a second pole of the
- * span jumper wired to PB14, the firmware keeps one CT calibration per
- * position and switches between them when the jumper moves, remapping the
- * control code so the EFC pin keeps its voltage. See gpsdo_span.h.
+ * span or a reduced one, and the two have different plants — CT's K differs
+ * 3.3-3.6x between them, measured on one board against a single reference.
+ * With a second pole of the span jumper wired to PB14, the firmware keeps
+ * one CT calibration per position and switches between them when the
+ * jumper moves, remapping the control code so the EFC pin keeps its
+ * voltage. See gpsdo_span.h.
  *
  * Jumper fitted = PB14 to ground = REDUCED. Open, or nothing wired = FULL,
  * which is the position that always works: a board without the wire reads
@@ -256,7 +255,7 @@ extern "C" {
 #define GPSDO_SPAN_SENSE
 #define PIN_SPAN_SENSE  PB14
 
-/* Historical bring-up aid; OFF by default per the v1.06 policy. */
+/* Off by default: a 2 kHz test square wave on PB5, for bring-up/debugging. */
 /* #define GPSDO_GEN_2kHz_PB5 */
 
 
@@ -276,31 +275,30 @@ extern "C" {
 #if defined(GPSDO_LCD_20x4) && (defined(GPSDO_TM1637) || defined(GPSDO_TM1637_6))
   #error "GPSDO_LCD_20x4 and TM1637 cannot be used together (I2C/GPIO conflict). Disable one."
 #endif
-/* The external DAC's chip-select shares PB4 with the TM1637 data line. Both are
- * plain GPIO driven by software, so nothing detects the clash at run time: the
- * display would corrupt every DAC write and the control voltage would jump
- * whenever the clock updated. Caught here instead.
+/* The external DAC's chip-select shares PB4 with the TM1637 data line. Both
+ * are plain GPIO driven by software, so nothing detects the clash at run
+ * time: the display would corrupt every DAC write and the control voltage
+ * would jump whenever the clock updated. Caught here instead.
  *
  * If a board needs both, move PIN_DAC_CS to PC14 or PC15 (free unless the
- * 32 kHz crystal is fitted). NOT PB14 while GPSDO_SPAN_SENSE is on — that is
- * the span jumper's input now, and gpsdo_span.cpp refuses to compile the
- * collision. Nothing else in the firmware depends on which. NOT PA4 (SPI1_NSS,
- * the display's chip select), NOT PA6
- * (TFT_eSPI wants it as TFT_MISO), NOT PB6/PB7 (I2C1), NOT PA9/PA10 (Serial1,
- * the GPS). And note there is no free ADC channel at all — see the pin audit
- * in gpsdo_dac_ext.h. */
-/* BOTH MAY NOW BE COMPILED TOGETHER. They used to be mutually exclusive because
- * both drive the control voltage — but the thing that must not happen is two
+ * 32 kHz crystal is fitted). NOT PB14 while GPSDO_SPAN_SENSE is on — that
+ * is the span jumper's input, and gpsdo_span.cpp refuses to compile the
+ * collision. Nothing else in the firmware depends on which. NOT PA4
+ * (SPI1_NSS, the display's chip select), NOT PA6 (TFT_eSPI wants it as
+ * TFT_MISO), NOT PB6/PB7 (I2C1), NOT PA9/PA10 (Serial1, the GPS). And note
+ * there is no free ADC channel at all — see the pin audit in
+ * gpsdo_dac_ext.h. */
+/* BOTH CAN BE COMPILED TOGETHER: the thing that must not happen is two
  * drivers fighting over one node, and that is settled by the JUMPERS on the
- * board, not by the build. Compiling both lets one binary serve either wiring
- * and lets the DAC command switch between them at runtime for a back-to-back
- * comparison, which is otherwise a reflash apart. The pins do not collide:
+ * board, not by the build. Compiling both lets one binary serve either
+ * wiring and lets the DAC command switch between them at runtime for a
+ * back-to-back comparison instead of a reflash. The pins do not collide:
  * dither is PB9/TIM4, the AD5680 is PB4/PB0/PB2. See gpsdo_dac.h. */
 /* With the external DAC on, TM1637 and the 2 kHz generator yield their pins
  * instead of failing the build: TM1637's data line is the DAC's chip-select
- * (PB4), and both options are historical anyway — the HT16K33 on I2C is the
- * maintained clock display, and the generator was a bring-up aid. The v1.06
- * policy keeps both OFF by default regardless (see the defines above). */
+ * (PB4). The HT16K33 on I2C is the maintained clock display, and the
+ * generator is a bring-up/debug aid; both stay OFF by default regardless
+ * (see the defines above). */
 #if defined(GPSDO_DAC_EXT)
   #undef GPSDO_TM1637
   #undef GPSDO_TM1637_6
@@ -366,11 +364,11 @@ extern "C" {
 
 /* ── GFX Free Fonts (GFXFF) ──────────────────────────────────────────────
  * The display text is drawn with the Adafruit GFX free fonts bundled with
- * TFT_eSPI (proportional FreeSans / monospace FreeMono, 9/12/18/24 pt). This
- * replaced the old numeric GLCD fonts (1,2,4,6,7,8): fonts 6/7/8 contain ONLY
- * the glyphs 0-9 . : - a p m, so any lettered string drawn in them collapsed
- * to whatever numeric-font glyph happened to exist — e.g. "GPS Disciplined
- * OCXO" in font 6 rendered as a lone "p". GFXFF has the full character set and
+ * TFT_eSPI (proportional FreeSans / monospace FreeMono, 9/12/18/24 pt).
+ * The numeric GLCD fonts (1,2,4,6,7,8) contain ONLY the glyphs 0-9 . : -
+ * a p m, so any lettered string drawn in them collapses to whatever
+ * numeric-font glyph happens to exist — e.g. "GPS Disciplined OCXO" in
+ * font 6 renders as a lone "p". GFXFF has the full character set and
  * looks far cleaner on the big panel.
  *
  * `#define LOAD_GFXFF` in User_Setup.h is needed for the 480×320 build only.
@@ -382,12 +380,12 @@ extern "C" {
  * Fonts are chosen per ROLE. The layout is authored once and TFT_SX/TFT_SY
  * scale the coordinates for both panels — but the two panels do NOT use the
  * same faces. GFXFF is proportional and too wide for the 320×240 operating
- * screen: values overran their columns (tried in v0.92, reverted in v0.93),
- * and there is nothing smaller to fall back on (FreeSans starts at 9pt; below
- * it is only the unreadable 3×5 TomThumb). So the small panel keeps the
- * classic numeric fonts it was authored for, while the 480×320 panel — which
- * has the room — uses GFXFF throughout. The splash is classic on both, so that
- * upgrading from an older build needs no new User_Setup lines. TFT_FONT_*
+ * screen: values overran their columns, and there is nothing smaller to
+ * fall back on (FreeSans starts at 9pt; below it is only the unreadable
+ * 3×5 TomThumb). So the small panel keeps the classic numeric fonts it was
+ * authored for, while the 480×320 panel — which has the room — uses GFXFF
+ * throughout. The splash stays on classic fonts on both panels, so
+ * User_Setup.h needs no LOAD_* lines beyond LOAD_GLCD for it. TFT_FONT_*
  * (below) apply the choice; GF_* name the GFXFF faces.
  *
  *   Role        320×240            480×320            purpose
@@ -414,12 +412,8 @@ extern "C" {
 #endif
 
 /* ── Font application: GFX on the big panel, classic on the small one ─────
- * The GFX free fonts are proportional and comparatively wide. On the 480×320
- * panel they look good and there is room for them. On 320×240 the same layout
- * in FreeSans overflowed its columns — values ran into the neighbouring column
- * and the centre divider cut through the text — so the small panel goes back
- * to the classic numeric fonts it was authored for. The splash keeps GFX on
- * both panels (its layout has the room, and it reads well).
+ * See "GFX Free Fonts" above for why: the 320×240 panel keeps the classic
+ * numeric fonts, the 480×320 panel uses GFXFF throughout.
  *
  * TFT_FONT_DATA / _HEAD / _STATUS take a TFT_eSPI-ish object (the panel or a
  * sprite) and select the right font for this build. On the classic path they
@@ -490,14 +484,19 @@ extern "C" {
 #define PIN_TFT_BL       PB5   /* backlight PWM — THE SAME PIN as the 2 kHz   */
                                /* generator; see the yield rule further up    */
 #define PIN_PICDIV_ARM   PB3
-#define PIN_BT_RX        PA3   /* Bluetooth UART (Serial2) RX — module TX  */
-#define PIN_BT_TX        PA2   /* Bluetooth UART (Serial2) TX — module RX  */
+/* Bluetooth module on Serial2 (fixed by the core, not set here):
+ * PA2 = MCU TX -> module RX, PA3 = MCU RX <- module TX. */
 
 /* ── LTIC (Lars TIC) ────────────────────────────────────────────────── */
 #ifdef GPSDO_LTIC
   #define PIN_LTIC_VPHASE   PA1   /* ADC input + open-drain output to discharge 1nF cap */
-  #define LTIC_DISCHARGE_MS   1   /* ms to discharge 1nF capacitor via open-drain low   */
-  #define LTIC_OVERSAMPLE    16   /* fast ADC reads per PPS, median taken (glitch-proof) */
+  #define LTIC_OVERSAMPLE    16   /* LRM 0 (build 60's read): analogRead()s, their median */
+  /* LRM 1, the default: conversions per PPS, taken through the converter's
+   * registers from 5 us after the edge (~1.4 us each), a line through them
+   * read at the edge; and the converter channel PIN_LTIC_VPHASE is on - PA1
+   * is ADC1_IN1, so the two change together. See ltic_read_fast(). */
+  #define LTIC_EDGE_N        64
+  #define LTIC_ADC_CHANNEL    1
   /* How many consecutive railed cycles with no improvement in |e_freq| before
    * the loop declares a runaway and freezes. A cold or far-off OCXO rails the
    * detector while it is legitimately being pulled in, so the guard waits for
@@ -505,65 +504,43 @@ extern "C" {
    * error alone. ACQ corrects every 5 s, so 5 cycles is roughly 25 s of no
    * progress. Raise it if a very sluggish OCXO gets frozen mid-acquisition. */
   #define LTIC_RUNAWAY_STALL  5
-  /* Active discharge for the CURRENT-SOURCE ramp detector variant. Leave this
-   * commented out for the classic RC Kaashoek detector — that one self-clears
-   * through leakage and driving PA1 low would corrupt the measured charge. Only
-   * enable it if you have rebuilt the front end as a gated current integrator
-   * (diode-hold cap with no leakage path), where the cap must be actively zeroed
-   * after each read. LTIC_RESET_US is the low-pulse width; a few microseconds is
-   * plenty to sink the cap through PA1's drive. */
-  #define GPSDO_LTIC_ACTIVE_RESET   /* current-source variant only — see docs */
+  /* Active discharge: right after each read PA1 is driven low for
+   * LTIC_RESET_US, so every pulse charges the capacitor from 0 V. Keep it on
+   * for BOTH detector variants. The current-source front end has no leakage
+   * path and needs it outright. The classic RC Kaashoek detector clears
+   * itself only through leakage - with no bleed resistor fitted, mostly the
+   * Schottky's reverse current, tens of ms at 48 C - which slows several-fold
+   * on a cold board and could leave part of one second's charge under the
+   * next reading. The discharge comes after the burst has been read, so it
+   * never touches the charge being measured. A few microseconds is plenty to
+   * sink 1 nF through PA1's drive; a resistor between the node and PA1 would
+   * need five of its time constants. */
+  #define GPSDO_LTIC_ACTIVE_RESET   /* both variants - see the comment above */
   #define LTIC_RESET_US       5   /* PA1 low-pulse width to zero the hold cap (us)      */
-  /* Legacy voltage→time calibration constant for the TIC ramp. The TIC charges
-   * a 1 nF cap with a constant current during the GPS-1PPS → OCXO-1PPS interval,
-   * so the latched voltage tracks the phase difference. This compile-time
-   * constant is a FALLBACK only: the `LC` command measures the real slope per
-   * board at runtime and stores ns_per_volt / zero_offset / range_ns in the
-   * live parameters (flash ring), which is what algorithm 10 and the
-   * displays actually use. Leave at 0; displays then show volts until LC runs,
-   * after which they show ns from the measured slope. */
-  #define LTIC_NS_PER_VOLT    0.0f /* 0 = use measured LC calibration (normal) */
-  /* Self-calibration (LC command) parameters. LC forces a small PWM offset so
-   * the phase ramps linearly across the detector, measures the ramp rate from
-   * the TIM2 frequency error, and regresses the TIC voltage vs time to get the
-   * slope. LTIC_CAL_PWM_OFFSET sets how hard to push (bigger = faster ramp,
-   * but must stay inside the OCXO's pull range); LTIC_CAL_SECS is how long to
-   * log. A narrow detector (small ns range) needs a SLOW ramp or the phase
-   * wraps every second and every sample rails — LC scales this offset down
-   * automatically when it measures a fast drift, but the starting value is kept
-   * small (60 LSB) so it is gentle by default. */
-  #define LTIC_CAL_PWM_OFFSET   70   /* LSB added to centre PWM during LC  */ 
-  #define LTIC_CAL_SECS        300u  /* seconds of ramp logging. Sized for a    
-                                      /* wide detector window: LVC74 @ 3.3 V
-                                      * spans ~700+ ns, so at ~4 ns/s the sweep
-                                      * needs ≥ ~180 s of clean ramp plus margin
-                                      * for a railed start. 300 s covers ~1200
-                                      * ns with room to spare. (HC74 @ 5 V was
-                                      * narrower and fit in 180 s.)            */
-  #define LTIC_DET_PERIOD_NS  100.0  /* unambiguous range of the phase detector */
-                                      /* = one period of its clock. The xx74
-                                      * flip-flop is clocked at 10 MHz here, so
-                                      * 100 ns BY CONSTRUCTION — a physical
-                                      * constant, not something to estimate.
-                                      * (Lars' HC4046 at 1 MHz would be 1000.) */
-  /* Operating-point anchor for the calibration (Option D).
+  /* Self-calibration (LC). LC steers the PWM until the phase drifts across
+   * the detector at a known rate (target 6 ns/s, measured from the TIM2
+   * frequency average), then regresses the TIC voltage against time to get
+   * the slope. It stores ns_per_volt / zero_offset / range_ns in the live
+   * parameters; until it has run, the displays show volts. The push is
+   * derived from the calibrated gain, so the only setting here is how long to
+   * log: 300 s suits a wide detector window (LVC74 at 3.3 V spans ~700+ ns)
+   * with margin for a railed start; an HC74 at 5 V has a narrower span and
+   * needs less. The detector's unambiguous range is one period of its clock:
+   * 100 ns for the xx74 flip-flop clocked at 10 MHz. */
+  #define LTIC_CAL_SECS        300u  /* seconds of ramp logging */
+  /* Operating-point anchor for the calibration.
    *
-   * The ramp detector is exponential, so ns/V is NOT constant along it, and a
-   * whole-transit average (range/span) depends on where the picDIV arm happened
-   * to park the phase — back-to-back runs disagreed ~20 %. Two full 1 s-resolved
-   * runs showed the local slope dV/dt is REPEATABLE to ~0.3 % in a narrow band
-   * near ~1.85 V and diverges above and below it. That voltage is the physical
-   * sweet spot of THIS detector (Vsat·(1−1/e) ≈ 0.63·Vsat, near the middle of
-   * its usable range and clear of Dan Wiering's measured dead zones: the diode
-   * drop + pull-down below ~0.05 V, and the ADC rail/wraparound near 3.3 V).
-   * We anchor the loop's zero_offset at 0.632·Vsat (measured per board by LC)
-   * and read ns/V from the local slope in a ±window around it, instead of
-   * averaging the whole ramp.
-   *
-   * NOTE: on the reference board (LVC74 @ 3.3 V, 1k/1n ramp) that sweet spot
-   * lands near 1.85 V, since Vsat ≈ 2.93 V. LC now derives the anchor from the
-   * measured Vsat rather than a fixed constant, so it adapts to any detector;
-   * see do_ltic_calibrate() in gpsdo_control.cpp. */
+   * The ramp detector is exponential, so ns/V is not constant along it, and a
+   * whole-transit average (range/span) depends on where the picDIV arm
+   * happened to park the phase — back-to-back runs disagree by ~20 %. The
+   * local slope dV/dt is repeatable to ~0.3 % in a narrow band around
+   * 0.632·Vsat (Vsat·(1−1/e)), near the middle of the usable range and clear
+   * of the dead zones (diode drop + pull-down below ~0.05 V, the ADC rail
+   * near 3.3 V). LC anchors the loop's zero_offset there, from the Vsat it
+   * measures on each board, and reads ns/V from the local slope within
+   * ±LTIC_ANCHOR_WIN_V. On the reference board (LVC74 at 3.3 V, 1k/1n ramp,
+   * Vsat ≈ 2.93 V) the anchor lands near 1.85 V. See do_ltic_calibrate() in
+   * gpsdo_control.cpp. */
   #define LTIC_ANCHOR_WIN_V   0.20f  /* half-width for the local-slope fit [V] */
 #define LTIC_CAL_MIN_POINTS   12   /* reject fit with fewer samples          */
 #endif
@@ -588,7 +565,7 @@ extern "C" {
 
 /* ── Default PWM (pre-calibration start point) ────────────────────────
  *
- * The OCXO type no longer needs to be selected: the CT (Calibrate & Tune)
+ * The OCXO type does not need to be selected: the CT (Calibrate & Tune)
  * command measures the actual plant gain K and derives both the 10 MHz PWM
  * and all PID coefficients for whatever oscillator is fitted.
  *
@@ -631,10 +608,11 @@ extern "C" {
 /* CLI and CONTROL both write the flash ring, and that path is stack-hungry:
  * fr_write() builds a 512-byte slot image and a second 512-byte read-back copy
  * on the stack, and settings_store adds a ~324-byte SettingsBlock_t on top —
- * about 1.4 KB before any call frames. The old 1 KB CLI stack overflowed and
- * corrupted its neighbour: the symptom was the board printing the save
- * confirmation and then hanging, with the display frozen. Sized with ~1 KB of
- * head-room over the measured worst case; check with SW after any change. */
+ * about 1.4 KB before any call frames. A too-small stack overflows here and
+ * corrupts its neighbour silently: the symptom is the board printing the
+ * save confirmation and then hanging, with the display frozen. Sized with
+ * ~1 KB of head-room over the measured worst case; check with SW after any
+ * change. */
 #define STACK_CLI        768
 #define STACK_SENSORS    384
 #ifdef GPSDO_TFT

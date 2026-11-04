@@ -1,7 +1,7 @@
 /* ======================================================================
  * gpsdo_flash_ring.cpp  —  STM32F411 HAL layer for the live-data + settings ring
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * This is the ONLY part of the ring buffer that touches real flash. It
  * implements the three primitives the hardware-independent core needs
@@ -20,13 +20,24 @@
  *  - Erase/program run with interrupts kept enabled but are short; the
  *    control loop tolerates the occasional stall because saves are rare
  *    (hysteresis in live_store; ES is user-initiated).
+ *  - One task at a time (build 65): write, read and wipe take a mutex, since
+ *    both the control task and the CLI write here - see ring_lock().
  * ====================================================================== */
 
 #include "gpsdo_flash_ring.h"
 #include "gpsdo_flash_ring_core.h"
 
 #include "stm32f4xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
 #include <string.h>
+
+/* A wrap carries types 0 .. FR_TYPES-1 across the erase (fr_write); a record
+ * type past that would be dropped at every wrap without a word. */
+#if (REC_LIVE >= FR_TYPES) || (REC_SETTINGS >= FR_TYPES) || (REC_A13 >= FR_TYPES)
+#error "a flash ring record type is outside FR_TYPES: raise FR_TYPES in gpsdo_flash_ring_core.h"
+#endif
 
 /* ---- flash geometry (STM32F411CE) ---- */
 #define RING_SECTOR       FLASH_SECTOR_7
@@ -36,6 +47,35 @@
 
 static fr_state_t s_state;
 static bool       s_ready = false;
+
+/* ONE TASK AT A TIME (build 65). The control task writes the ring (the live
+ * store, CT's K, the span record) and so does the CLI (ES, KR/KQ/KT, CR), and
+ * the core keeps its place in s_state alone. The control task preempting the
+ * CLI between two words of a slot puts both writes into that one slot: up to
+ * build 64 every later write then failed until a reboot. Now that the core
+ * steps over a spent slot, each writer would step on, the slot after it
+ * would stay blank behind the newest, and the next boot would start writing
+ * there - over the records that came after it. A write in the middle of a
+ * wrap could undo the carry-over. Created in flash_ring_begin(), before the
+ * scheduler starts, as gpsdo_pwm24.cpp does with its own lock; until the
+ * scheduler runs everything is single-threaded and the lock is skipped. Held
+ * across nothing but the ring itself, so it cannot deadlock against
+ * xCtrlMutex. */
+static SemaphoreHandle_t s_lock = NULL;
+
+static bool ring_lock(void)
+{
+    if (s_lock != NULL && xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        return true;
+    }
+    return false;
+}
+
+static void ring_unlock(bool locked)
+{
+    if (locked) xSemaphoreGive(s_lock);
+}
 
 /* ---- primitives handed to the core ---- */
 
@@ -96,6 +136,8 @@ static const fr_ops_t OPS = {
 
 bool flash_ring_begin(void)
 {
+    /* NULL only on heap exhaustion: the ring then runs unlocked, as before */
+    if (s_lock == NULL) s_lock = xSemaphoreCreateMutex();
     int r = fr_begin(&s_state, &OPS);
     s_ready = true;
     return (r == 1);
@@ -106,26 +148,35 @@ uint8_t  flash_ring_sector_no(void) { return (uint8_t)RING_SECTOR; }
 
 bool flash_ring_wipe(void)
 {
-    /* Cold-restart erase: physically erase the ring sector, then re-init so a
-     * fresh header is laid down. After this the ring reads as empty — the next
-     * boot (or the next settings_recall) finds no valid slot and falls back to
-     * compile-time defaults. Used by the CR command. Returns true on success. */
-    if (hw_erase() != 0) return false;
-    int r = fr_begin(&s_state, &OPS);   /* reformats the just-erased sector */
-    s_ready = true;
-    return (r == 1);
+    /* Cold-restart erase: erase the ring sector once and lay down a fresh
+     * header, the erase count carried on (fr_wipe). After this the ring reads
+     * as empty — the next boot (or the next settings_recall) finds no valid
+     * slot and falls back to compile-time defaults. Used by the CR command.
+     * Returns true on success - up to build 64 it returned false after every
+     * wipe that worked. */
+    const bool l = ring_lock();
+    if (!s_ready) { (void)fr_begin(&s_state, &OPS); s_ready = true; }
+    const int r = fr_wipe(&s_state);
+    ring_unlock(l);
+    return (r == 0);
 }
 
 uint16_t flash_ring_read_newest(uint8_t type, uint8_t *out, uint16_t maxlen)
 {
     if (!s_ready) return 0;
-    return fr_read_newest(&s_state, type, out, maxlen);
+    const bool l = ring_lock();
+    const uint16_t n = fr_read_newest(&s_state, type, out, maxlen);
+    ring_unlock(l);
+    return n;
 }
 
 bool flash_ring_write(uint8_t type, const uint8_t *data, uint16_t len)
 {
     if (!s_ready) return false;
-    return (fr_write(&s_state, type, data, len) == 0);
+    const bool l = ring_lock();
+    const bool ok = (fr_write(&s_state, type, data, len) == 0);
+    ring_unlock(l);
+    return ok;
 }
 
 uint32_t flash_ring_erase_count(void) { return s_ready ? fr_erase_count(&s_state) : 0; }

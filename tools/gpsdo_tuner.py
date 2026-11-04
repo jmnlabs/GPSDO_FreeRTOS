@@ -57,7 +57,7 @@ import math
 # against newer firmware silently mis-parses telemetry and writes commands the
 # board no longer understands, which is a confusing way to lose an evening.
 # Bump this whenever the firmware version changes, even if nothing here moved.
-TOOL_VERSION = "1.07"
+TOOL_VERSION = "1.08"
 from collections import deque, defaultdict
 from array import array
 from bisect import bisect_left
@@ -161,15 +161,19 @@ PLOT_SPAN_DEFAULT = "5 min"
 # Which telemetry field feeds each of the two upper plots, per algorithm family.
 # The LTIC loops (10, 11) are the only ones with a phase detector, so under any
 # other algorithm those two panes would sit empty for the whole session. Drift
-# and Vctl are the informative pair there: drift is what the self-learning
-# feed-forward is doing, Vctl is the voltage actually reaching the OCXO. PWM was
-# the obvious alternative for the second pane but carries the same information as
-# Vctl — same signal either side of the RC — so it would waste a window.
+# and the control voltage are the informative pair there: drift is what the
+# self-learning feed-forward is doing, the control voltage is what the loop sets.
+#
+# THE CONTROL VOLTAGE IS DRAWN FROM THE PWM CODE (Vcmd = code / 65536 x DV), not
+# from the ADC read-back (Vctl). The read-back carries about 1 mV of ADC noise,
+# some twenty LSB of the code, while a settled loop moves the code by one or two
+# LSB at a time - so a Vctl pane shows the ADC, not the loop. DV is read from the
+# device at connect; the ADC value stays in the log and the live fields.
 PLOT_SERIES = {
     "ltic": [("dph",    "Phase  dph (ns)",                        "#22aa44"),
              ("Vphase", "Detector Vphase (V) — ramp position",    "#2277cc")],
     "pid":  [("drift",  "Learned drift (LSB) — LRN feed-forward", "#22aa44"),
-             ("Vctl",   "Control voltage Vctl (V)",               "#2277cc")],
+             ("Vcmd",   "Control voltage from the PWM code (V)",  "#2277cc")],
     # Algorithm 12 does not use the self-learning feed-forward, and its phase
     # comes straight from the detector rather than through a loop filter, so
     # neither pair above describes it.
@@ -182,7 +186,7 @@ PLOT_SERIES = {
     # shows and what makes this one comparable with them. The ESTIMATE goes
     # over it as an overlay, exactly as on algorithm 13 - see PLOT_OVERLAY.
     "mlacc": [("dph",    "Phase  dph (ns) - measured, accumulator estimate over it", "#22aa44"),
-              ("Vctl",   "Control voltage Vctl (V)",               "#2277cc")],
+              ("Vcmd",   "Control voltage from the PWM code (V)",  "#2277cc")],
     # Algorithm 11 shared the "ltic" pair with algorithm 10 and therefore drew
     # only the reading, although it is the one LTIC loop that maintains a
     # filtered phase of its own (s_phase_filt, printed as phase=). Same panes as
@@ -342,8 +346,8 @@ MLACC_LEVEL_SECS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 # there is nothing to remember.
 #
 # Two formats carry a position, both from gpsdo_tasks.cpp:
-#   human report   "Lat: 52.766907 Lon: 23.207619 Alt: 149.7m Sat:10 HDOP:TIME"
-#   rotating line  "La 52.76691" / "Lo 23.20762"   (compact displays / RD mode)
+#   human report   "Lat: dd.dddddd Lon: dd.dddddd Alt: ddd.dm Sat:10 HDOP:TIME"
+#   rotating line  "La dd.ddddd" / "Lo dd.ddddd"   (compact displays / RD mode)
 #
 # Altitude goes too. On its own it is weak, but combined with a timezone and a
 # forum post it is not nothing, and nobody reading a phase log needs it.
@@ -354,23 +358,65 @@ MLACC_LEVEL_SECS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 # lines up, and it is visibly a redaction rather than a plausible wrong number:
 # a log that quietly claims the wrong position is worse than one that says it
 # was scrubbed.
+#
+# NOT ONLY WHERE A LINE STARTS (build 67). The serial stream drops bytes now
+# and then - in the first minute of a capture especially - and a position line
+# that has lost its first few characters or its newline no longer starts with
+# "Lat:". A capture on 07.10 kept two such lines whole: one beginning at the
+# middle of the latitude ("d.dddddd Lon: ..."), one at "at: " with the next
+# "Up:" line run into its HDOP. Both carried the full fix. So after the exact
+# forms above, every line also loses: the number after any "Lat:" or "Lon:"
+# label, whatever its precision and even with its integer digits gone (a line
+# can end in the middle of one, and below 10 degrees one lost byte takes the
+# only integer digit); the number standing just before " Lon:" (a latitude
+# whose label was lost) and the one just before " Alt:" (the same for the
+# longitude); the number after "Alt:", and the short forms anywhere on the
+# line - a label run straight onto the digits of the line before included;
+# and, on any line that carries one of the report's own words (Lat, Lon, Alt,
+# HDOP, Sat:), every number shaped like a coordinate - four to seven decimals,
+# integer digits or not - even with both labels gone. Nothing else in the
+# telemetry prints that next to those words, so a whole log loses nothing else
+# (tools/redact_test.py checks both halves of that).
 _RX_POS_HUMAN = re.compile(
     r"^(Lat:\s*)-?\d+\.\d+(\s+Lon:\s*)-?\d+\.\d+(\s+Alt:\s*)-?\d+\.?\d*(m\b)")
 _RX_POS_SHORT = re.compile(r"^(La|Lo)\s*-?\d+\.\d+\s*$")
 _RX_POS_ALT   = re.compile(r"^(Al)\s*-?\d+\.?\d*(m\b)")
+_RX_FR_NUM    = r"-?(?:\d+\.?\d*|\.\d+)"     # a number, integer digits or not
+_RX_FR_LABEL  = re.compile(r"((?<![A-Za-z])(?:Lat|Lon)\s*:\s*)(" + _RX_FR_NUM + r")")
+_RX_FR_BEFORE = re.compile(r"(?<![\d.])(" + _RX_FR_NUM + r")(\s+Lon\s*:)")
+_RX_FR_ALT    = re.compile(r"((?<![A-Za-z])Alt\s*:\s*)(" + _RX_FR_NUM + r")")
+_RX_FR_BALT   = re.compile(r"(?<!\d)(-?\d*\.?\d{3,})(\s+Alt\s*:)")
+_RX_FR_SHORT  = re.compile(r"((?<![A-Za-z])(?:La|Lo)\s*)(-?\d*\.\d{4,})")
+_RX_FR_ALSH   = re.compile(r"((?<![A-Za-z])Al\s*)(-?\d+(?:\.\d*)?)(m\b)")
+_RX_FR_WORDS  = re.compile(r"Lat|Lon|Alt|HDOP|Sat:")
+_RX_FR_COORD  = re.compile(r"(?<!\d)-?\d{0,3}\.\d{4,7}(?![\d.])")
+
+
+def _dashes(s):
+    return re.sub(r"\d", "-", s)
 
 
 def redact_position(line):
     """Return the line with any GPS coordinates replaced by placeholders."""
     m = _RX_POS_HUMAN.match(line)
     if m:
-        return _RX_POS_HUMAN.sub(
+        line = _RX_POS_HUMAN.sub(
             lambda k: f"{k.group(1)}--.------{k.group(2)}--.------{k.group(3)}---{k.group(4)}",
             line)
-    if _RX_POS_SHORT.match(line):
+    elif _RX_POS_SHORT.match(line):
         return _RX_POS_SHORT.sub(lambda k: f"{k.group(1)} --.-----", line)
-    if _RX_POS_ALT.match(line):
+    elif _RX_POS_ALT.match(line):
         return _RX_POS_ALT.sub(lambda k: f"{k.group(1)} ---{k.group(2)}", line)
+    # The fragments (build 67) - see above. A line the exact forms already
+    # scrubbed has no digits left in those fields, so this changes nothing there.
+    line = _RX_FR_LABEL.sub(lambda k: k.group(1) + _dashes(k.group(2)), line)
+    line = _RX_FR_BEFORE.sub(lambda k: _dashes(k.group(1)) + k.group(2), line)
+    line = _RX_FR_ALT.sub(lambda k: k.group(1) + _dashes(k.group(2)), line)
+    line = _RX_FR_SHORT.sub(lambda k: k.group(1) + _dashes(k.group(2)), line)
+    line = _RX_FR_ALSH.sub(lambda k: k.group(1) + _dashes(k.group(2)) + k.group(3), line)
+    line = _RX_FR_BALT.sub(lambda k: _dashes(k.group(1)) + k.group(2), line)
+    if _RX_FR_WORDS.search(line):
+        line = _RX_FR_COORD.sub(lambda k: _dashes(k.group(0)), line)
     return line
 
 
@@ -634,7 +680,7 @@ class TelemetryParser:
     """
 
     # Live telemetry fields -> label used on plots / spin boxes
-    LIVE_FIELDS = ["CPU", "Vphase", "Vctl", "dph", "qErr", "PWM", "drift", "damp",
+    LIVE_FIELDS = ["CPU", "Vphase", "Vctl", "Vcmd", "dph", "qErr", "PWM", "drift", "damp",
                    "scale", "phase",
                    # Algorithm 12: the phase it accumulates (ns), which level
                    # last acted, and the cumulative correction count.
@@ -677,6 +723,11 @@ class TelemetryParser:
         "ARM":      "detector not following - divider re-armed",
         "REJ":      "reading rejected by the innovation gate",
         "HOLD":     "holdover - steering from the model",
+        # firmware build 66 on: the detector published its last reading again
+        "KEPT":     "reading repeated - the filter skips this second",
+        # any loop, firmware build 65 on: the code went from one end of the
+        # DAC to the other with no lock between (the console says LOOP:)
+        "RAILS":    "rail to rail with no lock - diverging, see the LOOP: line",
         # algorithms 0-9
         "hit":      "on target",
         "HYB":      "hybrid FLL+PLL blend",
@@ -919,6 +970,7 @@ class GpsdoTuner(QMainWindow):
         self.data = defaultdict(lambda: RingBuffer(self.MAXPTS))
         self.tbuf = RingBuffer(self.MAXPTS)
         self.last_state = "?"
+        self.dac_fullscale = 3.30  # DV, volts at full code; replaced by the device's
         self._active_algo = None   # set from telemetry; toggles LTIC tab sections
         self._logfile = None       # open handle while logging to file, else None
         self._log_redacting = True # latched from the checkbox when a file opens
@@ -1580,14 +1632,16 @@ class GpsdoTuner(QMainWindow):
                 ("SPAN",        "EFC span jumper on PB14 (GPSDO_SPAN_SENSE): which"),
                 ("",            "  position it is in and the CT calibration each"),
                 ("",            "  position carries - one K per position, because the"),
-                ("",            "  reduced span is a different plant (5x on the V3"),
+                ("",            "  reduced span is a different plant (3-4x on the V3"),
                 ("",            "  prototype). Jumper fitted = PB14 to ground ="),
                 ("",            "  REDUCED; open or unwired = FULL, so a board without"),
                 ("",            "  the wire keeps its one calibration. When the jumper"),
                 ("",            "  moves the loop takes that position's K and the code"),
                 ("",            "  is remapped so the EFC pin keeps its voltage - once"),
                 ("",            "  a code pair is known, which the firmware learns by"),
-                ("",            "  itself from a move made while locked or from a CT."),
+                ("",            "  itself from a move made while locked or from a CT -"),
+                ("",            "  not from a code held in holdover, set by hand (SP,"),
+                ("",            "  up/dp), or far from where CT found 10 MHz there."),
                 ("",            "  A position with no CT of its own runs on the"),
                 ("",            "  other's while CT starts by itself: with a GPS fix,"),
                 ("",            "  never in holdover, up to four tries (at once, then"),
@@ -1605,6 +1659,12 @@ class GpsdoTuner(QMainWindow):
                 ("",            "  and both LTIC loops (10 and 11)"),
                 ("LC",          "LTIC self-calibrate: ns/V, zero offset, range"),
                 ("LL",          "List all LTIC parameters and state"),
+                ("LRM [0|1]",   "Phase read: 1 = a line through the burst, read at"),
+                ("",            "  the PPS edge (default), 0 = the old median"),
+                ("LB",          "Counts since boot - edges caught, lines read,"),
+                ("",            "  bursts refused and why, readings kept, thirds"),
+                ("",            "  left out, typical-bend moves - then the last"),
+                ("",            "  burst, conversion by conversion"),
                 ("LNV / LZO / LRN", "Calibration: ns per volt, zero-offset V, range ns"),
                 ("LPOL [-1/0/1]", "PWM->phase polarity (0 = not set — the loop holds"),
                 ("",            "  until it is; LC measures it, so run LC)"),
@@ -1664,6 +1724,8 @@ class GpsdoTuner(QMainWindow):
                 ("",            "  board now says so if the two disagree."),
                 ("MR [n]",      "Force a correction once level n is reached,"),
                 ("",            "  whatever the limits say (default 7 = 256 s)."),
+                ("MM [0|1]",    "How a correction reaches the pin: 1 = calm,"),
+                ("",            "  ramped (the default), 0 = the original path."),
                 ("MLP <n> [ns]","Phase limit for level n. Without a value it"),
                 ("",            "  prints the current one."),
                 ("MF [0-3]",    "Where the limits come from, INDEPENDENTLY of MG:"),
@@ -1724,7 +1786,12 @@ class GpsdoTuner(QMainWindow):
                 ("",            "  GPS harder, longer leans on the oscillator."),
                 ("",            "  Also sets the patience of the stall check:"),
                 ("",            "  five horizons far out and the picDIV is re-armed."),
-                ("",            "  KR/KQ/KT are saved on entry, in their own flash"),
+                ("KC [s]",      "Controller horizon: how fast the phase is nulled."),
+                ("",            "  0 = auto = KT/3 (33 s at the default KT 100)."),
+                ("KF [s]",      "Horizon while a disturbance lasts (default 16 s,"),
+                ("",            "  0 = off): from the moment the phase is plainly"),
+                ("",            "  out until it has been home for two minutes."),
+                ("",            "  KR/KQ/KT/KC/KF are saved on entry, in their own flash"),
                 ("",            "  ring record — no ES needed."),
                 ("",            "Holdover needs no setting: with no phase the"),
                 ("",            "  filter stops updating and keeps steering from"),
@@ -1946,6 +2013,21 @@ class GpsdoTuner(QMainWindow):
 
     def apply_cal(self, verb):
         val = self.cal_boxes[verb].value()
+        if verb == "LRN":
+            # LRN is two commands in one: the words 0 and 1 switch the LRN
+            # self-learning off and on, and any other number is the detector
+            # range in ns. So a range below 2 is refused here, and the value
+            # goes as plain decimals - {val:g} wrote 1e+06 for a million, which
+            # firmware before build 58 read as 1 (learning on) with atoi().
+            if val < 2.0:
+                QMessageBox.information(
+                    self, "LRN range",
+                    "The detector range must be at least 2 ns.\n\n"
+                    "LRN 0 and LRN 1 switch self-learning off and on - "
+                    "type them in the console if that is what you want.")
+                return
+            self.worker.send(f"LRN {val:.2f}")
+            return
         self.worker.send(f"{verb} {val:g}")
 
     def apply_lars_param(self, verb):
@@ -2100,6 +2182,7 @@ class GpsdoTuner(QMainWindow):
         calibration fields (which share LL)."""
         seq = []
         seq.append("V")                  # firmware version — checked against TOOL_VERSION
+        seq.append("DV")                 # volts at full code, for the Vcmd plot
         seq.append("LL")                 # LTIC algo 10 + calibration fields
         seq.append("FA")                 # FA damping
         for n in range(3, 10):           # PID algos 3-9, one reply block each
@@ -2255,6 +2338,17 @@ class GpsdoTuner(QMainWindow):
         if f is not None:
             self._push("freq_err", f - 10_000_000.0)
 
+        # The control voltage the loop commands, from the code rather than the
+        # noisy ADC read-back (see PLOT_SERIES). DV comes from the DV reply, the
+        # DAC report or a DV change; until one arrives the firmware default holds.
+        m_dv = re.search(r"DV:\s*([\d.]+)\s*V at full code|commanded (?:now scaled )?at\s*([\d.]+)\s*V", line)
+        if m_dv:
+            self.dac_fullscale = float(m_dv.group(1) or m_dv.group(2))
+        if line.startswith("PWM:"):
+            pv = self.parser.extract(line, "PWM")
+            if pv is not None:
+                self._push("Vcmd", pv / 65536.0 * self.dac_fullscale)
+
 
         # `is not None`, not a truth test: parse_state returns "" for the
         # firmware's "___" — the loop saying it has nothing to report — and that
@@ -2266,6 +2360,8 @@ class GpsdoTuner(QMainWindow):
             self.last_state = st
             hint = self.parser.STATE_HINT.get(st, "")
             self.state_lbl.setText(f"state: {st or '-'}" + (f"  ({hint})" if hint else ""))
+            # RAILS is the one state that asks for the operator: in red.
+            self.state_lbl.setStyleSheet("font-weight: bold;" + (" color: #c62828;" if st == "RAILS" else ""))
 
         # Track the active algorithm from the Learn line so the LTIC tab can show
         # the algo-10 stage PID or the algo-11 Lars params as appropriate. The

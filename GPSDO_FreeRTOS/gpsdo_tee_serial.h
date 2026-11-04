@@ -1,6 +1,6 @@
 /* =======================================================================
  * TeeSerial — mirror one logical stream onto two physical UARTs.
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.68rt
  *
  * When GPSDO_BLUETOOTH_PARALLEL is enabled the firmware talks on USB Serial
  * and the Bluetooth UART (Serial2) at the same time: every byte written goes
@@ -50,7 +50,11 @@ public:
      * A port that reports 0 room but is genuinely absent (an unopened CDC)
      * would otherwise veto output on the port that IS there, so treat "no
      * room at all" on one side as no constraint from that side. Neither
-     * HardwareSerial nor USBSerial reports 0 when it is working and idle. */
+     * HardwareSerial nor USBSerial reports 0 when it is working and idle.
+     * (As of build 68: in the current core an unopened or absent CDC answers
+     * its queue's free space, not 0 - a zero from USBSerial is a FULL queue,
+     * a host that has stopped reading. Which is why the report no longer
+     * comes through here; see port_a() below.) */
     int availableForWrite(void) override
     {
         int a = _a.availableForWrite();
@@ -88,6 +92,15 @@ public:
         _a.flush();
         _b.flush();
     }
+
+    /* ---- The two ports behind the tee ----
+     * For a writer that must treat them separately: the telemetry report
+     * (build 68, report_write() in gpsdo_tasks.cpp), whose non-blocking
+     * guard cannot work through availableForWrite() above - a full CDC
+     * queue answers 0, the tee takes that zero as no constraint from the
+     * USB side, and write() then pushes the chunk into the full queue. */
+    Stream &port_a() { return _a; }
+    Stream &port_b() { return _b; }
 
 private:
     Stream &_a;

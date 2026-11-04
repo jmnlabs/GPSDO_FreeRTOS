@@ -46,11 +46,11 @@ połączeniu odczytuje wersję z płytki i porównuje:
 - **zgodność** — pasek stanu pokazuje całą tożsamość płytki, na ile ją podała:
 
   ```
-  connected — firmware v1.07.57rt  2026-09-23 11:02  CRC 5A41C90B
+  connected — firmware v1.08.71rt  2026-10-29 23:34  CRC 8EED4610
   ```
 
   Te trzy fakty odpowiadają na różne pytania. **Wersja** mówi, jakim protokołem
-  tuner rozmawia. **Build** — od builda 56 w samej nazwie, `.57rt` (sam build
+  tuner rozmawia. **Build** — od builda 56 w samej nazwie, `.71rt` (sam build
   56 pisał `-rt56`); starszy firmware (`v1.07-rtos`) podaje go osobno i linia pokazuje `build N` — i czas
   kompilacji mówią, z którego drzewa źródeł to pochodzi. **CRC** mówi, który binarny obraz naprawdę działa, i jako jedyne nie
   może być nieaktualne — płytka liczy je z własnego flasha przy starcie, więc
@@ -95,7 +95,7 @@ jaki algorytm zgłasza płytka:
 | | Algorytmy 10 / 11 (LTIC) | Algorytm 12 | Algorytm 13 | Algorytmy 0-9 |
 |---|---|---|---|---|
 | Górne | Faza `dph` (ns) | Błąd fazy `ph` (ns) | **Estymata** fazy `ph` (ns) | Wyuczony dryf (LSB) |
-| Środkowe | `Vphase` detektora (V), z liniami pasma | Napięcie sterujące `Vctl` (V) | `Vphase` detektora (V), z liniami pasma | Napięcie sterujące `Vctl` (V) |
+| Środkowe | `Vphase` detektora (V), z liniami pasma | Zadane napięcie sterujące `Vcmd` (V) | `Vphase` detektora (V), z liniami pasma | Zadane napięcie sterujące `Vcmd` (V) |
 | Dolne | Błąd częstotliwości (Hz) | Błąd częstotliwości (Hz) | Błąd częstotliwości (Hz) | Błąd częstotliwości (Hz) |
 
 Tylko pętle LTIC mają detektor fazy, więc przy każdym innym algorytmie te dwa
@@ -107,6 +107,12 @@ samouczącego się sprzężenia w przód, więc wykres dryfu byłby płaski, a j
 idzie prosto z detektora, a nie przez filtr pętli — to nie jest ta sama wielkość,
 którą rysuje `dph`. Linie pasma detektora znikają zawsze wtedy, gdy środkowe
 okno pokazuje zamiast niego napięcie sterujące.
+
+Rysowane napięcie sterujące to napięcie **zadane**: `Vcmd` = kod PWM / 65536
+× `DV`, z `DV` odczytanym z płytki przy połączeniu. Odczyt z ADC (`Vctl`) ma
+ok. 1 mV szumu — jakieś dwadzieścia LSB kodu — a ustalona pętla rusza kodem o
+jeden, dwa, więc okno `Vctl` pokazywało ADC, a nie pętlę. `Vctl` zostaje w
+polach na żywo i w logu.
 
 Algorytm 13 rysuje to, w co filtr Kalmana WIERZY, że jest fazą, a nie odczyt z
 tej sekundy — ta estymata jest właśnie sensem posiadania filtru — a pod nią
@@ -209,6 +215,15 @@ anonimizować. Zastępuje `Lat` / `Lon` / `Alt` odbiornika symbolami zastępczym
 **tylko w zapisywanym pliku** — Raw monitor i wykresy nadal pokazują prawdziwy fiks. Liczba satelitów,
 HDOP i znacznik TIME zostają: są diagnostyczne i nie mówią nic o tym, gdzie
 jesteś.
+
+Od buildu 67 łapie też linię z pozycją uszkodzoną po drodze — bez pierwszych
+znaków albo zlepioną z następną (łącze szeregowe czasem gubi bajt i dwie takie
+linie przeszły kiedyś w całości): każdą liczbę po etykiecie `Lat:` lub `Lon:`,
+także taką, która straciła cyfry całości, liczby tuż przed `Lon:` i `Alt:`,
+etykiety przyklejone do poprzedniej linii, a w linii ze słowami z raportu
+pozycji każdą liczbę o kształcie współrzędnej (od czterech do siedmiu miejsc
+po przecinku). Sprawdza to `tools/redact_test.py` — razem z tym, że nic innego
+w telemetrii się nie zmienia.
 
 Log telemetrii to jest właśnie ten plik, który trafia na forum albo do kogoś,
 kto zaproponował pomiar Twojej płytki, a każda jego sekunda niesie pozycję z

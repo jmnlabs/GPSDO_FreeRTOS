@@ -1,7 +1,7 @@
 /* ======================================================================
  * gpsdo_flash_ring.h  —  wear-levelled ring buffer for live + settings data
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * Purpose
  * -------
@@ -20,7 +20,7 @@
  *   [2]        type   uint8   record type (REC_LIVE / REC_SETTINGS)
  *   [3]        rsv    uint8   reserved, zero
  *   [4..5]     len    uint16  payload length in bytes (<= FR_PAYLOAD)
- *   [4..509]   data   506 bytes payload
+ *   [6..509]   data   504 bytes payload
  *   [510..511] crc16  CRC-16/CCITT over bytes [0..509]
  *
  * A half-written slot (power loss mid-write) fails CRC and is skipped, so the
@@ -41,7 +41,7 @@
 #define FR_PAYLOAD    504u   /* usable data bytes per slot (6-B slot hdr)*/
 #define FR_SLOT_SIZE  512u   /* total slot size (payload + header)        */
 
-/* Record type IDs — see gpsdo_flash_ring_core.h for the canonical definition. */
+/* Record type IDs. Don't reorder: the values are part of the on-flash format. */
 #define REC_LIVE      0u
 #define REC_SETTINGS  1u
 /* Algorithm 13 (Kalman) parameters. Its own record rather than a field in the
@@ -51,7 +51,10 @@
 #define REC_A13       2u
 
 /* Initialise: validate header, scan slots. Call once at boot before the
- * scheduler starts. Returns true if at least one valid slot exists. */
+ * scheduler starts. Returns true if at least one valid slot exists.
+ *
+ * Every call below is safe from any task: once the scheduler runs, write,
+ * read and wipe take the ring's own mutex (build 65). */
 bool     flash_ring_begin(void);
 
 /* Copy the most recent payload of the given type into out (up to maxlen).
@@ -70,10 +73,10 @@ uint32_t flash_ring_erase_count(void);
 uint16_t flash_ring_slot_count(void);
 uint16_t flash_ring_slots_used(void);
 
-/* Physical location of the ring, for diagnostics. Exposed as accessors rather
- * than left to each caller's own constants: the EW command used to print a
- * hardcoded "sector 6, 0x08040000" while the ring had always been in sector 7,
- * so the one place an operator looks was the one place that lied. */
+/* Physical location of the ring, for diagnostics. Exposed as accessors
+ * rather than left to each caller's own constants, so the sector and
+ * address a report prints can never drift from where the ring actually
+ * lives. */
 uint32_t flash_ring_base_addr(void);
 uint8_t  flash_ring_sector_no(void);
 

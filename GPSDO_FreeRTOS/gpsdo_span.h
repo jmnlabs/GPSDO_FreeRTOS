@@ -1,33 +1,39 @@
 /* ======================================================================
  * gpsdo_span.h  —  two EFC spans, two calibrations, one jumper on PB14
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * WHAT THIS IS FOR
  * ----------------
  * A board with the EFC level shifter can run its oscillator over the full
  * control span or over a reduced one. The reduced span divides every
- * voltage-domain error by the reduction ratio — Dan Wiering's prototype
- * measured 4.08:1 in the divider and ~5x overall — but it also narrows how far
- * the loop can reach, and after a cold start the oscillator's retrace can walk
- * a fifth of the reduced window in a day. So the board acquires on the full
- * span and runs on the reduced one, and the jumper (J16 on the V3 sheet) that
- * selects between them gets a second pole to PB14 so the firmware knows which
- * it is looking at.
+ * voltage-domain error by the reduction ratio — about four: a V3
+ * prototype's shifter measured 4.03:1 with a DMM — but it also narrows
+ * how far the loop can reach, and after a cold start the oscillator's
+ * retrace can walk a fifth of the reduced window in a day. So the board
+ * acquires on the full span and runs on the reduced one, and the jumper
+ * (J16 on the V3 sheet) that selects between them gets a second pole to
+ * PB14 so the firmware knows which it is looking at.
  *
  * The two spans have different plants. CT measures K, the hertz per 16-bit
- * LSB, and everything the loops do is scaled by it; on Dan's board it moved
- * 5.0-5.7x between the two positions (8209 LSB/Hz full; 40873 and 46711
- * reduced, two CTs). On the other position's K a loop's gain is off by that
- * factor, and what that costs was simulated rather than assumed — loopsim,
- * the three measured plants, five seeds each, algorithms 10-13, the whole CT
- * coefficient set derived from a K 5x too large or 4.1-5.7x too small (at LTC
- * 100 and at 60): with a fifth of the right gain every loop was 2.2-6.4x worse
- * in phase sd; with 4-5.7x the right gain algorithm 11 was 3.6-6x BETTER, 13 from
- * 0.6x to 2.2x with 100-250 ns peaks, 12 three to seven times worse, and 10
- * fine at 4x but with 500-870 ns excursions in two runs of fifteen at 5.7x.
- * None diverged. Algorithms 3-7 could not be simulated this way (loopsim does
- * not drive them). Hence two calibrations, one per position, and this module
+ * LSB, and everything the loops do is scaled by it; on a V3 board, both
+ * positions measured on one reference, it moved 3.3-3.6x between them (11378
+ * LSB/Hz full; 37113 and 40873 reduced) — less than the divider: the full
+ * path delivers 94.7 % of the DAC's volts (the oscillator's EFC input is
+ * about 785 k against the path's 44 k), which leaves 3.8x, and the rest is
+ * the oscillator's tuning curve, which is not straight, plus CT's own
+ * measurement, good to 3-7 % (do_calibrate_tune). The 5.0-5.7x first
+ * reported mixed two references. On the other position's K a loop's gain is
+ * off by that factor, and what that costs was simulated rather than assumed,
+ * with the 4-5.7x believed at the time — loopsim, the three measured plants,
+ * five seeds each, algorithms 10-13, the whole CT coefficient set derived
+ * from a K 5x too large or 4.1-5.7x too small (at LTC 100 and at 60): with a
+ * fifth of the right gain every loop was 2.2-6.4x worse in phase sd; with
+ * 4-5.7x the right gain algorithm 11 was 3.6-6x BETTER, 13 from 0.6x to 2.2x
+ * with 100-250 ns peaks, 12 three to seven times worse, and 10 fine at 4x
+ * but with 500-870 ns excursions in two runs of fifteen at 5.7x. None
+ * diverged. Algorithms 3-7 could not be simulated this way (loopsim does not
+ * drive them). Hence two calibrations, one per position, and this module
  * keeps the live coefficients on the right one.
  *
  * WHAT HAPPENS WHEN THE JUMPER MOVES (debounced, see span_poll):
@@ -36,7 +42,11 @@
  *     as CT would derive them, and the learned LSB-denominated state (LRN
  *     feed-forward, algo 9 tempco) is rescaled by the ratio of the two K
  *   - the control code is REMAPPED so the EFC pin keeps the voltage it had —
- *     see span_map() for why that needs one pair of codes and not a model
+ *     see span_map() for why that needs one pair of codes and not a model;
+ *     the pair is measured again when the loop was locked before the move
+ *     and locks after it (or CT runs there) — unless the code it was locked
+ *     at is not a null: in holdover, set by hand, or nowhere near where CT
+ *     found 10 MHz in that position (SPAN_NULL_TOL in gpsdo_span.cpp)
  *   - the active loop is restarted exactly as on an algorithm change
  *   - if the new position has never been calibrated while the other has, the
  *     loop keeps running on the other position's coefficients — what the
@@ -72,21 +82,34 @@ typedef struct {
                            0 = that span has no calibration of its own        */
     uint16_t pair[2];   /* two codes, one per span, that put the SAME voltage
                            on the EFC pin; 0 = no such pair known yet         */
+    uint16_t null[2];   /* the code each span had 10 MHz at, as CT found it and
+                           as the pairs measured since have renewed it; 0 = not
+                           known (every record written before build 58)       */
 } span_store_t;
 
 void        span_store_get(span_store_t *out);
 void        span_store_put(const span_store_t *in);
 
-/* Boot: after settings_recall() and live_store_begin(), BEFORE the final DAC
- * write — so a jumper moved while the board was off is remapped before the
- * oscillator ever sees the stale code. No RTOS calls, no flash writes: those
- * are deferred to the first span_poll(). */
+/* Boot: after settings_recall() and live_store_begin(), before the sketch
+ * writes the code the loop starts from — so a jumper moved while the board was
+ * off is remapped before the loop ever runs. The code is remapped from the span
+ * the live store's slot says it is in (live_store_code_span(), build 65), or
+ * from the span record's when the slot does not say. (The recalled code itself is on
+ * the DAC for the few milliseconds the two recalls take: the sketch writes it
+ * straight after settings_recall().) No RTOS calls, no flash writes: those are
+ * deferred to the first span_poll(). */
 void        span_begin(void);
 
 /* Control task, every pass (5 Hz). Debounces PB14 and performs a switch. */
 void        span_poll(void);
 
 uint8_t     span_active(void);                /* SPAN_FULL / SPAN_REDUCED     */
+
+/* Nothing about the span is in flight: no jumper move being debounced or
+ * still to be saved, no anchor waiting for the new span's lock, no CT pending
+ * for this position. The live store saves a code on its own only then (build
+ * 65), so the span its slot names is the span the code is in. Control task. */
+bool        span_settled(void);
 const char *span_name(uint8_t s);             /* "FULL" / "REDUCED"           */
 bool        span_sense_compiled(void);
 
@@ -100,8 +123,14 @@ bool        span_pin_moved_since(uint8_t s);
  * that follows a CT is CT's own (do_calibrate_tune), not this. */
 void        span_ct_done(double k_hz_per_lsb, uint16_t null16);
 
-/* SPAN CLR: forget one position's calibration (and the pair). */
+/* SPAN CLR: forget one position's calibration (its K and null, and the
+ * pair). */
 void        span_clear(uint8_t s);
+
+/* SP, up1/up10, dp1/dp10: the operator has put a code on the DAC. Until the
+ * loop has been seen unlocked since, its code is not taken as a null for the
+ * pair (SPAN_NULL_TOL in gpsdo_span.cpp). Any task. */
+void        span_note_manual(void);
 
 /* Human-readable state, one line per call of putln. For the SPAN command and
  * the DAC report. */

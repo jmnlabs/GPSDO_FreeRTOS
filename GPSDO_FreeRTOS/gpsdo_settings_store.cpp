@@ -1,7 +1,7 @@
 /* ======================================================================
  * gpsdo_settings_store.cpp  —  persistent user settings via the flash ring
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * See gpsdo_settings_store.h for the design. This module snapshots the runtime
  * settings globals into a flat SettingsBlock_t and stores it as a REC_SETTINGS
@@ -10,7 +10,7 @@
  *
  * Atomicity, wear-levelling and power-loss safety all come from the ring
  * (per-slot CRC16, sequence-numbered newest-wins, read-back verify) — this
- * module is pure serialisation.
+ * module is pure serialisation, plus one lock: see s_save_lock.
  * ====================================================================== */
 
 #include "gpsdo_settings_store.h"
@@ -86,6 +86,8 @@ static void put_span(SettingsBlock_t *s)
     s->span_k[1]    = st.k[1];
     s->span_pair[0] = st.pair[0];
     s->span_pair[1] = st.pair[1];
+    s->span_null[0] = st.null[0];
+    s->span_null[1] = st.null[1];
 }
 
 /* ---- snapshot: runtime -> SettingsBlock_t ---- */
@@ -109,6 +111,7 @@ static void snapshot_full(SettingsBlock_t *s)
     s->a12_run_level = g_mlacc_run_level;
     s->a12_thr_src   = g_mlacc_thr_src;
     s->a12_thr_tgt_s = g_mlacc_thr_tgt_s;
+    s->a12_mode      = (uint8_t)(g_mlacc_mode + 1u);
     for (int i = 0; i < 11; i++) s->a12_lim[i] = g_mlacc_lim[i];
     for (int n = 3; n <= 9; n++) {
         int i = n - 3;
@@ -183,11 +186,10 @@ static void apply_full(const SettingsBlock_t *s)
 {
     /* PWM & algo (PWM applied later by the boot sequence after live_store) */
     if (s->pwm != 0) gCtrl.pwm_output = s->pwm;
-    /* 13 is the highest algorithm; the bound has to move with every addition or
-     * the setting saves correctly and is silently dropped on recall, which looks
-     * like the flash ring failing rather than a stale constant here. The 29.08
-     * build shipped with 13 in the dispatcher and 12 here, so LA 13 + ES ALGO
-     * came back as algo 0 after reset - exactly this trap. */
+    /* 13 is the highest algorithm; the bound has to move with every addition
+     * or the setting saves correctly and is silently dropped on recall,
+     * which looks like the flash ring failing rather than a stale constant
+     * here. */
     if (s->algo <= 13u) gCtrl.active_algo = s->algo;
     /* 0 = never written (old record, or a build before this field existed) and
      * means "use the default"; 1..3 are the paths, offset by one so that zero
@@ -210,6 +212,8 @@ static void apply_full(const SettingsBlock_t *s)
         st.k[1]    = s->span_k[1];
         st.pair[0] = s->span_pair[0];
         st.pair[1] = s->span_pair[1];
+        st.null[0] = s->span_null[0];
+        st.null[1] = s->span_null[1];
         span_store_put(&st);
     }
     /* 0 = unset (v5 record, or never configured): leave the compile-time
@@ -233,13 +237,14 @@ static void apply_full(const SettingsBlock_t *s)
     if (s->a12_gain >= 0.0f && s->a12_gain <= 10000.0f) g_mlacc_gain = s->a12_gain;
     if (s->a12_run_level < 11u) g_mlacc_run_level = s->a12_run_level;
     /* 0 is the valid "default limit source" / "use the default target" pair,
-     * which is also what an older block's padding reads back as — so no guard
-     * is needed for the old-record case, only for a corrupted one. (0 used to
-     * mean "follow MG"; it now means the noise formula, so a saved 0 recalls
-     * the better behaviour rather than the old coupling.) */
+     * which is also what an older block's padding reads back as — so no
+     * guard is needed for the old-record case, only for a corrupted one. */
     if (s->a12_thr_src <= 3u) g_mlacc_thr_src = s->a12_thr_src;
     if (s->a12_thr_tgt_s == 0u || s->a12_thr_tgt_s >= (1u << MLACC_LEVELS))
         g_mlacc_thr_tgt_s = s->a12_thr_tgt_s;
+    /* 0 is an older record: keep the default. */
+    if (s->a12_mode == 1u + MLACC_MODE_LEGACY || s->a12_mode == 1u + MLACC_MODE_CALM)
+        g_mlacc_mode = (uint8_t)(s->a12_mode - 1u);
     for (int i = 0; i < 11; i++)
         if (s->a12_lim[i] >= 1 && s->a12_lim[i] <= 500000) g_mlacc_lim[i] = s->a12_lim[i];
 
@@ -340,10 +345,39 @@ static void apply_full(const SettingsBlock_t *s)
     }
 }
 
+/* ONE SETTINGS SAVE AT A TIME (build 65). A partial save reads the newest
+ * settings record, changes its own group and writes the whole record back,
+ * and two tasks save: the CLI (ES and its groups, the auto-saves, SPAN CLR)
+ * and the control task (a span move, CT). Interleaved, the second write was
+ * built on the record the first had not replaced yet, and the first one's
+ * group went back to what it had been. The ring's lock makes each read and
+ * each write whole, not the pair. Created by settings_recall() at boot,
+ * before the scheduler starts, as the ring's own; until the scheduler runs
+ * everything is single-threaded and the lock is skipped. Nothing is taken
+ * under it but the ring's own lock, so the order is always this one, then
+ * the ring's. */
+static SemaphoreHandle_t s_save_lock = NULL;
+
+static bool save_lock(void)
+{
+    if (s_save_lock != NULL && xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) {
+        xSemaphoreTake(s_save_lock, portMAX_DELAY);
+        return true;
+    }
+    return false;
+}
+
+static void save_unlock(bool locked)
+{
+    if (locked) xSemaphoreGive(s_save_lock);
+}
+
 /* ---- public API ---- */
 
 bool settings_recall(void)
 {
+    if (s_save_lock == NULL) s_save_lock = xSemaphoreCreateMutex();
+
     /* Zeroed first: flash_ring_read_newest() copies only as many bytes as the
      * stored record holds, so a record written by a build with a smaller block
      * would leave the tail of this struct as stack garbage. Requiring the exact
@@ -378,8 +412,11 @@ bool settings_recall(void)
 bool settings_save(void)
 {
     SettingsBlock_t s;
+    const bool l = save_lock();
     snapshot_full(&s);
-    return flash_ring_write(REC_SETTINGS, (const uint8_t *)&s, sizeof(s));
+    const bool ok = flash_ring_write(REC_SETTINGS, (const uint8_t *)&s, sizeof(s));
+    save_unlock(l);
+    return ok;
 }
 
 bool settings_save_partial(settings_partial_t which)
@@ -389,6 +426,7 @@ bool settings_save_partial(settings_partial_t which)
      * from runtime (first partial save behaves like a full save). */
     SettingsBlock_t s;
     memset(&s, 0, sizeof(s));
+    const bool l = save_lock();                 /* the read and the write: one save */
     uint16_t n = flash_ring_read_newest(REC_SETTINGS, (uint8_t *)&s, sizeof(s));
     /* A short record is fine — the struct was zeroed, so the fields a shorter
      * layout did not carry seed as "unset" and the write below promotes them
@@ -473,6 +511,7 @@ bool settings_save_partial(settings_partial_t which)
         s.a12_run_level = g_mlacc_run_level;
         s.a12_thr_src   = g_mlacc_thr_src;
         s.a12_thr_tgt_s = g_mlacc_thr_tgt_s;
+        s.a12_mode      = (uint8_t)(g_mlacc_mode + 1u);
         for (int i = 0; i < 11; i++) s.a12_lim[i] = g_mlacc_lim[i];
         break;
 
@@ -493,5 +532,7 @@ bool settings_save_partial(settings_partial_t which)
         break;
     }
 
-    return flash_ring_write(REC_SETTINGS, (const uint8_t *)&s, sizeof(s));
+    const bool ok = flash_ring_write(REC_SETTINGS, (const uint8_t *)&s, sizeof(s));
+    save_unlock(l);
+    return ok;
 }

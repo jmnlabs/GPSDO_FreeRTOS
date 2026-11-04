@@ -1,7 +1,7 @@
 /* ======================================================================
  * gpsdo_flash_ring_core.h  —  hardware-INDEPENDENT ring-buffer logic
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * This is the pure algorithm: signature/version validation, slot packing,
  * CRC, newest-slot selection, wrap handling and garbage detection. It knows
@@ -32,12 +32,14 @@
  *   [2]        type   uint8   record type (REC_LIVE / REC_SETTINGS / ...)
  *   [3]        rsv    uint8   reserved, zero
  *   [4..5]     len    uint16  payload length (<= FR_PAYLOAD)
- *   [4..509]   data   506 bytes payload
+ *   [6..509]   data   504 bytes payload
  *   [510..511] crc16  over [0..509]
  *
  * Record types coexist in one ring (one erase domain): live_store and
  * settings both write slots, distinguished by the type byte. fr_read_newest
- * scans for the newest valid slot of the requested type.
+ * scans for the newest valid slot of the requested type. A wrap carries the
+ * newest slot of every type (0 .. FR_TYPES-1) across the erase (build 65;
+ * before, everything but the slot being written was lost).
  *
  * v1 (32-byte slots, no type byte) is detected via FR_FMT_VER mismatch at
  * fr_begin() and reformatted — old live data do not survive the upgrade.
@@ -52,7 +54,6 @@
 extern "C" {
 #endif
 
-#define FR_MAGIC0 'G'
 /* Magic bumped when the slot layout changed (8-bit length -> 16-bit, so a
  * settings block over 255 B stops truncating). An older ring fails the
  * magic test on begin() and is reformatted, which is the wanted upgrade
@@ -60,15 +61,11 @@ extern "C" {
 #define FR_MAGIC_STR "GPSDOLI2"
 #define FR_FMT_VER   2u
 
-/* Record type IDs — coexist in the same ring. Don't reorder: the values
- * are part of the on-flash format. */
-#define FR_REC_LIVE     0u
-#define FR_REC_SETTINGS 1u
-
 #define FR_HDR_SIZE   16u
 #define FR_SLOT_SIZE  512u
 #define FR_SLOT_HDR   6u     /* per-slot header: seq(2) type(1) rsv(1) len(2) */
 #define FR_PAYLOAD    504u   /* FR_SLOT_SIZE - FR_SLOT_HDR - CRC(2)          */
+#define FR_TYPES      3u     /* record types 0..2 survive a wrap (build 65)  */
 
 /* Caller-supplied flash primitives. All offsets are RELATIVE to the start
  * of the ring sector (0 == first header byte). */
@@ -111,10 +108,17 @@ int  fr_begin_fresh_count(fr_state_t *st, uint16_t prev_ec);
 uint16_t fr_read_newest(fr_state_t *st, uint8_t type,
                         uint8_t *out, uint16_t maxlen);
 
-/* Append payload as the next slot of the given type; wraps (erase) when full.
- * Returns 0 ok. */
+/* Append payload as the next slot of the given type. When full, wraps: the
+ * newest slot of every type is carried across the erase, then this one is
+ * written. Returns 0 ok. Not reentrant, nor is any other call on the same
+ * state while it runs: the caller serialises them (gpsdo_flash_ring.cpp). */
 int  fr_write(fr_state_t *st, uint8_t type,
               const uint8_t *data, uint16_t len);
+
+/* Erase the ring and lay down a fresh header, the erase count carried on
+ * (the CR command). The ring then reads empty. Returns 0 ok. Same caller
+ * rule as fr_write(). */
+int  fr_wipe(fr_state_t *st);
 
 uint32_t fr_erase_count(const fr_state_t *st);
 

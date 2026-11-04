@@ -1,37 +1,37 @@
 /*
  * gpsdo_build.h — which binary is actually running?
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  *
  * WHY THIS EXISTS
  * ---------------
- * The banner printed __DATE__ and __TIME__ and was believed, and on 26.08 it
- * lied: two captures carried the same compile stamp from two different builds.
- * Nobody had done anything wrong. __DATE__ is baked into whichever translation
- * unit mentions it — the sketch — and the Arduino builder does not recompile a
- * translation unit whose sources have not changed. Edit gpsdo_algorithms.cpp,
- * upload, and the sketch's object file is reused with last week's timestamp
- * still inside it. The stamp is honest about when the SKETCH was compiled and
- * says nothing about the rest of the firmware.
+ * __DATE__ and __TIME__ are baked into whichever translation unit mentions
+ * them — the sketch — and the Arduino builder does not recompile a
+ * translation unit whose sources have not changed. Edit
+ * gpsdo_algorithms.cpp, upload, and the sketch's object file is reused with
+ * last week's timestamp still inside it: the banner then reports a compile
+ * that is honest about when the SKETCH was compiled and says nothing about
+ * the rest of the firmware — so two boards running different binaries can
+ * print the same compile stamp.
  *
- * That cost an hour of arguing with a log that was right all along, so the fix
- * is not a better timestamp. It is an identity that CANNOT be stale:
+ * The fix is not a better timestamp. It is an identity that CANNOT be
+ * stale:
  *
  *     a CRC-32 of the flash image, computed at boot from the flash itself.
  *
- * It changes if any byte of any translation unit changed, it cannot be reused
- * from a cache because nothing computes it until the board is running, and two
- * boards flashed with the same binary print the same number. When a log and a
- * memory disagree, this is the one to trust.
+ * It changes if any byte of any translation unit changed, it cannot be
+ * reused from a cache because nothing computes it until the board is
+ * running, and two boards flashed with the same binary print the same
+ * number. When a log and a memory disagree, this is the one to trust.
  *
- * WHAT IT COVERS. Vector table, code, read-only data and the initialisers for
- * .data — that is, every byte the programmer wrote to flash. Not RAM, not the
- * settings ring in sector 7 (deliberately: the same firmware with different
- * settings is the same firmware).
+ * WHAT IT COVERS. Vector table, code, read-only data and the initialisers
+ * for .data — that is, every byte the programmer wrote to flash. Not RAM,
+ * not the settings ring in sector 7 (deliberately: the same firmware with
+ * different settings is the same firmware).
  *
- * COST. About 2.5 ms once, at boot, and 64 bytes of table. The bitwise loop was
- * 10 ms and the 256-entry table was a kilobyte of flash for 7 ms saved; the
- * nibble table is the middle one and nobody will notice it either way.
+ * COST. About 2.5 ms once, at boot, and 64 bytes of table. A bitwise loop
+ * takes 10 ms instead, and a 256-entry table spends a kilobyte of flash to
+ * save 7 ms; the nibble table used here is the middle ground between them.
  */
 #ifndef GPSDO_BUILD_H
 #define GPSDO_BUILD_H

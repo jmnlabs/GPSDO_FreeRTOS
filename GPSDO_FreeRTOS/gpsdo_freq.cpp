@@ -1,14 +1,16 @@
 /**
  * gpsdo_freq.cpp — vFreqRelayTask — frequency measurement processing
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
  * AI:       Claude Opus 5 (Anthropic), GLM-5.3 Max (Z.ai), Qwen3.8-Max
  *
  *
- * Highest-priority task.  Woken by the TIM2 CH3 capture ISR via xPpsQueue.
+ * Highest-priority task.  Woken by the TIM2 CH3 capture ISR via xPpsQueue
+ * (with LTIC, it wakes itself just before the edge it predicts, takes the
+ * detector burst on it, and then finds the ISR's events waiting).
  * Processes PPS events: updates a 20000-sample ring buffer, maintains
  * cumulative sums for 10/100/1000/10000 s averages, and publishes the
  * compact FreqSnap_t display snapshot under xFreqMutex.
@@ -138,7 +140,8 @@ void gpsdo_calc_averages(FreqData_t *f)
 /* -----------------------------------------------------------------------
  * vFreqRelayTask
  * ----------------------------------------------------------------------- */
-extern void ltic_read_fast(void);
+extern bool ltic_edge_sync(void);
+extern void ltic_read_fast(bool synced);
 
 void vFreqRelayTask(void *pvParameters)
 {
@@ -147,30 +150,30 @@ void vFreqRelayTask(void *pvParameters)
 
     for (;;)
     {
-        /* Block until ISR notifies us (2 s safety timeout) */
+#ifdef GPSDO_LTIC
+        /* THE LTIC READ IS TAKEN AT THE EDGE ITSELF. The Kaashoek ramp on C13
+         * charges during the FF pulse (width = phase: about 1 µs at lock,
+         * ~3 µs at the edge of the band); left alone it would leak away in
+         * tens of ms, and the read discharges it. ltic_edge_sync() sleeps
+         * until just before the edge it predicts from the last two, catches
+         * it with interrupts masked and takes the burst on it - on a quiet
+         * chip, from 5 µs after the edge - and returns once the capture
+         * interrupt has run. When it cannot (the first edges, an early or
+         * missed one, LRM 0) it returns false at once, and the burst is taken
+         * below as soon as the interrupt wakes us, as it always was. */
+        const bool synced = ltic_edge_sync();
+#endif
+        /* Block until ISR notifies us (2 s safety timeout); after a burst
+         * taken at the edge its notification is already here. */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
 
 #ifdef GPSDO_LTIC
-        /* FAST LTIC READ — must happen HERE, microseconds after the PPS edge.
-         * The Kaashoek ramp on C13 charges during the FF pulse (width = phase,
-         * ≤ ~2 µs) and its peak then holds under ~1 ms before the ~25 ms
-         * leakage decay pulls it down (confirmed on Marek's scope). The old
-         * path read it from vSensorTask, whose loop ends in vTaskDelay(2000) —
-         * so the sample landed up to 2 s late, always on the fully-discharged
-         * cap (~0.065 V regardless of phase). This task wakes straight from
-         * the PPS ISR, so a short settle here lands squarely on the peak.
-         * The end of the pulse is at most ~2 µs after the edge and the peak
-         * holds ~1 ms, so a ~300 µs settle catches the top for any phase. */
-        {
-            /* Charging STARTS on the GPS-PPS edge (this ISR's trigger) and
-             * ENDS on the picPPS edge — so the ramp PEAK is at the END of the
-             * pulse, [phase] µs after the edge, phase ≤ ~2 µs across the
-             * working window. ltic_read_fast() waits past the widest pulse
-             * (~50 µs, done inside it where Arduino timing is available) then
-             * samples the peak. No discharge: the diode blocks and the ~25 ms
-             * leakage clears the cap before the next 1 Hz pulse. */
-            ltic_read_fast();
-        }
+        /* The reading - from that burst, or from one taken now - before the
+         * frequency work, so it and the receiver's qErr latch belong to this
+         * pulse. Right after it ltic_read_fast() discharges the cap through
+         * PA1 (GPSDO_LTIC_ACTIVE_RESET), so the next pulse charges it from
+         * 0 V whatever the temperature. */
+        ltic_read_fast(synced);
 #endif
 
         /* Drain all events posted while we were computing */

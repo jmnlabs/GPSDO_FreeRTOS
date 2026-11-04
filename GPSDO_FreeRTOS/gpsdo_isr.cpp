@@ -1,7 +1,7 @@
 /**
  * gpsdo_isr.cpp — Interrupt Service Routines
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.62rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -27,6 +27,11 @@
  * These are ONLY accessed from ISR context — no mutex needed.
  * ----------------------------------------------------------------------- */
 static volatile bool  s_overflow_pending = false;
+/* The capture of the last edge, for ltic_read_fast(): it times the detector
+ * burst against this edge, and reading CCR3 there would clear CC3IF. For the
+ * same reason ltic_edge_sync() only polls CC3IF, with interrupts masked, and
+ * leaves clearing it to this ISR, which runs as soon as its burst is done. */
+volatile uint32_t g_pps_ccr3 = 0;
 static volatile uint32_t s_capture_value = 0;
 static volatile bool  s_capture_ready    = false;
 
@@ -61,6 +66,7 @@ extern "C" void Timer2_Capture_ISR(void)
 
     PpsEvent_t evt;
     evt.ccr_value     = TIM2->CCR3;
+    g_pps_ccr3        = evt.ccr_value;
     evt.overflow_flag = s_overflow_pending;
     s_overflow_pending = false;
 

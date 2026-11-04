@@ -1,7 +1,7 @@
 /**
  * gpsdo_control.cpp — vControlTask — OCXO control loop
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.68rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -10,7 +10,8 @@
  *
  * Handles the complete OCXO disciplining lifecycle:
  *   1. Warmup delay (configurable, default 300 s)
- *   2. Two-point linear interpolation calibration
+ *   2. Calibration: two-point (C), three-point Calibrate & Tune (CT), and
+ *      LTIC self-calibration (LC)
  *   3. Periodic PWM DAC adjustment via the selected algorithm
  *   4. ADC readings (Vctl, Vcc, Vdd) with 10-sample moving average
  *   5. picDIV arm sequencing
@@ -39,8 +40,6 @@ float g_altitude_offset = 0.0f;      /* m, added to the GPS altitude at display 
 int16_t g_time_offset_min = 120;
 bool   g_show_local_time = true;
 bool   g_report_paused  = false;
-/* g_tz_mode (gpsdo_tz.cpp) replaced the old g_tz_auto bool — three modes
- * now, not two. */
 bool   g_svin_enabled   = true;    /* true = run survey-in on timing module */
 
 volatile bool     g_calib_active    = false;
@@ -138,6 +137,25 @@ int8_t tz_auto_offset_eu(float lat, float lon,
 static uint32_t s_arm_started_ms  = 0;     /* timestamp of arm LOW edge      */
 static bool     s_arm_active      = false; /* true while Arm pin is held LOW */
 static bool     s_arm_wait_warned = false; /* one-shot no-fix warning        */
+
+/* A GPS REFERENCE IS A FIX AND A PULSE (build 68). Up to build 67 "GPS is
+ * there" meant gGps.pos_valid, for the auto-holdover and for arming the
+ * picDIV alike. But a timing receiver in Time Mode reports a frozen, valid
+ * position (see gpsdo_gps.cpp), and Zsolt Zsiros (ZsZs73) found in his fork
+ * of this firmware that a board could leave holdover on that position with
+ * the signal - and the pulse - still gone. The pulse is what disciplines, so
+ * it is now asked for directly: gUpPpsMs is stamped by uptime_tick_pps() on
+ * every pulse whose interval the OCXO measured as plausible, and by nothing
+ * else (the uptime clock's holdover path does not touch it). */
+#define REF_PPS_FRESH_MS   1500u  /* "this second's pulse": the uptime clock's own test */
+#define REF_PPS_LOST_MS   10000u  /* no pulse for this long = reference lost, as POS_LOST_TIMEOUT_MS */
+#define REF_RECOVER_MS    10000u  /* an unbroken run of pulses this long ends AUTO holdover */
+
+static inline bool ref_pps_within(uint32_t ms)
+{
+    uint32_t last = gUpPpsMs;
+    return last != 0u && (uint32_t)(millis() - last) < ms;
+}
 
 /* Simple integer moving average (N=10) without heap alloc */
 typedef struct {
@@ -262,12 +280,10 @@ static void do_calibration(void)
      * GPS.  Arm manually (AP command) once the loop reports lock.        */
     OUT_SERIAL.println("Calibration done");
 #ifdef GPSDO_PICDIV
-    /* The trend was named here and the name was wrong for everyone this tip is
-     * aimed at: 'hit' is emitted only by algorithms 0 and 3-8, never by 10-13,
-     * and a builder who has just run CT is running one of the latter. Whoever
-     * followed the instruction literally waited for a word that could not
-     * appear. The lock indication belongs to the display and to CS, which know
-     * per-algorithm what it means; this line only has to say WHEN. */
+    /* 'hit' is emitted only by algorithms 0 and 3-8, never by 10-13, so a generic
+     * lock message would misdescribe some algorithms. The lock indication belongs
+     * to the display and to CS, which know per-algorithm what it means; this
+     * line only has to say WHEN to arm. */
     OUT_SERIAL.println("Tip: arm picDIV (AP) once the loop reports lock");
 #endif
 }
@@ -275,12 +291,50 @@ static void do_calibration(void)
 /* ======================================================================
  * CT helpers — one three-point measurement, and the shared failure exit.
  *
- * Factored out of do_calibrate_tune when the second pass appeared: the
- * measurement itself is identical for both passes, only the code spread
- * differs, and a second copy of the settle/average/fit block would be the
- * kind of duplicate that gets fixed in one place and not the other.
+ * Both CT passes need the same settle/average/fit measurement, so it
+ * lives here once instead of as two copies that could drift out of sync.
  * ====================================================================== */
-static bool ct_measure3(uint16_t pa, uint16_t pb, uint16_t pc,
+/* THE SECOND PASS READS 100 s, NOT 10 s.
+ *
+ * avg10 is the TIM2 count over ten seconds divided by ten: 0.1 Hz steps, and
+ * as the difference of two captures it carries a triangular error of up to one
+ * step — sigma about 0.04 Hz. Over pass 2's 0.8 Hz that is some 7 % of K from
+ * the counter alone, and the K it produced came in steps: a REDUCED-position
+ * board read 0.8 or 0.9 Hz across its sweep (40873, 36331 and 37113 LSB/Hz)
+ * and nothing in between. The 100 s mean has 0.01 Hz steps, for about
+ * five more minutes on a board that needs the second pass at all. The window
+ * is taken whole after the settle: the averages are flushed once the output
+ * has settled, and the mean is read when 100 fresh seconds are in — a window
+ * that reached back past the step would average two codes. */
+#define CT_FINE_SECS   100u  /* the averaging window of a pass-2 point [s]    */
+#define CT_FINE_SLACK   20u  /* the flush's two edges + a few missed PPS [s]  */
+
+/* Pass 2's reading of one point, the output already settled: see
+ * CT_FINE_SECS. False if 100 s of 1PPS did not arrive in time. */
+static bool ct_read_fine(uint16_t pwm, double *f)
+{
+    if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    gFreq.flush_requested = true;
+    xSemaphoreGive(xFreqMutex);
+    for (uint16_t s = 0; s < CT_FINE_SECS + CT_FINE_SLACK; s++) {
+        wait_secs_pwm(1, pwm);
+        bool done = false;
+        if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            /* flush_requested clears when the relay task has flushed, and
+             * full100 comes back only with the hundredth sample after that */
+            if (!gFreq.flush_requested && gFreq.full100) {
+                gpsdo_calc_averages(&gFreq);
+                *f   = gFreq.avg100;
+                done = true;
+            }
+            xSemaphoreGive(xFreqMutex);
+        }
+        if (done) return true;
+    }
+    return false;
+}
+
+static bool ct_measure3(uint16_t pa, uint16_t pb, uint16_t pc, bool fine,
                         double *K, double *b)
 {
     const uint16_t pwm[3] = { pa, pb, pc };
@@ -289,10 +343,15 @@ static bool ct_measure3(uint16_t pa, uint16_t pb, uint16_t pc,
         gpsdo_dac_write16(pwm[i]);
         OUT_SERIAL.print("CT: PWM="); OUT_SERIAL.print(pwm[i]);
         OUT_SERIAL.print(" settle "); OUT_SERIAL.print(OCXO_CALIB_SECS);
-        OUT_SERIAL.println("s");
+        OUT_SERIAL.println(fine ? "s, then a 100 s average" : "s");
         wait_secs_pwm(OCXO_CALIB_SECS, pwm[i]);
         f[i] = 0.0;
-        if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (fine) {
+            if (!ct_read_fine(pwm[i], &f[i])) {
+                OUT_SERIAL.println("CT: ERROR no 100 s average - 1PPS missing? Params unchanged.");
+                return false;
+            }
+        } else if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             gpsdo_calc_averages(&gFreq);
             f[i] = gFreq.avg10;
             xSemaphoreGive(xFreqMutex);
@@ -309,7 +368,10 @@ static bool ct_measure3(uint16_t pa, uint16_t pb, uint16_t pc,
         sxy += (double)pwm[i] * f[i];
     }
     double denom = 3.0 * sxx - sx * sx;
-    if (denom == 0.0) return false;
+    if (denom == 0.0) {
+        OUT_SERIAL.println("CT: ERROR singular fit — aborting, params unchanged");
+        return false;
+    }
     *K = (3.0 * sxy - sx * sy) / denom;        /* Hz/LSB */
     *b = (sy - (*K) * sx) / 3.0;               /* intercept */
     return true;
@@ -317,10 +379,27 @@ static bool ct_measure3(uint16_t pa, uint16_t pb, uint16_t pc,
 
 /* Every CT failure exits the same way: put the loop's code back, drop the
  * event bit, leave the coefficients untouched. The message is the caller's
- * to print — it knows what went wrong, this only knows how to leave. */
-static void ct_fail(void)
+ * to print — it knows what went wrong, this only knows how to leave.
+ *
+ * THE LOOP'S CODE is the one CT found on the pin when it started, passed
+ * in — not gCtrl.pwm_output, which wait_secs_pwm() keeps at the sweep point
+ * for the displays; restoring that instead would leave the oscillator on
+ * its last sweep code rather than where the loop had it. The averages
+ * describe the sweep, so they go too, as after a CT that succeeds; the
+ * loop's own state still describes the restored code, so it is not
+ * restarted. */
+static void ct_fail(double prev16)
 {
-    gpsdo_dac_write16(gCtrl.pwm_output);
+    gpsdo_dac_write16f(prev16);
+    if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gCtrl.pwm_output = gpsdo_dac_last16();
+        xSemaphoreGive(xCtrlMutex);
+    }
+    if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gFreq.flush_requested = true;
+        xSemaphoreGive(xFreqMutex);
+    }
+    health_reset();   /* the restore is a jump, not a correction */
     xEventGroupClearBits(xSysEvents, EVT_NEED_TUNE);
     g_calib_active = false;
     g_calib_kind   = CALIB_NONE;
@@ -333,19 +412,21 @@ static void ct_fail(void)
  * Extended calibration that BOTH centres the PWM and derives the PID
  * coefficients for all algorithms from the measured plant gain.
  *
- * Procedure (deterministic, ~3 × OCXO_CALIB_SECS, doubled on gentle boards):
+ * Procedure (deterministic: ~3 × OCXO_CALIB_SECS, and about eight minutes
+ * more on gentle boards):
  *   1. Drive PWM to three points (1.5 / 2.0 / 2.5 V), settle, measure f.
  *   2. Least-squares slope → K [Hz/LSB] (the plant gain), plus the PWM
  *      that yields exactly 10 MHz.
  *   2b. If K is gentle (span-reduced EFC, external DAC with a divider),
- *      RE-MEASURE over a wider code spread centred on the fitted 10 MHz
- *      code: the fixed pass-1 spread is 20 480 LSB, which at e.g.
- *      20 µHz/LSB swings the oscillator only 0.4 Hz — a small signal for
- *      the GPS-referenced averages to slope-fit, and the fit scattered
- *      10-50% high on exactly such a board (Dan Wiering's V2, measured
- *      against a 6.5-digit DMM and a counter). The second pass targets
- *      ~0.8 Hz of swing, never narrower than pass 1, and never closer
- *      than CT_RAIL_GUARD to either rail. Its K replaces pass 1's.
+ *      RE-MEASURE over a code spread centred on the fitted 10 MHz code:
+ *      the fixed pass-1 spread is 20 480 LSB, which at e.g. 20 µHz/LSB
+ *      swings the oscillator only 0.4 Hz — a small signal for the
+ *      GPS-referenced averages to slope-fit, and the fit scattered 10-50%
+ *      high on exactly such a board (a span-reduced V2 board, measured
+ *      against a 6.5-digit DMM and a counter). The second pass swings the
+ *      oscillator by CT_TARGET_SWING whatever the span, reads each point as
+ *      a 100 s mean (CT_FINE_SECS), and stays CT_RAIL_GUARD clear of either
+ *      rail. Its K replaces pass 1's.
  *   3. Compute coefficients from K:
  *        PLL (4,5,7): Kp = 0.40/K on frequency; Kd=2.0, Ki=0.02 on phase
  *        FLL (3,6):   Kp = 0.35/K; Ki = Kp/300; Kd = Kp·73
@@ -364,22 +445,35 @@ static void do_calibrate_tune(void)
      * where a coarser plant (the original board, 0.32 mHz/LSB) swings 6.6 Hz
      * and never needs the second pass at all. */
     const double CT_SMALL_K       = 1.2e-4;
-    const double CT_TARGET_SWING  = 0.80;   /* Hz over the pass-2 spread */
+    /* Hz over the pass-2 spread, whatever the span: a spread fixed in LSB (as
+     * pass 1 uses) does not stay proportional to the plant. On the FULL
+     * position of a V3 board (K 1/11378 Hz/LSB) pass 1's 20 480 LSB is 1.8 Hz —
+     * 1.3 V of EFC — against 0.8 Hz and 0.5 V on REDUCED: two different
+     * stretches of an oscillator curve that need not be straight (1.41 Hz/V
+     * measured over the one, 1.74 over the other, CT's resolution included),
+     * and a K ratio that says as much about the curve as about the shifter.
+     * A constant swing in hertz is a constant stretch of the curve around the
+     * null, so both positions are measured on the same one. An LSB-based
+     * spread would also need a floor for avg10's 0.1 Hz steps; pass 2 reads
+     * CT_FINE_SECS (100 s) averages instead, so no such floor is needed. Pass
+     * 2 runs only below CT_SMALL_K, so the spread is at least 0.8 / 1.2e-4 =
+     * 6 667 LSB. */
+    const double CT_TARGET_SWING  = 0.80;
     /* HOW FAR THE PASS-2 SWEEP MUST STAY OFF EITHER RAIL.
      *
-     * The bottom of this sweep always had a 1000 LSB guard; the top had none,
-     * because the high clamp stopped the centre from going PAST 65535 - half
-     * rather than from reaching it. On Dan Wiering's board (2026-09-10) the
-     * fitted null landed at 45 577 with half = 20 654, the centre was pulled
-     * down to exactly 65535 - half, and the top measurement point sat on full
-     * code. It measured cleanly there — the three points were linear to the
-     * digit — but a converter's output buffer is at its least linear against
-     * its own rail, and a calibration that defines the plant gain is the last
-     * place to spend the last LSB of range. Same guard at both ends now.
+     * A bottom-only guard (no top guard, relying on the high clamp merely
+     * stopping the centre from going PAST 65535 - half) still lets the top
+     * measurement point land on full code: on one board the fitted null landed
+     * at 45 577 with half = 20 654, pulling the centre down to exactly
+     * 65535 - half, with the top point sitting on full code. It measured
+     * cleanly there — the three points were linear to the digit — but a
+     * converter's output buffer is at its least linear against its own rail,
+     * and a calibration that defines the plant gain is the last place to spend
+     * the last LSB of range. Same guard at both ends closes that gap.
      *
      * Costs nothing in swing: the span is CT_TARGET_SWING / K either way, and
      * only the CENTRING moves. It can cost some centring — on that board the
-     * sweep would have run 23 227 / 43 881 / 64 535 with the null 1699 LSB
+     * sweep would then run 23 227 / 43 881 / 64 535 with the null 1699 LSB
      * above centre — which a three-point least-squares slope does not care
      * about as long as the plant is linear across the range, and if it is not
      * linear across the range then the slope was never the whole story anyway.
@@ -408,23 +502,24 @@ static void do_calibrate_tune(void)
     OUT_SERIAL.println("CT: calibrate + auto-tune started (3 points)");
     g_calib_active = true;
     g_calib_kind   = CALIB_CT;
+    /* Where the loop had the pin, for a CT that fails (ct_fail). */
+    const double ct_prev = gpsdo_dac_last16f();
     /* The span the measurement belongs to. The control task does not poll the
      * jumper while CT runs, so a move during it is only noticed afterwards —
      * which is fine for the switch and fatal for the fit: three points taken
      * across two plants is a slope of neither. Checked after each pass. */
     const uint8_t ct_span = span_active();
-    /* CT was the one procedure that never seeded this, so the status bar sat
-     * at "Tune 0s" for the whole run while C and LC counted down properly.
-     * Three PWM points, each settling for OCXO_CALIB_SECS, plus a few seconds
-     * for the averaging and the arithmetic at the end. Topped up below if
-     * the gentle-plant second pass runs. */
+    /* Seeds the countdown the same way C and LC do; without it the status bar
+     * would sit at "Tune 0s" for the whole run. Three PWM points, each settling
+     * for OCXO_CALIB_SECS, plus a few seconds for the averaging and the
+     * arithmetic at the end. Topped up below if the gentle-plant second pass
+     * runs. */
     g_calib_remaining = 3u * OCXO_CALIB_SECS + 5u;
 
-    /* ---- pass 1: the fixed historical spread, a coarse K ---- */
+    /* ---- pass 1: the fixed spread, a coarse K ---- */
     double K, b;
-    if (!ct_measure3(PWM_A, PWM_B, PWM_C, &K, &b)) {
-        OUT_SERIAL.println("CT: ERROR singular fit — aborting, params unchanged");
-        ct_fail();
+    if (!ct_measure3(PWM_A, PWM_B, PWM_C, false, &K, &b)) {
+        ct_fail(ct_prev);
         return;
     }
 
@@ -436,13 +531,13 @@ static void do_calibrate_tune(void)
         OUT_SERIAL.print("CT: ERROR K out of range (");
         OUT_SERIAL.print(K * 1000.0, 4);
         OUT_SERIAL.println(" mHz/LSB) — check GPS fix. Params unchanged.");
-        ct_fail();
+        ct_fail(ct_prev);
         return;
     }
 
     if (span_pin_moved_since(ct_span)) {
         OUT_SERIAL.println("CT: the span jumper moved during the measurement - discarded, params unchanged");
-        ct_fail();
+        ct_fail(ct_prev);
         return;
     }
 
@@ -451,10 +546,9 @@ static void do_calibrate_tune(void)
     if (v < 1)     v = 1;
     if (v > 65535) v = 65535;
 
-    /* ---- pass 2: gentle plant — same three points, wider and centred ---- */
+    /* ---- pass 2: gentle plant — 0.8 Hz of swing, centred, 100 s means ---- */
     if (K < CT_SMALL_K) {
         double span = CT_TARGET_SWING / K;
-        if (span < 20480.0) span = 20480.0;   /* never narrower than pass 1 */
         if (span > 60000.0) span = 60000.0;   /* stay off both rails */
         int32_t half = (int32_t)(span * 0.5);
         int32_t ctr  = v;
@@ -462,12 +556,12 @@ static void do_calibrate_tune(void)
         int32_t hi_c = 65535 - CT_RAIL_GUARD - half;
         if (ctr < lo_c) ctr = lo_c;
         if (ctr > hi_c) ctr = hi_c;
-        g_calib_remaining += 3u * OCXO_CALIB_SECS;
-        OUT_SERIAL.print("CT: K small — second pass, wider span (");
+        /* settle, then the flush's two edges and 100 fresh seconds */
+        g_calib_remaining += 3u * (OCXO_CALIB_SECS + CT_FINE_SECS + 3u);
+        OUT_SERIAL.print("CT: K small — second pass, 100 s averages (");
         OUT_SERIAL.print((int32_t)(ctr + half) - (int32_t)(ctr - half));
-        /* Say which of the two it is. The old line claimed the sweep was
-         * centred on the fitted code even when the rail clamp had just moved
-         * it, which is the one case where knowing matters. */
+        /* Say which of the two it is: whether the rail clamp moved the sweep
+         * off the fitted centre is the one case where knowing matters. */
         if (ctr != v) {
             OUT_SERIAL.print(" LSB, centre ");
             OUT_SERIAL.print(ctr);
@@ -478,9 +572,8 @@ static void do_calibrate_tune(void)
             OUT_SERIAL.println(" LSB, centred on the fitted 10 MHz code)");
         }
         if (!ct_measure3((uint16_t)(ctr - half), (uint16_t)ctr,
-                         (uint16_t)(ctr + half), &K, &b)) {
-            OUT_SERIAL.println("CT: ERROR singular fit — aborting, params unchanged");
-            ct_fail();
+                         (uint16_t)(ctr + half), true, &K, &b)) {
+            ct_fail(ct_prev);
             return;
         }
         /* the null is refit from the pass-2 line, which is the accurate one */
@@ -492,26 +585,25 @@ static void do_calibrate_tune(void)
 
     if (span_pin_moved_since(ct_span)) {
         OUT_SERIAL.println("CT: the span jumper moved during the measurement - discarded, params unchanged");
-        ct_fail();
+        ct_fail(ct_prev);
         return;
     }
 
     /* FINAL sanity gate, on the K that will actually tune the loop. The
      * lower bound must accommodate NARROW-span EFC oscillators, which are
      * DESIRABLE — a smaller Hz/LSB means finer tuning resolution and is one
-     * route to E-12 stability. Dan Wiering's build measured 0.048 mHz/LSB
-     * (K = 4.8e-5) with a ~1.05 V EFC span, well below the old 0.1 mHz/LSB
-     * floor, and was wrongly rejected. Floor at 1e-5 (0.01 mHz/LSB ≈ 0.65 Hz
-     * full span): defensible NOW because the coarse gate above catches the
-     * no-signal garbage before any K is believed, and the second pass
-     * measures gentle plants with a real signal instead of a scatter — the
-     * two things this floor used to have to do alone. Upper 2e-3 kept for
-     * wide/non-linear parts. */
+     * route to E-12 stability. One measured board reached 0.048 mHz/LSB
+     * (K = 4.8e-5) with a ~1.05 V EFC span, which a coarser 0.1 mHz/LSB floor
+     * would reject. Floor at 1e-5 (0.01 mHz/LSB ≈ 0.65 Hz full span): the
+     * coarse gate above catches no-signal garbage before any K is believed,
+     * and the second pass measures gentle plants with a real signal instead
+     * of a scatter, so this floor need not also guard against noise on its
+     * own. Upper 2e-3 kept for wide/non-linear parts. */
     if (K < 1e-5 || K > 2e-3) {
         OUT_SERIAL.print("CT: ERROR K out of range (");
         OUT_SERIAL.print(K * 1000.0, 4);
         OUT_SERIAL.println(" mHz/LSB) — check GPS fix / EFC span. Params unchanged.");
-        ct_fail();
+        ct_fail(ct_prev);
         return;
     }
 
@@ -519,7 +611,7 @@ static void do_calibrate_tune(void)
     OUT_SERIAL.print(" mHz/LSB  PWM(10MHz)="); OUT_SERIAL.println(new_pwm);
 
     /* ---- derive coefficients from K ----
-     * In algo_coeffs_from_k() now, because a move of the span jumper has to
+     * In algo_coeffs_from_k(), because a move of the span jumper has to
      * derive the same set from a stored K. The two locals are for the report
      * below, which is unchanged. */
     algo_coeffs_from_k(K);
@@ -554,19 +646,18 @@ static void do_calibrate_tune(void)
      * algorithm 11's integrator, algorithm 10's absolute target — which
      * still holds the code from before the sweep. Left alone, the loop's
      * first steps after CT's 100 s flush steer back toward that old code and
-     * undo the centring. spansim measured it with a CT that succeeds while
-     * the loop has been running (the mislabel scenario, third attempt):
-     * without this, twenty minutes on the code sat 42 LSB off CT's null at
-     * 1.0e-10, and the span pair learned from there put the next jumper move
-     * 1.1e-10 off; with it, 1.2e-11 and 3.7e-12. In a build without span
-     * sensing, a CT right after the jumper moved went back toward the old
-     * code, 3.1e-8 off at worst; with the restart, 5.0e-9. The restart is the
-     * one an algorithm change does, and it re-seeds every loop from the live
-     * code, which is CT's null.
+     * undo the centring. Simulated with a CT that succeeds while the loop has
+     * been running: without this, twenty minutes on the code sat 42 LSB off
+     * CT's null at 1.0e-10, and the span pair learned from there put the next
+     * jumper move 1.1e-10 off; with it, 1.2e-11 and 3.7e-12. In a build
+     * without span sensing, a CT right after the jumper moved went back
+     * toward the old code, 3.1e-8 off at worst; with the restart, 5.0e-9. The
+     * restart is the one an algorithm change does, and it re-seeds every loop
+     * from the live code, which is CT's null.
      *
-     * Here, not in span_ct_done() where build 55 first put it: nothing about
-     * this depends on the span jumper, and there a build without
-     * GPSDO_SPAN_SENSE compiled it away and kept the defect. */
+     * Here, not in span_ct_done(): nothing about this depends on the span
+     * jumper, and a build without GPSDO_SPAN_SENSE would compile that call
+     * away and keep the defect. */
     algo_request_restart();
 
     xEventGroupClearBits(xSysEvents, EVT_NEED_TUNE);
@@ -614,6 +705,44 @@ static void do_calibrate_tune(void)
  * fills the calibration fields (ns_per_volt, zero_offset, range_ns); the
  * phase-discipline loop (algo 10) then uses them.
  * ====================================================================== */
+
+/* EVERY LC EXIT PUTS THE LOOP'S CODE BACK - on the pin AND in
+ * gCtrl.pwm_output, which wait_secs_pwm() keeps at the sweep code for the
+ * displays - as ct_fail() does for CT (build 65). Up to build 64 only the pin
+ * was restored, so the loop's next step started from the sweep code: the
+ * loop steps from gCtrl.pwm_output, and the fine path from the pin only while
+ * the two agree to an LSB. That is ~190 LSB off at 6 ns/s on a FULL span, and
+ * the live store's save after a passed LC kept it as the operating point. */
+static void lc_restore(double prev16)
+{
+    gpsdo_dac_write16f(prev16);
+    if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gCtrl.pwm_output = gpsdo_dac_last16();
+        xSemaphoreGive(xCtrlMutex);
+    }
+}
+
+/* How long LC waits, after one arm, for the sweep to carry the phase into the
+ * detector's band (build 68; see "ARM ONCE" below). 120 s is ~720 ns of sweep
+ * at the target 6 ns/s and ~480 at the slowest accepted 4 ns/s. */
+#define LC_RAMP_WAIT_S 120u
+
+#ifdef GPSDO_PICDIV
+/* The GPS reference as LC's arms need it (build 68): a fix AND this second's
+ * pulse, as the control task asks before its own arms (REF_PPS_FRESH_MS).
+ * The divider syncs to the pulse, not to the position: armed on a valid but
+ * frozen Time Mode position with no pulse, it would stop and stay stopped. */
+static bool lc_ref_ok(void)
+{
+    bool fix = false;
+    if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        fix = gGps.pos_valid;
+        xSemaphoreGive(xGpsMutex);
+    }
+    return fix && ref_pps_within(REF_PPS_FRESH_MS);
+}
+#endif
+
 static void do_ltic_calibrate(void)
 {
     OUT_SERIAL.println("LC: LTIC self-calibration started");
@@ -630,19 +759,19 @@ static void do_ltic_calibrate(void)
         saved_pwm = gCtrl.pwm_output;
         xSemaphoreGive(xCtrlMutex);
     }
+    /* ...and the code on the pin, fraction included, for lc_restore(). */
+    const double lc_prev = gpsdo_dac_last16f();
 
     /* ---- Prep phase: arm picDIV, then wait for the phase to settle near the
      * middle of the detector window before ramping. This removes the manual
-     * "LA 7 / AP / wait for centre" dance the operator used to do by hand:
-     * a bad start (phase against a rail) was the main cause of poor cals. ---- */
+     * "LA 7 / AP / wait for centre" steps an operator would otherwise do by
+     * hand: a bad start (phase against a rail) is the main cause of poor
+     * cals. ---- */
 #ifdef GPSDO_PICDIV
     {
-        /* Only arm if we have a GPS fix (picDIV syncs to 1PPS). */
-        bool fix_ok = false;
-        if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-            fix_ok = gGps.pos_valid;
-            xSemaphoreGive(xGpsMutex);
-        }
+        /* Only arm with a GPS reference (picDIV syncs to 1PPS): a fix and
+         * this second's pulse since build 68, see lc_ref_ok(). */
+        bool fix_ok = lc_ref_ok();
         if (fix_ok) {
             OUT_SERIAL.println("LC: arming picDIV (sync to 1PPS)...");
             digitalWrite(PIN_PICDIV_ARM, LOW);          /* stop divider        */
@@ -650,7 +779,7 @@ static void do_ltic_calibrate(void)
             digitalWrite(PIN_PICDIV_ARM, HIGH);         /* release: syncs on 1PPS */
             wait_secs_pwm(2, saved_pwm);                /* let output resume   */
         } else {
-            OUT_SERIAL.println("LC: no GPS fix — skipping picDIV arm (phase may be unsynced)");
+            OUT_SERIAL.println("LC: no GPS fix or no 1PPS — skipping picDIV arm (phase may be unsynced)");
         }
     }
 #endif
@@ -658,16 +787,14 @@ static void do_ltic_calibrate(void)
     /* Wait (up to ~60 s) for the phase voltage to land inside the central band
      * of the detector, so the ramp starts from a clean mid-range point and can
      * sweep both ways before wrapping. The target band is centre ± ¼ range. */
-    /* SINGLE-PASS, ZERO-DEAD-TIME sweep. The old sequence burned ~60 s
-     * between commanding the ramp and the first sample (settle 30 s + 10 s
-     * + a 20 s d1/d2 read) — at the ~9 ns/s that a fixed offset can land on
-     * (it adds to whatever df the saved PWM already has), the phase flew
-     * through the entire band (0.061→2.62 V) BEFORE sampling began, so the
-     * fit saw only saturation. Now: re-arm picDIV (parks the phase at the
+    /* SINGLE-PASS, ZERO-DEAD-TIME sweep. A sequence that settles before
+     * sampling (settle 30 s + 10 s + a 20 s d1/d2 read, ~60 s of dead time)
+     * lets the phase fly through the entire band (0.061→2.62 V) before
+     * sampling begins, at the ~9 ns/s a fixed offset can land on (it adds to
+     * whatever df the saved PWM already has) — the fit then sees only
+     * saturation. Instead: re-arm picDIV (parks the phase at the
      * deterministic bottom), command the offset, and start sampling within
-     * ~3 s. The exact rate is read AFTER the pass from clean avg100; if
-     * saturation arrives before 10 fit points, halve the offset, re-arm and
-     * retry once. */
+     * ~3 s. The exact rate is read AFTER the pass from clean avg100. */
     uint16_t ramp_pwm = saved_pwm;
     double lsbhz0 = (g_pid[7].Kp > 100.0) ? ((double)g_pid[7].Kp / 0.40) : 3000.0;
     /* commanded fallback offset: NEGATIVE, matching the sweep direction
@@ -689,8 +816,8 @@ static void do_ltic_calibrate(void)
         /* --- Establish a KNOWN sweep rate, by measurement, not by faith ---
          *
          * The phase drifts at (f_ocxo − f_gps)/f_gps, so the sweep rate is
-         * fixed by the OCXO's offset from 10 MHz at the ramp PWM. Two earlier
-         * attempts got this wrong:
+         * fixed by the OCXO's offset from 10 MHz at the ramp PWM. Two more direct
+         * approaches get this wrong:
          *
          *  - trusting cmd_off/lsb_per_hz: lsb_per_hz comes from the algo-7
          *    PID and is a few percent off, so ns/V (∝ rate) drifted with it;
@@ -708,15 +835,6 @@ static void do_ltic_calibrate(void)
          * rate near the target and verify with a second constant-PWM window.
          * The phase wraps freely during these windows; we ignore it and
          * re-arm picDIV before the sampling pass. */
-        /* SLOW sweep. The phase voltage publishes in steps every ~4 s
-         * (oversample+median), and a 10 MHz-clocked flip-flop detector has a
-         * 100 ns unambiguous window. At the old 4 ns/s a sawtooth tooth
-         * lasted only ~25 s ≈ 6 publications — every wrap fell inside a
-         * median window, smeared into intermediate values, and the fit
-         * averaged across many teeth (observed ns/V: 34 with a clean wrap
-         * vs 104/421/441/531 without — random multiples of the truth).
-         * 1.5 ns/s stretches one tooth to ~66 s ≈ 16 publications: the fit
-         * has real shape and a wrap is a full-height negative step. */
         /* The 1k/1n ramp spans ~0–2000 ns before saturating, and avg100
          * quantises at 1 ns/s — so the sweep must be fast enough that the
          * quantisation is a small fraction of the rate (6 ns/s → ±8 %), yet
@@ -737,9 +855,9 @@ static void do_ltic_calibrate(void)
 
         /* Six tries, not three. The steer is proportional, so the rate closes on
          * the target geometrically — an observed run went -244, -57, -16 ns/s and
-         * was one step from the band when the old three-iteration limit stopped
-         * it. Each try costs 110 s, but a calibration that gives up just short of
-         * success costs the whole run. */
+         * would have been one step short of the band at three iterations. Each
+         * try costs 110 s, but a calibration that gives up just short of success
+         * costs the whole run. */
         for (int iter = 0; iter < 6; iter++) {
             OUT_SERIAL.print("LC: measuring phase rate at PWM ");
             OUT_SERIAL.print((int)meas_pwm);
@@ -786,15 +904,15 @@ static void do_ltic_calibrate(void)
             /* Ran out of tries but we DID measure, and meas_pwm already holds the
              * steered estimate for the target rate. Use it.
              *
-             * The old code fell back to saved_pwm + cmd_off here, which assumes
-             * saved_pwm sits at the lock point (rate ~0) so a fixed LSB offset
-             * buys a known rate. That assumption fails whenever LC is run before
-             * the oscillator is anywhere near 10 MHz: an observed run had
-             * saved_pwm at -244 ns/s, converged the sweep to -16 ns/s at PWM
-             * 40341, then threw that away and sampled at 32967 — back at -244
-             * ns/s, where the phase crosses the whole detector window between
-             * publications. Every arm attempt then landed on the rail and the
-             * calibration aborted. Keeping the steered PWM preserves the work. */
+             * Falling back to saved_pwm + cmd_off here instead assumes saved_pwm sits
+             * at the lock point (rate ~0) so a fixed LSB offset buys a known rate.
+             * That assumption fails whenever LC is run before the oscillator is
+             * anywhere near 10 MHz: an observed run had saved_pwm at -244 ns/s,
+             * converged the sweep to -16 ns/s at PWM 40341, then threw that away and
+             * sampled at 32967 — back at -244 ns/s, where the phase crosses the whole
+             * detector window between publications. Every arm attempt then landed on
+             * the rail and the calibration aborted. Keeping the steered PWM preserves
+             * the work. */
             ramp_pwm   = meas_pwm;
             phase_rate = RATE_TARGET;      /* steered for, not verified */
             OUT_SERIAL.print("LC: rate not verified in band (last ");
@@ -817,32 +935,69 @@ static void do_ltic_calibrate(void)
         OUT_SERIAL.println(rate_measured ? " ns/s (measured)" : " ns/s (commanded)");
         gpsdo_dac_write16(ramp_pwm);
 #ifdef GPSDO_PICDIV
-        /* ARM LOTTERY. The picDIV sync parks the phase within ~±100 ns of the
-         * GPS edge, but on a RANDOM side (edge race at sync). The flip-flop
-         * pair only produces a pulse for a POSITIVE interval (GPS→picPPS):
-         * land on the wrong side and the ramp reads either the bottom noise
-         * (~0.06 V) or, one step later, a full-second pulse (3.28 V rail) —
-         * both seen on air. Reversing the sweep does NOT help (it walks
-         * further out); re-rolling the dice does. So: arm, look where we
-         * landed, and re-arm until the ramp starts inside its live band
-         * (~50 % per try; 6 tries ≈ 98 %). The sweep itself stays at the
-         * MEASURED −6 ns/s, which grows the interval up the ramp. */
+        /* ARM ONCE, THEN LET THE SWEEP CARRY THE PHASE IN (build 68).
+         *
+         * The flip-flop pair only produces a pulse for a POSITIVE interval
+         * (GPS→picPPS): land on the wrong side and the ramp reads either the
+         * bottom noise (~0.06 V) or, one step later, a full-second pulse
+         * (3.28 V rail) — both seen on air. Up to build 67 this re-armed up
+         * to six times until a landing fell inside the live band, on the
+         * belief that a sync parks the phase on a RANDOM side of the GPS edge
+         * (~50 % per try). It does not: the divider's edge sits on its own
+         * instruction clock and a re-arm lands where the last one did, in
+         * whole steps (build 66's board model, tools/loopsim LOOPSIM_LANDQ;
+         * on the author's board ten landings within -830..-375 ns of the
+         * zero, all in the band). A board whose landings sit below the band
+         * failed all six tries alike, and each check came 5-6 s after the
+         * release: 30-36 ns of sweep at 6 ns/s, against ~39 ns for the 0.10 V
+         * floor (tau 1.14 us, Vsat 2.97 V), so even a landing right at the
+         * edge failed every time.
+         *
+         * Zsolt Zsiros (ZsZs73) replaced the tries with a wait in his fork of
+         * this firmware, and LC passes on his board. The sweep GROWS the
+         * interval (RATE_TARGET above), so a landing below the band - on the
+         * wrong side of the edge too - walks up into it: from -100 ns in
+         * ~23 s at 6 ns/s, and LC_RAMP_WAIT_S reaches one ~440 ns on the
+         * wrong side even at the slowest accepted 4 ns/s. A landing already
+         * in the band goes on at once, as before; one below it now enters at
+         * the bottom, so the transit below sees the whole ramp. The first
+         * look stays 6 s after the release: while the divider is stopped the
+         * ramp reads near its top (algorithm 13 blanks those seconds,
+         * s_kf_ph_blank), and that is no landing. A second arm is kept for a
+         * wait that runs out - a sync that did not take, or a build whose
+         * transit falls. */
         {
-            bool on_ramp = false;
-            for (int a = 0; a < 6 && !on_ramp; a++) {
-                OUT_SERIAL.print("LC: arming picDIV (try ");
-                OUT_SERIAL.print(a + 1); OUT_SERIAL.println(")...");
+            bool on_ramp = false, no_ref = false;
+            for (int a = 0; a < 2 && !on_ramp; a++) {
+                if (!lc_ref_ok()) { no_ref = true; break; }   /* nothing to sync to */
+                if (a > 0) g_calib_remaining += 8u;
+                OUT_SERIAL.print("LC: arming picDIV");
+                OUT_SERIAL.println(a > 0 ? " again..." : "...");
                 digitalWrite(PIN_PICDIV_ARM, LOW);
                 wait_secs_pwm(2, ramp_pwm);
                 digitalWrite(PIN_PICDIV_ARM, HIGH);
                 wait_secs_pwm(6, ramp_pwm);      /* sync + first pulses settle */
                 float v0 = g_ltic_voltage;
                 OUT_SERIAL.print("LC: post-arm V = "); OUT_SERIAL.println(v0, 3);
-                if (v0 > 0.10f && v0 < 2.5f) on_ramp = true;
+                on_ramp = (v0 > 0.10f && v0 < 2.5f);
+                if (!on_ramp)
+                    OUT_SERIAL.println("LC: not on the ramp yet - waiting for the sweep to carry the phase in...");
+                for (uint16_t s = 1; s <= LC_RAMP_WAIT_S && !on_ramp; s++) {
+                    g_calib_remaining++;         /* the countdown waits with us */
+                    wait_secs_pwm(1, ramp_pwm);
+                    float v = g_ltic_voltage;
+                    on_ramp = (v > 0.10f && v < 2.5f);
+                    if (on_ramp || (s % 10u) == 0u) {
+                        OUT_SERIAL.print("LC: ramp wait "); OUT_SERIAL.print((int)s);
+                        OUT_SERIAL.print(" s, V = "); OUT_SERIAL.println(v, 3);
+                    }
+                }
             }
             if (!on_ramp) {
-                OUT_SERIAL.println("LC: ERROR could not land on the ramp after 6 arms — check picARM / pulse path; aborting.");
-                gpsdo_dac_write16(saved_pwm);
+                OUT_SERIAL.println(no_ref
+                    ? "LC: ERROR no GPS fix or no 1PPS to sync the picDIV to — aborting."
+                    : "LC: ERROR the phase did not reach the ramp after two arms — check picARM / pulse path; aborting.");
+                lc_restore(lc_prev);
                 xEventGroupClearBits(xSysEvents, EVT_NEED_LTIC_CAL);
                 g_calib_active = false; g_calib_kind = CALIB_NONE; g_calib_remaining = 0;
                 return;
@@ -862,22 +1017,20 @@ static void do_ltic_calibrate(void)
          * measured. */
         wait_secs_pwm(3, ramp_pwm);
     }
-    /* Fallback rate = the rate actually COMMANDED (cmd_off LSB → Hz → ns/s;
-     * ×100 because 1 Hz at 10 MHz is 100 ns/s). Tracks the halved offset on
-     * a retry pass — the old fixed 4.0 silently doubled the slope scale when
-     * the avg100 refinement below could not run. Refined after the pass. */
 
 
     /* =====================================================================
-     * RAMP-TRANSIT CALIBRATION (architecture confirmed by André's post and
-     * DSO captures, EEVblog msg4111609):
+     * RAMP-TRANSIT CALIBRATION (architecture confirmed by oscilloscope
+     * captures of the pulse and ramp):
      *
      *   The 74HC74 pair emits a PULSE whose width equals the phase interval
      *   between the GPS-PPS edge and the picDIV-PPS edge. That pulse charges
      *   C13 (1 nF) through D2+R8 (1 kΩ, τ≈1 µs) — the scope shows 0→1.75 V
-     *   in ~600 ns. Vphase is sampled on the ramp PEAK ~300 µs after each
-     *   PPS edge (ltic_read_fast in vFreqRelayTask); the cap self-clears
-     *   through leakage (~25 ms) before the next pulse. So Vphase is a RAMP
+     *   in ~600 ns. Vphase is read at the ramp PEAK, AT each PPS edge (a
+     *   line through a burst taken just after it, extrapolated back to it;
+     *   ltic_read_fast in vFreqRelayTask), and right after the read the
+     *   firmware discharges the cap through PA1 (GPSDO_LTIC_ACTIVE_RESET),
+     *   so each pulse charges it from 0 V. So Vphase is a RAMP
      *   phase interval: it rises with growing phase and SATURATES — it never
      *   wraps, and its usable range is a property of the RC, not of any
      *   clock period. Both earlier models (line fit; fixed-100 ns sawtooth)
@@ -931,7 +1084,7 @@ static void do_ltic_calibrate(void)
 
     if (cnt < LTIC_CAL_MIN_POINTS) {
         OUT_SERIAL.println("LC: ERROR too few points — aborting, params unchanged");
-        gpsdo_dac_write16(saved_pwm);
+        lc_restore(lc_prev);
         xEventGroupClearBits(xSysEvents, EVT_NEED_LTIC_CAL);
         g_calib_active = false; g_calib_kind = CALIB_NONE; g_calib_remaining = 0;
         return;
@@ -979,15 +1132,15 @@ static void do_ltic_calibrate(void)
      * detector is an RC charge ramp, V(φ) = Vsat·(1 − e^(−φ/τ)), so the point
      * φ = τ — where V = Vsat·(1 − 1/e) = 0.632·Vsat — is a universal, per-board
      * anchor: the same fractional height on every exponential detector,
-     * whatever its Vsat. (An earlier build hard-coded 1.85 V, which only worked
-     * because Marek's and Dan Wiering's detectors both happen to have
-     * Vsat ≈ 2.93 V → 0.632·Vsat ≈ 1.85 V. A detector with Vsat = 2.0 V would
-     * anchor at 1.26 V and the fixed 1.85 V would miss its ramp entirely.)
+     * whatever its Vsat. (A fixed 1.85 V constant only works on detectors
+     * whose Vsat happens to be near 2.93 V, since 0.632·Vsat ≈ 1.85 V there;
+     * a detector with Vsat = 2.0 V would anchor at 1.26 V and a fixed 1.85 V
+     * would miss its ramp entirely.)
      * We recover Vsat with a 1-D scan: for each candidate Vsat, linearise
      * y = −ln(1 − V/Vsat) against t and pick the Vsat with the lowest
      * regression residual; anchor = 0.632·Vsat. This makes LC fully
-     * self-adapting per board with no configuration. Physics/derivation
-     * credit: GML-5.2. Falls back to the ramp midpoint if the fit fails. */
+     * self-adapting per board with no configuration. Falls back to the ramp
+     * midpoint if the fit fails. */
     int anchor_n = 0;
     {
         /* 1-D Vsat fit: minimise the residual of the linearised charge curve */
@@ -1044,38 +1197,30 @@ static void do_ltic_calibrate(void)
     }
     /* THE ANCHOR SLOPE CANNOT EXCEED THE WHOLE-TRANSIT AVERAGE.
      *
-     * The two ns/V numbers this routine can produce are not interchangeable and
-     * one of them bounds the other. range_ns/span is the AVERAGE dφ/dV over the
-     * swept band; nsv above is the LOCAL dφ/dV at the anchor. On the ramp this
-     * detector actually is — V = Vsat(1 − e^(−φ/τ)) — dφ/dV = (τ/Vsat)·e^(φ/τ)
-     * rises with φ, so the average over a transit that reaches past the anchor
-     * is taken at a point ABOVE it and is therefore LARGER. For the geometry
-     * here (Vsat 3.29 V, transit 0.80..3.22 V) the anchor value should be about
-     * 0.55 of the average. A local slope ABOVE the average is not a slope this
-     * ramp can have: it means the ±LTIC_ANCHOR_WIN_V window caught a disturbed
-     * stretch and the fit did not converge.
+     * The two ns/V numbers this routine can produce are not interchangeable
+     * and one of them bounds the other. range_ns/span is the AVERAGE dφ/dV
+     * over the swept band; nsv above is the LOCAL dφ/dV at the anchor. On
+     * the ramp this detector actually is — V = Vsat(1 − e^(−φ/τ)) —
+     * dφ/dV = (τ/Vsat)·e^(φ/τ) rises with φ, so the average over a transit
+     * that reaches past the anchor is taken at a point ABOVE it and is
+     * therefore LARGER. For the geometry here (Vsat 3.29 V, transit
+     * 0.80..3.22 V) the anchor value should be about 0.55 of the average.
+     * A local slope ABOVE the average is not a slope this ramp can have: it
+     * means the ±LTIC_ANCHOR_WIN_V window caught a disturbed stretch and
+     * the fit did not converge.
      *
-     * WHAT IT COST, and why this is not hypothetical. Two calibrations of the
-     * same detector, LZO 2.0809 → 2.0797 and LRN 3000.00 → 2958.75 (so the ramp
-     * itself did not move), and:
-     *
-     *   builds 16-41   LNV 1252.0   = 1.01 x the whole-transit average
-     *   build 42       LNV 1837.7   = 1.50 x the whole-transit average
-     *
-     * The second was measured while the phase was unstable. Nothing downstream
-     * noticed a bad slope directly — what it broke was the SATURATION GUARD in
-     * ltic_phase_error_ns(), which sizes the usable band as range_ns/ns_per_volt
-     * and so shrank from ±1.318 V to ±0.886 V about the zero. The picDIV lands
-     * this board's phase 1.06..1.28 V below the zero, a fixed physical offset
-     * that did not move — but it was now OUTSIDE the band, so every landing read
-     * as railed. Algorithm 11's phase-capture bridge then re-armed the divider
-     * every 20 s, eight times, until one landing happened to fall 0.67 V out and
-     * be accepted; the loop locked thirty seconds later. Eight arms for a
-     * calibration artefact.
+     * Using such a slope anyway is not harmless: it feeds the SATURATION
+     * GUARD in ltic_phase_error_ns(), which sizes the usable band as
+     * range_ns/ns_per_volt, so an inflated slope shrinks that band. A
+     * fixed physical offset that normally sits inside it can then land
+     * outside, reading as railed even though nothing moved, and trigger
+     * algorithm 11's phase-capture bridge to re-arm the divider repeatedly
+     * until a landing happens to fall back in range.
      *
      * So: keep the anchor (the Vsat fit runs over the whole transit and is
-     * robust — LZO agreed to 1.2 mV across the two runs) and replace only the
-     * slope, which is the one number fitted from a handful of points. */
+     * robust — repeat calibrations of the same detector agree to about
+     * 1.2 mV) and replace only the slope, which is the one number fitted
+     * from a handful of points. */
     if (nsv > 0.0 && span > 0.05 && range_ns > 0.0) {
         double avg_nsv = range_ns / (double)span;
         if (avg_nsv > 0.0 && nsv > avg_nsv) {
@@ -1112,7 +1257,7 @@ static void do_ltic_calibrate(void)
         OUT_SERIAL.println("  (range/span average)");
     }
 
-    gpsdo_dac_write16(saved_pwm);
+    lc_restore(lc_prev);
     if (xSemaphoreTake(xFreqMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         gFreq.flush_requested = true;
         xSemaphoreGive(xFreqMutex);
@@ -1193,10 +1338,10 @@ void vControlTask(void *pvParameters)
 {
     (void)pvParameters;
 
-    /* ---- Warmup — runs whenever enabled (WU 1, default). A valid EEPROM
-     * used to skip it silently, but a cold OCXO after power-on drifts
-     * thermally for minutes regardless of stored settings; the recalled PWM
-     * is already applied, so the oven warms at its proper operating point.
+    /* ---- Warmup — runs whenever enabled (WU 1, default), even with a
+     * valid EEPROM: a cold OCXO after power-on drifts thermally for
+     * minutes regardless of stored settings, and the recalled PWM is
+     * already applied, so the oven warms at its proper operating point.
      * Operators who restart often can disable with `WU 0` + `ES`. ---- */
     if (g_warmup_enable)
         do_warmup();
@@ -1228,10 +1373,12 @@ void vControlTask(void *pvParameters)
          * next rising edge of Sync (pin 5), which is wired to GPS 1PPS.
          *
          * Critical conditions checked here:
-         *  1. GPS fix must be present — with no 1PPS on Sync the divider
-         *     stays stopped forever (dead output).  Arming is deferred
-         *     until fix returns (event bit stays set).
-         *  2. A dedicated bool flag (not the timestamp) tracks the pulse,
+         *  1. A GPS reference must be present - a fix AND a pulse in the
+         *     last 1.5 s (build 68; the fix alone before): with no 1PPS on
+         *     Sync the divider stays stopped forever (dead output), and a
+         *     valid position does not prove a pulse (see REF_PPS_FRESH_MS).
+         *     Arming is deferred until both are back (event bit stays set).
+         *  2. A dedicated bool flag (not the timestamp) tracks the Arm pulse,
          *     avoiding a stuck-LOW edge case at millis() wrap.
          *  3. Arm LOW duration: PICDIV_ARM_MS (1001 ms) checked on a
          *     200 ms loop → actual LOW time 1.0–1.2 s, per spec.
@@ -1249,6 +1396,7 @@ void vControlTask(void *pvParameters)
                 fix_ok = gGps.pos_valid;
                 xSemaphoreGive(xGpsMutex);
             }
+            fix_ok = fix_ok && ref_pps_within(REF_PPS_FRESH_MS);
             if (fix_ok && !s_arm_active) {
                 digitalWrite(PIN_PICDIV_ARM, LOW);
                 s_arm_active     = true;
@@ -1257,7 +1405,7 @@ void vControlTask(void *pvParameters)
                 OUT_SERIAL.println("picDIV: armed (output stopped, waiting for 1PPS sync)");
             } else if (!fix_ok && !s_arm_wait_warned) {
                 s_arm_wait_warned = true;   /* warn once, keep event bit set */
-                OUT_SERIAL.println("picDIV: no GPS fix - arming deferred until fix");
+                OUT_SERIAL.println("picDIV: no GPS fix or no 1PPS - arming deferred until both are back");
             }
         }
         if (s_arm_active && (millis() - s_arm_started_ms) > PICDIV_ARM_MS) {
@@ -1277,15 +1425,17 @@ void vControlTask(void *pvParameters)
             /* SCHEDULER SUSPENDED FOR THE CONVERSIONS. These share ADC1 with
              * the LTIC phase read on PA1, and the core's analogRead()
              * reconfigures the channel on a shared handle without any
-             * interlock - see the long note in ltic_read_fast(). Preempting
+             * interlock - see the note in ltic_read_fast(). Preempting
              * that read corrupts a phase measurement; being preempted here
-             * corrupted this average, visibly: 1.800 V -> 1.620 V, exactly
+             * corrupts this average, visibly: 1.800 V -> 1.620 V, exactly
              * 0.9x, which is one conversion returning zero into a 10-deep
-             * moving average, seven times in the 03.09 10:08 capture.
+             * moving average, seven times in one capture.
              *
-             * Three conversions is about 60 µs with interrupts still enabled.
-             * The phase read cannot wait - its 50 µs settle is a deadline on a
-             * 5 ms decay - so this side is the one that becomes atomic. */
+             * Three conversions are ~165 µs (one analogRead() is ~55 µs) with
+             * interrupts still enabled. The phase read cannot wait - it takes
+             * the converter through its registers at the PPS edge itself - so
+             * this side is the one that becomes atomic: it is never inside a
+             * conversion when that task runs. */
             vTaskSuspendAll();
             int16_t raw;
             raw = (int16_t)analogRead(PIN_VCTL_ADC);
@@ -1311,45 +1461,105 @@ void vControlTask(void *pvParameters)
             }
         }
 
-        /* ---- Auto-holdover: engage on fix loss, disengage on fix recovery ----
-         * Rules (evaluated every 200 ms loop tick):
-         *   Fix lost  → holdover_mode=true,  holdover_auto=true   (engage)
-         *   Fix back  → holdover_mode=false, holdover_auto=false  (disengage)
+        /* ---- Auto-holdover: engage on reference loss, disengage on recovery ----
+         * Rules (evaluated every 200 ms loop tick). The reference is a fix AND
+         * a pulse (REF_PPS_FRESH_MS above):
+         *   Fix lost, or no pulse for REF_PPS_LOST_MS
+         *             → holdover_mode=true,  holdover_auto=true   (engage)
+         *   Fix back with an UNBROKEN run of pulses for REF_RECOVER_MS
+         *             → holdover_mode=false, holdover_auto=false  (disengage)
          *               (only if holdover was set automatically; manual HO untouched)
-         * prev_pos_valid is a local variable that tracks the last known fix state. */
+         * The very first reference after boot is taken at once; only leaving
+         * an automatic holdover waits for the run (build 68, after Zsolt
+         * Zsiros's fork). "Unbroken": no gap between pulses longer than
+         * REF_PPS_FRESH_MS, the fix present at each of them - so a pulse or
+         * two from an antenna that is coming and going does not end the
+         * holdover, and neither does a position without a pulse.
+         *
+         * Since a lost reference now costs a 10 s run to undo, a busy lock
+         * must not look like one (build 68): a missed take of xGpsMutex keeps
+         * the fix as last read, a tick that cannot read the holdover flags
+         * changes nothing, and a change of the flags is reported - and the
+         * state moved on - only once it has actually been made, so a busy
+         * xCtrlMutex is simply tried again on the next tick. And a manual
+         * holdover (MH) stays manual through a loss of the reference: it is
+         * the operator's to end, not the recovery's (up to build 67 the loss
+         * turned it into an automatic one, which the fix's return then
+         * ended). */
         {
-            static bool prev_pos_valid = false;
-            bool cur_fix = false;
+            static bool     prev_ref  = false;  /* the reference, last tick            */
+            static bool     last_fix  = false;  /* the fix as last read                */
+            static uint32_t rec_start = 0u;     /* first pulse of the returning run    */
+            static uint32_t rec_last  = 0u;     /* its latest pulse; 0 = no run        */
             if (xSemaphoreTake(xGpsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-                cur_fix = gGps.pos_valid;
+                last_fix = gGps.pos_valid;
                 xSemaphoreGive(xGpsMutex);
             }
-            if (prev_pos_valid && !cur_fix) {
-                /* Fix just lost — engage auto-holdover */
-                if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    gCtrl.holdover_mode = true;
-                    gCtrl.holdover_auto = true;
-                    xSemaphoreGive(xCtrlMutex);
-                }
-                OUT_SERIAL.println("GPS fix lost — auto-holdover engaged");
-            } else if (!prev_pos_valid && cur_fix) {
-                /* Fix gained.  Distinguish the very first fix after boot
-                 * (nothing to disengage) from a genuine recovery after a
-                 * fix loss (auto-holdover active).                        */
-                bool was_auto_ho = false;
-                if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    was_auto_ho = gCtrl.holdover_auto;
-                    if (gCtrl.holdover_auto) {
-                        gCtrl.holdover_mode = false;
-                        gCtrl.holdover_auto = false;
-                    }
-                    xSemaphoreGive(xCtrlMutex);
-                }
-                OUT_SERIAL.println(was_auto_ho
-                    ? "GPS fix recovered — auto-holdover disengaged"
-                    : "GPS fix acquired");
+            bool cur_fix = last_fix;
+            uint32_t now_ms = millis();
+            uint32_t pps_ms = gUpPpsMs;
+            bool pps_ok = pps_ms != 0u && (uint32_t)(now_ms - pps_ms) < REF_PPS_LOST_MS;
+            bool ref_ok = cur_fix && pps_ok;
+            bool have_flags = false, hold = false, auto_ho = false;
+            if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                hold    = gCtrl.holdover_mode;
+                auto_ho = gCtrl.holdover_auto;
+                xSemaphoreGive(xCtrlMutex);
+                have_flags = true;
             }
-            prev_pos_valid = cur_fix;
+            if (!have_flags) {
+                /* nothing this tick */
+            } else if (!auto_ho) {
+                rec_start = 0u; rec_last = 0u;
+                if (prev_ref && !ref_ok) {
+                    /* Reference just lost */
+                    if (hold) {
+                        OUT_SERIAL.println(cur_fix
+                            ? "GPS 1PPS lost — manual holdover kept"
+                            : "GPS fix lost — manual holdover kept");
+                        prev_ref = false;
+                    } else if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        gCtrl.holdover_mode = true;
+                        gCtrl.holdover_auto = true;
+                        xSemaphoreGive(xCtrlMutex);
+                        OUT_SERIAL.println(cur_fix
+                            ? "GPS 1PPS lost — auto-holdover engaged"
+                            : "GPS fix lost — auto-holdover engaged");
+                        prev_ref = false;
+                    }
+                } else if (!prev_ref && ref_ok) {
+                    /* The first reference after boot, or one back during a
+                     * manual holdover or after the operator's MD: nothing to
+                     * disengage. */
+                    OUT_SERIAL.println("GPS fix acquired");
+                    prev_ref = true;
+                }
+            } else {
+                /* Automatic holdover: count the returning run, pulse by pulse. */
+                if (cur_fix && pps_ms != 0u && pps_ms != rec_last) {
+                    if (rec_last == 0u || (uint32_t)(pps_ms - rec_last) > REF_PPS_FRESH_MS)
+                        rec_start = pps_ms;           /* a new run begins */
+                    rec_last = pps_ms;
+                }
+                if (rec_last != 0u &&
+                    (!cur_fix || (uint32_t)(now_ms - rec_last) > REF_PPS_FRESH_MS)) {
+                    rec_start = 0u; rec_last = 0u;    /* the run broke */
+                }
+                if (rec_last != 0u && (uint32_t)(rec_last - rec_start) >= REF_RECOVER_MS) {
+                    if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        if (gCtrl.holdover_auto) {
+                            gCtrl.holdover_mode = false;
+                            gCtrl.holdover_auto = false;
+                        }
+                        xSemaphoreGive(xCtrlMutex);
+                        OUT_SERIAL.println("GPS fix recovered — auto-holdover disengaged");
+                        prev_ref  = true;
+                        rec_start = 0u; rec_last = 0u;
+                    }                                 /* busy: next tick, same run */
+                } else {
+                    prev_ref = false;
+                }
+            }
 
             /* ---- Timezone: recompute the UTC→local offset.
              * Cheap (5 Hz, pure arithmetic) and re-run every pass so a DST
@@ -1440,6 +1650,13 @@ void vControlTask(void *pvParameters)
                         xSemaphoreGive(xCtrlMutex);
                     }
                 }
+                /* Where the loop found the code and where it has put it, for
+                 * the rail-to-rail watch (build 65): here and not in the DAC
+                 * layer that SP, CT and LC write through too, and with the
+                 * code the step started from, so a code something else put
+                 * there between two steps starts the watch afresh instead of
+                 * counting as the loop's. See health_watch_loop(). */
+                health_watch_loop(old_pwm, gpsdo_dac_last16(), algo);
             } else if (holdover && algo == 9 && !g_calib_active) {
                 /* Thermally compensated holdover (algo 9): steer PWM from
                  * the learned tempco. Runs on this 5 Hz path because with

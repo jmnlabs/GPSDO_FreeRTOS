@@ -1,4 +1,4 @@
-# GPSDO v1.07 — Kompletna instrukcja obsługi (od zera do locka)
+# GPSDO v1.08 — Kompletna instrukcja obsługi (od zera do locka)
 
 [English](MANUAL_EN.md) | **Polski** | [Español](MANUAL_ES.md)
 
@@ -6,7 +6,7 @@
 
 📖 [Strona projektu](../README.md) · [README](README_PL.md) · [Changelog](CHANGELOG_PL.md) · [Tuner](README_TUNER_PL.md)
 
-**Firmware:** GPSDO v1.07.57rt, autor jmnlabs (na bazie oryginalnego GPSDO André
+**Firmware:** GPSDO v1.08.71rt, autor jmnlabs (na bazie oryginalnego GPSDO André
 Balsy, pętli PI Larsa Waleniusa, akumulatora wielopoziomowego Alana Cashina i
 autorskiego filtru Kalmana)
 **Płytka:** WeAct BlackPill STM32F411CE · **OCXO:** 10 MHz (np. Vectron C4550)
@@ -115,13 +115,14 @@ płytka (duży TFT + wszystkie czujniki); dopasuj ją do rzeczywistości.
 | `GPSDO_AHT10` | AHT10/AHT20 na I2C |
 | `GPSDO_BMP280_I2C` | BMP280 na I2C |
 | `GPSDO_INA219` | INA219 na I2C |
+| `GPSDO_LM75` | termometr z rodziny LM75 na I2C — LM75A/B, PCT2075, TMP75/175, TMP1075 — pod `GPSDO_LM75_ADDR` (0x48); bez biblioteki. Jego temperatura idzie po `CPU:` w linii czujników raportu `RH` (build 68). Inny układ pod 0x48 może udawać termometr (ADS1x15, PCF8591): zmień wtedy adres albo wyłącz tę flagę |
 | `GPSDO_VCC` / `GPSDO_VDD` | pomiar szyny 5 V / 3,3 V |
 | `GPSDO_UBX_CONFIG` | ustawienie NEO-6M/7M w tryb binarny przy starcie |
 | `GPSDO_FAKE_UBLOX` | chiński **klon** u-bloxa: tylko proba baudrate, zero konfiguracji UBX (patrz Część 3.2) |
 | `GPSDO_GPS_TIMING` | obsługa odbiorników timingowych (LEA-6T/M8T/NEO-M8T/ZED-F9T): survey-in, qErr |
 | `GPSDO_PICDIV` | wyjście zbrojenia dzielnika picDIV na PB3 |
 | `GPSDO_LTIC` | **sprzętowy detektor fazy** (ramp TIC na PA1) — wymagany dla algorytmów 10, 11, 12. Włączaj TYLKO gdy detektor jest fizycznie zamontowany: bez niego PA1 pływa, a pętla dyscyplinuje OCXO szumem ADC |
-| `GPSDO_LTIC_ACTIVE_RESET` | wariant detektora z aktywnym rozładowaniem kondensatora (wyłączony dla klasycznego detektora RC Kaashoeka) |
+| `GPSDO_LTIC_ACTIVE_RESET` | rozładowanie kondensatora detektora przez PA1 zaraz po każdym odczycie (domyślnie włączone; zostaw włączone przy obu detektorach — klasycznym RC Kaashoeka i wariancie ze źródłem prądowym — patrz Część 3.3) |
 | `GPSDO_PWM_DITHER` | 24-bitowe napięcie sterujące z ditherowanego PWM 13-bit (nie wyłączaj — to ten dobry DAC) |
 | `GPSDO_DAC_EXT` | zewnętrzny DAC AD5680, 18-bit, bit-bang na PB4/PB0/PB2 — można kompilować razem z `GPSDO_PWM_DITHER`; żywą ścieżkę wybiera komenda `DAC` w czasie działania. Po cichu wyłącza `GPSDO_TM1637`/`GPSDO_TM1637_6` i `GPSDO_GEN_2kHz_PB5` (PB4 to chip-select DAC-a) |
 | `GPSDO_SPAN_SENSE` | drugi biegun zworki zakresu EFC na **PB14** (dostarczane WŁĄCZONE): jedna kalibracja `CT` na każdą pozycję zakresu, przełączana, gdy zworka się przestawi — zob. `SPAN` w Części 7. Płytka bez tego przewodu czyta FULL na wewnętrznym podciągnięciu i zachowuje swoją jedną kalibrację. Wyłącz tylko wtedy, gdy PB14 jest na Twojej płytce podłączony do czegoś innego |
@@ -134,7 +135,7 @@ typu albo dwa elementy kłócące się o te same piny. Przeczytaj komunikat `#er
 — nazywa konflikt.
 
 **Zostaw włączone `GPSDO_LTIC` i `GPSDO_PWM_DITHER`**, chyba że naprawdę nie
-masz sprzętu detektora: bez LTIC tracisz algorytmy 10–13, czyli cały sens v1.07.
+masz sprzętu detektora: bez LTIC tracisz algorytmy 10–13, czyli cały sens v1.08.
 
 ### 1.4 Konfiguracja TFT_eSPI (tylko TFT)
 
@@ -232,7 +233,10 @@ Dwie rzeczy warte zapamiętania:
   sterownika — to normalne, po chwili się uspokaja.
 - Przy skompilowanym `GPSDO_BLUETOOTH_PARALLEL` (domyślna konfiguracja)
   wszystko, co widać po USB, jest dublowane na UART Bluetooth przy **57600** —
-  gotowa zapasowa konsola, gdyby USB kiedyś stawiało opór.
+  gotowa zapasowa konsola, gdyby USB kiedyś stawiało opór. Raport co sekundę
+  idzie do każdego portu osobno (build 68), więc gdy host USB jest
+  podłączony, ale nie czyta, traci się co najwyżej kopię raportu na USB —
+  nigdy tę na Bluetooth — i nigdy nie zatrzymuje to płytki.
 
 ### 1.8 Kompilacja i kontrola rozmiaru
 
@@ -243,8 +247,8 @@ Sketch → Verify/Compile. Po zakończeniu przeczytaj linię
 > należy do pierścienia ustawień w sektorze 7 (Część 2). Zignoruj
 > procent, który wypisuje IDE: liczony jest względem pełnych 512 KB
 > chipu, więc build, który „mieści się" procentowo, może przekroczyć
-> granicę sektora 7. Samo v1.07 zajmuje około 265 KB — zapas duży, ale
-> nie ignoruj nagłego wzrostu.
+> granicę sektora 7. Samo v1.08 zajmuje około 300 KB (build 71: 303 364
+> bajty) — zapas duży, ale nie ignoruj nagłego wzrostu.
 
 > **Który wsad naprawdę działa?** Baner wypisuje czas kompilacji — a ten czas
 > należy do **szkicu**, nie do firmware'u. Builder Arduino nie przekompilowuje
@@ -378,7 +382,8 @@ stałą sekwencję. Oto typowa z działającej, już skonfigurowanej jednostki
 
 ```
 ================================================
-GPSDO v1.07.57rt compiled 2026-09-23 11:02:37  build 57
+GPSDO v1.08.71rt compiled 2026-10-29 23:34:12  build 71
+image CRC32 8EED4610  (303364 bytes of flash)
 FreeRTOS port by J. M. Niewinski  with Claude, GLM-5.3 Max & Qwen3.8-Max AI
 https://github.com/jmnlabs/GPSDO_FreeRTOS
 Inspired by GPSDO v0.06c by Andre Balsa
@@ -409,6 +414,7 @@ Starting FreeRTOS scheduler
 HW: AHT10/AHT20 sensor    OK  (I2C 0x38)
 HW: BMP280 sensor         OK  (I2C 0x77)
 HW: INA219 sensor         OK  (I2C 0x40)
+HW: LM75 sensor           OK  (I2C 0x48)
 HW: LTIC phase input      enabled (PA1) - needs the ramp detector hw
 TFT: init start (SPI1 PA5/PA7, CS=PB13 DC=PB12 RST=PB15)
 TFT: freq-band sprite (4-bit) created
@@ -420,7 +426,8 @@ Potem startuje raport 1 Hz (Część 6). Co mówi każda linia:
 
 | Linia | Znaczenie |
 |---|---|
-| banner (`GPSDO v1.07.57rt` …) | tożsamość firmware — wydanie v1.07, build 57 (`.57rt`). Jeśli zamiast tego widzisz śmieci: zła prędkość — użyj 115200 |
+| banner (`GPSDO v1.08.71rt` …) | tożsamość firmware — wydanie v1.08, build 71 (`.71rt`). Jeśli zamiast tego widzisz śmieci: zła prędkość — użyj 115200 |
+| `image CRC32 …` | suma kontrolna programu we flashu, liczona przy starcie: wskazuje binarkę, która naprawdę działa, nawet gdy czas kompilacji wyżej jest nieaktualny (zob. 1.8) |
 | `Reset cause:` | dlaczego chip się zrestartował. `POWER-ON/BROWN-OUT PIN/NRST` = normalne włączenie zasilania lub przycisk reset. `SOFTWARE` = reset zarządzony przez firmware (`RB`, koniec uploadu). `INDEP-WDG`/`WINDOW-WDG` = watchdog (ten firmware żadnego nie używa — traktuj jako sygnał awarii). Dodatkowa linia `-> supply dipped: check the 3V3 rail under load` pojawia się po brown-out: szyna 3V3 siadła pod obciążeniem OCXO — napraw zasilanie, nie ignoruj tego |
 | `Flash ring: sector 7 ready` | pierścień ustawień w sektorze 7 znaleziony i poprawny |
 | `Flash ring: sector 7 blank/formatted (defaults)` | pusty lub wymazany pierścień — **normalne przy pierwszym wgrywaniu**; firmware go formatuje i używa wartości domyślnych z kompilacji |
@@ -445,6 +452,8 @@ Linie pojawiające się **później**, w trakcie pracy, i ich znaczenie:
 | `LTIC: running UNCALIBRATED (run LC)` | aktywny jest algorytm 10/11/12, ale `LC` nigdy nie było uruchamiane — liczby fazy są nominalne, nie zmierzone. Uruchom `LC` |
 | `LTIC ACQ: polarity unset — run 'LPOL -1' (or +1)` | algorytm 10 odmawia sterowania do ustawienia polaryzacji (bezpiecznie czeka zamiast zgadywać). Algorytmy 11 i 12 zakładały **+1** i sterowały mimo to; teraz czekają tak samo |
 | `picDIV: armed (output stopped, waiting for 1PPS sync)` | dzielnik zbrojony; przerwa 1–1,2 s na jego wyjściu jest oczekiwana, zanim zsynchronizuje się do kolejnego zbocza PPS |
+| `picDIV: no GPS fix or no 1PPS - arming deferred until both are back` | o uzbrojenie poproszono bez fixa albo bez impulsu w ostatnich 1,5 s (build 68): prośba czeka i zostaje wykonana, gdy oba wrócą |
+| `GPS 1PPS lost — auto-holdover engaged` / `GPS fix lost — auto-holdover engaged` | odniesienie znikło — 10 s bez impulsu albo utrata fixa — i pętla sama się zamroziła (A.5); `GPS fix recovered — auto-holdover disengaged` pojawia się, gdy fix wróci razem z 10 s nieprzerwanych impulsów. Pod `MH` linia kończy się zamiast tego słowami `manual holdover kept`, a holdover zostaje Twój (build 68) |
 | `LEA-T: … survey … %` / `s) — continuing anyway` | monitor survey-in; „continuing anyway" znaczy, że survey osiągnął limit czasu powyżej celu dokładności — zwykle zaczepiony widok nieba |
 | `!!! FreeRTOS …` (configASSERT / STACK OVERFLOW / MALLOC FAILED) | firmware złapał awarię, z plikiem/linią albo nazwą taska — niebieska LED miga w tym samym czasie szybko. Zanotuj jedno i drugie; jednostka potrzebuje resetu (`RB`) |
 
@@ -500,25 +509,102 @@ raporty z pola mile widziane.
 Te dwie komendy uczą firmware dwóch różnych faktów fizycznych, a druga
 potrzebuje pierwszego:
 
-**Krok 1 — `CT` (czułość oscylatora + strojenie pętli, ~3 minuty).** Wpisz `CT`
+**Krok 1 — `CT` (czułość oscylatora + strojenie pętli, ~3 minuty; ~11 przy
+łagodnym obiekcie).** Wpisz `CT`
 i Enter. Firmware prowadzi napięcie sterujące przez trzy punkty (1,5 V; 2,0 V;
 2,5 V), mierzy częstotliwość w każdym, dopasowuje prostą i liczy **K — ile
 herców jest wart jeden krok PWM na *Twoim* oscylatorze** (akceptowany zakres
-0,02–2 mHz/LSB). Z K wyprowadza sensowne wzmocnienia PID dla algorytmów 3–9 i
-pętli LTIC oraz **sam zapisuje grupę PID** do flasha. Nie odcinaj zasilania
-przez te trzy minuty. Na płytce ze zworką zakresu (PB14) uruchom je w pozycji,
-której używasz; druga pozycja dostanie własne `CT` sama, gdy zworka pierwszy
-raz tam trafi.
+0,01–2 mHz/LSB). Z K wyprowadza sensowne wzmocnienia PID dla algorytmów 3–9 i
+pętli LTIC oraz **sam zapisuje grupę PID** do flasha. Przy łagodnym obiekcie —
+zawężony zakres EFC albo zewnętrzny DAC, K poniżej 0,12 mHz/LSB — drugi przebieg
+mierzy ponownie wokół punktu 10 MHz na średnich 100-sekundowych, co dodaje około
+ośmiu minut. Nie odcinaj zasilania, dopóki trwa. Na płytce ze zworką zakresu
+(PB14) uruchom je w pozycji, której używasz; druga pozycja dostanie własne `CT`
+sama, gdy zworka pierwszy raz tam trafi.
 
 **Krok 2 — `LC` (kalibracja detektora fazy, ~5 minut).** Wpisz `LC` i Enter.
 Firmware zbroi dzielnik picDIV, centruje detektor, przeprowadza jedną rampę
 kondensatora i mierzy **ns na wolt**, **przesunięcie zera w woltach** i **zakres
 w ns** detektora. Przy PASS **sam się zapisuje**. Odmawia użyteczności, jeśli
-`CT` nie było uruchomione — dlatego kolejność ma znaczenie.
+`CT` nie było uruchomione — dlatego kolejność ma znaczenie. Gdy dzielnik
+położy fazę poniżej pasma detektora, `LC` czeka, aż własne przemiatanie
+wprowadzi ją do pasma (build 68: najwyżej dwie minuty, `LC: ramp wait … s` co
+10 s, drugie uzbrojenie, gdy to nie wystarczy), więc na takiej płytce trwa
+trochę dłużej. Uzbraja tylko przy fixie GPS i impulsie 1PPS, do którego da się
+zsynchronizować dzielnik: bez nich kończy się komunikatem `LC: ERROR no GPS
+fix or no 1PPS to sync the picDIV to — aborting.` i przywraca kod pętli —
+sprawdź antenę i uruchom je ponownie.
 
 Kontrola: wpisz `LL` i sprawdź, że blok LTIC ma niezerowe `ns_per_volt`,
 `zero_offset`, `range_ns`. Wpisz `DAC` — powie Ci nawet, ile mikroherców wart
 jest jeden krok wyjścia.
+
+**Jak powstaje odczyt (build 62).** Tuż przed każdym zboczem PPS firmware
+wstrzymuje na układzie wszystko inne — także przerwania, na kilkanaście
+mikrosekund wokół zbocza — i od 5 µs po zboczu robi 64 pomiary kondensatora
+bezpośrednio na rejestrach przetwornika, łącznie ok. 110 µs; prowadzi przez nie
+prostą względem ich czasów z TIM2 i odczytuje ją na samym zboczu, zanim
+cokolwiek z ładunku upłynie. `LB` pokazuje ostatnią serię: „taken at the
+edge”, 64 malejące kody, prostą, rozrzut wokół niej (2–3 kody rms to norma),
+tempo spadku jako stałą czasową (ok. 1,4 ms — to głównie sam przetwornik:
+każdy pomiar zabiera ok. 0,12 % ładunku, ~3 kody; sam upływ jest dużo
+wolniejszy) oraz wygięcie obok typowego dla płytki (na płytce autora ok. −3
+kody). Każda seria jest trochę wygięta, co sekundę tak samo; odrzucana jest
+tylko taka, która wygina się o 3,5 kodu lub więcej inaczej niż pozostałe.
+Pomiar odstający od prostej o więcej niż sześć kodów (i cztery MAD) jest
+pomijany, a prosta liczona od nowa — od buildu 70 do dwudziestu razy (od
+buildu 67 do dwunastu, wcześniej osiem): detektor, który łapie falę
+prostokątną, dostaje parę zakłóceń na każdym jej zboczu — na płytce Dana
+cztery–pięć par na serię, co ok. 21 µs, od czegoś poza GPSDO, co przełącza z
+częstotliwością ok. 23 kHz (zostają przy pinie PWM trzymanym nisko i
+pojawiają się i znikają zależnie od pory dnia) — i przy dwunastu seria z
+sześcioma parami lub więcej była odrzucana. Wiele serii odrzuconych w `LB` jako „off the
+line” wskazuje na takie zakłócenie na detektorze. Od buildu 71 seria, w której
+co trzeci pomiar odstaje razem, traci najpierw całą tę trzecią część, zanim
+odpadnie którykolwiek pojedynczy pomiar: w części serii pomiary następują po
+sobie co 16⅔ okresu 10 MHz (w innych co ~17,7), więc co trzeci trafia w ten
+sam punkt jego okresu, a detektor, który łapie jego zbocza, ma jedną trzecią
+serii przesuniętą o tych samych kilka kodów — na płytce Dana o 17–30 kodów w
+górę albo o 7,5 w dół. Taka trzecia część odsuwała prostą o kilka kodów albo
+ponad dwadzieścia pomiarów wypadało z prostej jeden po drugim i seria była
+odrzucana. Jest pomijana, gdy odstaje od dwóch pozostałych o więcej niż
+6 kodów i trzykrotność własnego szumu serii, te dwie się zgadzają, a dwie
+trzecie jej pomiarów leżą co najmniej w połowie tej odległości; dwadzieścia
+pominięć zostaje na zakłócenia. `LB` pisze wtedy
+`every third conversion from #0 left out: +29.6 codes off the other two`, a w
+przeciwnym razie, jak daleko jest najdalsza trzecia część (`thirds kept: the
+furthest -0.5 codes off the other two`).
+Typowego wygięcia płytki firmware uczy się wyłącznie z serii, których prosta
+wypada w paśmie zmierzonym przez `LC`: detektor oparty o szynę (picDIV jeszcze
+niezsynchronizowany, faza poza oknem) daje serie wygięte o ok. +70 kodów i w
+buildzie 64 nauczyły go +20, po czym własne serie płytki były odrzucane
+(naprawione w buildzie 65). A od buildu 71 nadąża, gdy wygięcie się zmienia: na
+płytce autora rośnie ono, gdy odczyt spada, o ok. 0,19 kodu na kod, więc skok,
+który wyprowadza fazę o 60–100 ns na kilka minut, wygina każdą serię inaczej
+niż typowe, a typowe szło za nim najwyżej o jedną trzydziestą drugą kodu na
+sekundę — 131 serii odrzuconych jako wygięte w 16 minutach dwóch skoków
+z 27.10. Teraz, gdy mediana wygięcia ostatnich 15 serii w paśmie odbiega od
+typowego o więcej niż 3,5 kodu, typowe od razu na nią przechodzi (na modelu
+tych minut 14–21 odrzuconych zamiast 270–290); wygięcie, które stoi w
+miejscu, jest śledzone jak dotąd. Zaraz po serii kondensator jest rozładowywany
+przez PA1 (`GPSDO_LTIC_ACTIVE_RESET`), więc następny impuls ładuje go od 0 V
+niezależnie od temperatury; sam upływ, wolniejszy na zimnej płytce, mógłby
+zostawić część ładunku z jednej sekundy pod odczytem następnej. Przed serią
+wypisuje liczniki od startu: czy zbocze zostało złapane, czy prosta się
+utrzymała (a jeśli nie, to dlaczego) i ile razy został poprzedni odczyt — a
+zostaje on, razem z qErr odbiornika, które do niego należy, do 3 s, gdy zbocza
+nie udało się złapać albo prosta została odrzucona, oraz gdy bramka odrzutów
+zatrzymuje skok; od buildu 71 także, w ilu seriach pominięto trzecią część i
+ile razy typowe wygięcie od razu się przesunęło (`every third conversion left
+out 12, typical bend moved 3`). `LRM 0` bierze zamiast tego medianę szesnastu
+wolniejszych pomiarów, jak buildy do 60 (do porównania; nie zapisuje się). Oba tryby
+odczytują upływ w innej chwili, więc kalibracja `LC` należy do trybu, w którym
+ją zrobiono: po przejściu na build 62 uruchom `LC` jeszcze raz.
+
+Na czas serii — od 150 ms przed każdym zboczem do 2 ms po nim — linia poleceń
+wstrzymuje wypisywanie: tekst wychodzący przez Bluetooth w chwili zbocza
+zawyżał odczyt tej sekundy nawet o ~20 ns. Dłuższy wydruk, jak `LB`, wychodzi
+więc z krótką przerwą co sekundę; nic nie ginie.
 
 ### 3.4 Wybór algorytmu
 
@@ -768,9 +854,26 @@ szacunkiem szumu 1-sigma):
 |---|---|---|
 | `MG` | wzmocnienie, LSB na ns fazy. **0 = auto z CT** | 0..10000, domyślnie 0 (auto) |
 | `MR` | poziom wymuszający korektę | 0..10, domyślnie 7 (256 s) |
+| `MM` | jak korekta dochodzi do pinu: 1 = spokojny (niżej), 0 = pierwotna ścieżka | 0..1, domyślnie 1 |
 | `MF` | skąd limity per poziom: 0=za MG, 1=tabela zapisana, 2=wzór sigmowy, 3=zmierzony fit | 0..3, domyślnie 0 |
 | `MFT` | przy MF 3: docelowe sekundy między korektami szumowymi | 0 (=3600) albo 2048..65535 s |
 | `MLP n v` | jeden wiersz 11-poziomowej tabeli limitów | poziom 0..10, wartość w nanosekundach |
+
+**Tryb spokojny (`MM 1`, domyślny od buildu 60).** Gdy faza jest już w `LAT`,
+zmieniają się dwie rzeczy, a arytmetyka hierarchii nie: od poziomu 128 s w
+górę człon częstotliwości idzie w całości zamiast połowy; a wyjście dochodzi
+do korekty najwyżej o 1 LSB na sekundę (zmiana ponad 32 LSB — akwizycja,
+FLL, uzbrojenie — nadal od razu), przy czym przejście przez zero zdejmuje
+dokładnie ten slew, który założyło, razem z ułamkiem. Build 60 kazał też
+poziomom poniżej tej granicy czekać na trzykrotność limitu i wiązał granicę z
+`MR`. Z tym płytka dała 6,1 ns przy `MR 7` i 9,5 przy `MR 10`, wobec 2,7 dla
+algorytmu 11 w tym samym tygodniu; w symulacji skalibrowanej na tych
+przebiegach bez nich wychodzi 5,2 ns przy `MR 7` i 5,1 przy `MR 10` (`MM 0`:
+6,1 i 5,6), więc build 61 usunął jedno i drugie. PWM rusza się pięć razy mniej
+niż przy algorytmie 11, który nadal trzyma fazę mniej więcej dwa razy
+ciaśniej; impulsy to sposób, w jaki ten algorytm przesuwa fazę. Poniżej `MR 6`
+żadna korekta nie sięga 128 s i człon częstotliwości zostaje połowiony.
+`MM 0` to pierwotna ścieżka, bez zmian, do porównania A/B na jednej płytce.
 
 Domyślna tabela limitów to tabela Alana (przeskalowana z jego detektora 25 ns na
 ten ~1 ns). W nanosekundach na span: L0 462, L1 400, L2 331, L3 264, L4 191, L5
@@ -831,7 +934,7 @@ FPGA, dotyczy dwudziestostanowych filtrów GNSS, nie tego.
 
 **Holdover wypada za darmo.** Stan niesie częstotliwość i starzenie razem z ich
 kowariancjami, więc utrata fazy nie jest przypadkiem szczególnym: filtr przestaje
-aktualizować, dalej przewiduje i dalej steruje. Trend pokazuje `HOLD`.
+aktualizować, dalej przewiduje i dalej steruje. Trend pokazuje `NOPH`.
 
 **Korzysta z dwóch pomiarów.** Fazy z detektora LTIC i częstotliwości z
 bramkowanego licznika TIM2. To drugie nie jest ozdobnikiem: przy
@@ -891,8 +994,13 @@ z różnic branych z szesnastosekundowym opóźnieniem, więc zero wędrujące w
 skalach siedzi w szumie pomiarowym, gdzie jego miejsce. Chcesz szybszej pętli?
 Skróć `KT` — teraz to jedyna rzecz, która nią rusza. Wartość przypięta ręcznie
 przez `KQ` przechodzi bez zmian: ograniczenie dotyczy adaptacji, nie Ciebie.
-`KL` pisze `[at ceiling]`, gdy `Q` opiera się o sufit, a pętla siedząca tam
-przez cały przebieg mówi, że `KT` jest dłuższe, niż ten oscylator udźwignie.
+`KL` pisze `[at ceiling]`, gdy `Q` opiera się o sufit. Samo to nie znaczy, że
+`KT` jest za długie, choć do buildu 70 tak mówiły ta instrukcja i `KL`: to, co
+pcha Q w górę, pochodzi równie często z powolnego błądzenia po stronie GPS albo
+detektora, co z oscylatora — a szybsza pętla je kopiuje — i na płytce Dana
+Wieringa (28–29.10) `KT 1000` siedziało pod sufitem i mimo to wypadło
+lepiej niż `KT 500` — ADEV płaskie na 2,9·10⁻¹² od 40 do 400 s, wobec garbu
+4·10⁻¹² przy 100–150 s. Wartości `KT` porównuj po ADEV, po przebiegu na każdą.
 
 **Parametry** — wszystkie cztery są opcjonalne, a domyślne są tymi, których się
 używa:
@@ -901,7 +1009,7 @@ używa:
 |---|---|---|
 | `KR [ns]` | `0` = mierz | Szum pomiaru. Zero znaczy „zmierz go z różnic samego detektora o szesnastosekundowym rozstawie" — biały szum i wolna wędrówka zera razem, i tego właśnie chcesz. Ustawiaj tylko, żeby unieruchomić filtr na czas eksperymentu. |
 | `KQ [v]` | `0` = adaptuj | Szum procesu, (ns/s)² na sekundę. Zero znaczy „adaptuj z ciągu innowacji". |
-| `KT [s]` | `100` | Horyzont fazy: jak szybko sterowanie zeruje estymatę fazy. Krócej — mocniej za GPS, dłużej — bardziej na oscylatorze. Ustawia też cierpliwość testu zawieszenia: pięć horyzontów daleko od zera i picDIV zostaje uzbrojony. |
+| `KT [s]` | `100` | Horyzont fazy: jak szybko sterowanie zeruje estymatę fazy. Krócej — mocniej za GPS, dłużej — bardziej na oscylatorze. Ustawia też cierpliwość testu zawieszenia: pięć horyzontów daleko od zera i picDIV zostaje uzbrojony. Od buildu 67 zimny start używa z niego najwyżej 100 s (zob. `KT` niżej). |
 | `KL` | — | Wypisuje stan: fazę, częstotliwość i starzenie, jak mocno w każde wierzy, aktualne R i Q oraz ile odczytów odrzuciła bramka innowacji. `[at ceiling]` przy Q oznacza, że adaptacja opiera się o swoje ograniczenie. |
 
 `KR`, `KQ` i `KT` zapisują się w chwili wpisania, we własnym rekordzie flash
@@ -916,7 +1024,8 @@ Learn: algo=13 (kalman) ph=-12.4ns f=-118.30ps/s sig=2.48ns R=2.64 rej=3 arm=1
 — faza i częstotliwość, w które filtr **wierzy** (a nie odczyt z tej sekundy, bo
 o to właśnie chodzi w posiadaniu filtru), jak mocno wierzy w fazę, zmierzony szum
 pomiaru, ile odczytów odrzuciła bramka innowacji i ile razy uzbroił dzielnik.
-`HOLD=<s>` pojawia się, gdy pętla jedzie na samym modelu.
+`HOLD=<s>` pojawia się, gdy pętla jedzie na samym modelu, a `KF`, gdy
+zakłócenie jest domykane horyzontem `KF` (build 69).
 
 **W tunerze:** górny wykres pokazuje estymatę fazy z filtru, a pod nią `Vphase` z
 prowadnicami pasma — bo pytanie, które ta pętla stawia najczęściej, brzmi: czy
@@ -944,7 +1053,11 @@ jest ślepy). Na koniec *sterowanie*: `u = -(freq + faza/KC)` — skasuj
 estymowany błąd częstotliwości i domknij fazę po horyzoncie **sterownika**
 `KC` (od pierwszego zablokowania pętli; wcześniej, w akwizycji, wolnym
 krokiem `KT`), z ograniczeniem do pasma detektora; reszta sub-LSB idzie na
-następną sekundę. To, co doszło do pinu, wraca do stanu częstotliwości. Wokół
+następną sekundę. Korekta może rosnąć tylko stopniowo (jej największy dozwolony
+rozmiar rozłożony na jeden horyzont), żeby restart nie szarpnął oscylatorem,
+ale maleć może tak szybko, jak chce filtr — przed buildem 65 nie mogła, i
+dociąganie z odległości pół herca rozhuśtało PWM od szyny do szyny (patrz lista
+zmian). To, co doszło do pinu, wraca do stanu częstotliwości. Wokół
 rdzenia: bramka 4σ, test zaufania (czy faza rusza tak, jak każe TIM2? —
 z ignorowaniem mrugnięć mniejszych niż własna rozdzielczość licznika),
 cztery sekundy celowej ciszy fazy po uzbrojeniu dzielnika (odczyty z rampy
@@ -985,23 +1098,78 @@ Przypięcie na zasiewie (`KQ 0.000006359` — dokładna wartość z linii
 wartość przypięta ręcznie przechodzi bez zmian, ograniczenie dotyczy
 adaptacji. **KQ zapisuje się od wpisania** — wróć przez `KQ 0`.
 
-**`KT [s]`** (domyślnie 100). Od buildu 36 to horyzont **estymatora** —
+**`KT [s]`** (domyślnie 100; w buildzie 60 było 200). Od buildu 36 to horyzont **estymatora** —
 cierpliwość rozumu, nie tempo rąk. Krótszy KT = filtr o większym pasmie
 wiary (i wyższy sufit adaptacji Q, bo `R/KT³`); dłuższy = oparcie na
 stabilności oscylatora. To też cierpliwość czujnika zastoju — pięć
 horyzontów daleko i picDIV jest uzbrajany. Tempem domykania fazy steruje
-już `KC`.
+już `KC`. Która strona 100 s jest właściwa, zależy od oscylatora: OCXO
+autora błądzi szybko i chce 100 s; cichy OCXO, mierzony względem rubidu, może
+chcieć 300–1000 s, a komunikat komendy `KT` powyżej 200 s mówi, jak wybierać:
+po ADEV, po przebiegu na każdą wartość — nie po Q pod sufitem w `KL` (build 71;
+do buildu 70 komunikat kazał wtedy skrócić `KT`, a na płytce Dana `KT 1000`
+siedziało pod sufitem i pobiło `KT 500`). Od buildu 67 dociąganie
+używa `KT` tylko do 100 s — horyzont sterowania, pierwsze Q, założenie o
+częstotliwości, bramka uzbrojenia — więc długi `KT` nie kosztuje już zimnego
+startu: na modelu cichej płytki `KT 1000` lockował wcześniej w 28–41 minut,
+teraz w 6–12, a `KT 100` dokładnie jak przedtem.
 
-**`KC [s]`** (domyślnie 0 = auto = KT/3; **skuteczne dopiero po pierwszym
+**`KC [s]`** (domyślnie 0 = auto = KT/3, 33 s przy domyślnym `KT` — w buildach 61–67 KT/6, w buildzie 60 KT, wcześniej KT/3; **skuteczne dopiero po pierwszym
 zablokowaniu pętli** — w akwizycji i po restarcie algorytmu sterowanie
-wraca do KT). Jak szybko *ręce* domykają fazę, którą *rozum* już zna:
+wraca do KT, od buildu 67 najwyżej 100 s). Jak szybko *ręce* domykają fazę, którą *rozum* już zna:
 pomysł polega na tym, że estymat fazy jest już wygładzony, więc szybkie
  jego domykanie nie wzmacnia szumu — wzmacnia tylko poprawkę. Zmierzone
 na 20-godzinnym logu: ADEV wyjścia lepsze o ~23% na tau 256–4096 przy
-ditherze DAC rosnącym z 0,37 do 0,52 LSB/s — to budżet, nie darmo. Sweep
-nie znalazł kolana (zysk monotonny, koszt ∝ 1/KC), więc wartość domyślna
-to kompromis, a nie optimum; sam `KC` bez argumentu pokazuje wartość
-ustawioną i tę faktycznie w mocy.
+ditherze DAC rosnącym z 0,37 do 0,52 LSB/s — to budżet, nie darmo. **Oceniaj
+to po oscylatorze, nie po logowanej fazie.** Logowana faza jest odczytem
+detektora, a szybkie ręce poprawiają ją, przepisując do oscylatora własne
+powolne błądzenie detektora — a z płytki wychodzi oscylator. To, co robi
+oscylator, to scałkowane PWM: jego kroki razy herce na LSB; ADEV tego iloczynu
+zgadzało się co do kilku procent od 4 do 400 s z pomiarem płytki Dana względem
+wzorca rubidowego (14.10).
+Na płytce autora, w jednej sesji, noc przy `KC 16`, a potem dwie noce i dzień
+przy `KC 33`: PWM zmieniało się 664–744 razy na godzinę zamiast 1349, a to ADEV
+było 1,7 razy niższe przy 4–16 s, o jedną piątą niższe przy 64 s i takie samo
+przy 256 s, za jedną piątą więcej logowanej fazy (odch. std. 2,14–2,30 ns
+wobec 1,83) — to domyślne od buildu 68. KT/6 (buildy 61–67) wybrano wyłącznie
+po logowanej fazie: noc przy `KC 16` wobec algorytmu 11 noc wcześniej,
+2,63 wobec 2,73 ns, przy PWM zmieniającym się ok. 2,5 razy częściej, krokami
+1–4 LSB.
+`KT 200` / `KC` = `KT` z buildu 60 dało 5,62 ns: dobrano je na symulacji bez
+szybkiego szumu samego oscylatora, a tak wolny regulator ten szum przepuszcza.
+W symulacji skalibrowanej na płytce `KC 25` daje mniej więcej fazę algorytmu
+11 przy 1,4 raza większym ruchu DAC, a poniżej ~15 s faza zyskuje niewiele,
+za to DAC rusza się dużo więcej. (Wcześniejszy sweep, który uznał długie `KC`
+za niestabilne, szedł na symulatorze źle czytającym ułamek DAC — patrz
+changelog buildu 60.) Płytka zachowuje zapisane, a wpisanie któregokolwiek z
+`KR`, `KQ`, `KT`, `KC`, `KF` zapisuje wszystkie pięć — płytka, na której w buildzie
+60 wpisano którekolwiek, wstanie z `KT 200`; `KT 100` + `KC 0` przywracają
+domyślne. Sam `KC` bez argumentu
+pokazuje wartość ustawioną i tę faktycznie w mocy.
+
+**`KF [s]`** (build 69; domyślnie 16 s, 10–250 s, `KF 0` = wyłączone).
+Horyzont, którego sterownik używa, dopóki trwa **zakłócenie**. `KC` to wybór
+co do szumu; skok częstotliwości oscylatora — spadek zasilania, uderzenie,
+skok kwarcu — szumem nie jest, a wolny sterownik pozwala mu odepchnąć fazę
+odpowiednio dalej. 21.10 trzyminutowy spadek szyny 5 V na płytce autora (do
+4,37 V) przestawił OCXO o 2,7·10⁻⁹: przy `KC 33` faza poszła do +75 ns, po
+powrocie napięcia do −51 ns i wróciła w ±10 ns dopiero po 12 minutach; to samo
+odtworzone z `KF 16` daje +41/−29 ns i 5½ minuty. Tryb włącza się, gdy
+estymata fazy filtru przekroczy 10-krotność spokojnego szumu płytki (20 ns u
+autora, około 37 ns na detektorze tak szumiącym jak Dana) albo gdy bramka
+puści po dziesięciu odrzuconych odczytach, a wyłącza po dwóch minutach z
+rzędu poniżej 3-krotności tego szumu. Działa na estymacie, nie na odczycie,
+nigdy nie robi sterownika wolniejszym niż `KC`, a po starcie albo własnym
+uzbrojeniu picDIV czeka, aż faza się uspokoi (`AP` wpisane w konsoli liczy się
+jako zakłócenie). Log mówi, kiedy zmienia horyzont (`KAL:
+disturbance (|phase| 43 ns) - controller 33 -> 16 s`, `KAL: calm for 120 s -
+controller 16 -> 33 s`), linia `Learn:` kończy się na `KF`, dopóki tryb
+działa, a `KL` go pokazuje. Spokojna praca go nie widzi. Zmierzone na płytce
+autora (26–27.10, skoki `SP` o +82 i +90 LSB): z `KF 16` faza doszła do −58
+i −62 ns i była w ±10 ns po 4,4 i 4,0 minuty; z `KF 0` do −86 i −96 ns,
+pierwszy raz w ±10 ns po 13 i 16 minutach, potem +14 i +12 ns w drugą stronę,
+na dobre w środku po 25–27 i 32 minutach. Za każdym razem bramka puściła
+18–26 s po skoku.
 
 **`KL` — odczytaj stan** przed, w trakcie i po każdym eksperymencie:
 estymaty, sigma wiary w fazę, R i Q w użyciu (`[at ceiling]` przy Q znaczy,
@@ -1009,16 +1177,21 @@ estymaty, sigma wiary w fazę, R i Q w użyciu (`[at ceiling]` przy Q znaczy,
 nieustającymi mikrozdarzeniami GPS zdarza się to większość nocy i jest
 własnością nieba, nie usterką), ostatnia innowacja, licznik odrzuceń,
 **ratio adaptacji** (czy innowacje są większe od przewidywań; >1 naciska Q
-w górę, <1 w dół) i **znaki wodne Q** od startu trackowania (`lo..hi` —
-czy Q nocą wychodziło z sufitu). Najbardziej informacyjny
-nawyk: `KL`, potem `SW`, potem godzinny log.
+w górę, <1 w dół — od buildu 71 opisane jako `Q pushed up`, `Q pushed down`
+albo `consistent`; do buildu 70 `wants more Q` i `wants less`, co brzmiało
+jak rada co do `KT`, a nią nie jest) i **znaki wodne Q** od startu
+trackowania (`lo..hi` — czy Q nocą wychodziło z sufitu). Najbardziej
+informacyjny nawyk: `KL`, potem `SW`, potem godzinny log.
 
 **Trendy:** `KAL` (normalna), `REJ` (bramka odrzuciła — pojedynczo lub
-parami przy zdarzeniach GPS to norma), `ARM` (uzbrojenie
-dzielnika — start, szyna lub zastój), `HOLD` (brak fazy, sterowanie z
-modelu; **cztery sekundy HOLD zaraz po `ARM` to celowa cisza** — rampa
-czyta wtedy szynę, a to nie jest faza), `NoPL`/`NoCT` (brak kalibracji),
-`WAIT` (brak danych). Jak wygląda dobra noc — patrz [Aneks D](#aneks-d--filtr-kalmana-prostymi-słowami).
+parami przy zdarzeniach GPS to norma), `KEPT` (detektor powtórzył
+poprzedni odczyt i filtr nie wziął z niego fazy — przy locku mniej więcej
+co tysięczna sekunda, w trakcie dociągania co trzecia; build 66), `ARM`
+(uzbrojenie dzielnika — start, szyna lub zastój), `NOPH` (brak fazy,
+sterowanie z modelu; **cztery sekundy NOPH zaraz po `ARM` to celowa
+cisza** — rampa czyta wtedy szynę, a to nie jest faza), `NoPL`/`NoCT`
+(brak kalibracji), `WAIT` (brak danych). Jak wygląda dobra noc — patrz
+[Aneks D](#aneks-d--filtr-kalmana-prostymi-słowami).
 
 ## Część 5 — Wyświetlacze: co znaczy każde pole
 
@@ -1028,7 +1201,7 @@ pokazują tę samą prawdę, z różnym poziomem detalu.
 ### 5.1 TFT (480x320 albo 320x240)
 
 ```
-y=  0..23   pasek nagłówka: "GPSDO v1.07"   CPU 58%   LMT 14:32:45 Thu
+y=  0..23   pasek nagłówka: "GPSDO v1.08"   CPU 58%   LMT 14:32:45 Thu
 
 `CPU 58%` na pasku nagłówka to całkowite obciążenie procesora, zawsze
 włączone (pomiar biegnie w zadaniu uptime; `TL` na linii serialowej
@@ -1073,7 +1246,7 @@ cyfry częstotliwości powyżej, więc pasek i cyfry nie mogą się różnić.
 | `OCXO WARMUP` | pomarańczowy | oscylatora nie ma jeszcze po co oceniać |
 | `CALIBRATING` | pomarańczowy | `C`, `CT` albo `LC` celowo rusza wyjściem |
 | `HOLDOVER (manual)` | pomarańczowy | zamrożone przez `MH` |
-| `HOLDOVER (fix lost)` | czerwony | fix zniknął i pętla zamroziła się sama |
+| `HOLDOVER (fix lost)` | czerwony | fix zniknął albo przez 10 s nie było 1PPS (build 68), i pętla zamroziła się sama |
 | `WAITING FOR GPS FIX` | czerwony | nie ma się do czego dyscyplinować |
 
 W trakcie survey-in doklejane jest ` SURVEY`. Zielony celowo przychodzi wolno,
@@ -1100,6 +1273,12 @@ migającym znacznikiem holdover.
 Czas lokalny HH:MM (dwukropki pulsują sekundą). Same kreski = start/brak danych;
 `oooo` = brak fixa; spinery = rozgrzewka / survey / kalibracja.
 
+Od buildu 67 spinery prawie nic nie kosztują: zadanie wyświetlacza budzi się
+ok. siedem razy na sekundę, żeby je przesunąć, i przy tych pobudkach dotyka
+tylko cyfr LED; TFT, OLED i LCD są odświeżane raz na PPS, jak zawsze. Wcześniej
+każda pobudka przerysowywała wszystko i wskaźnik `CPU` podwajał się na czas
+rozgrzewki i survey-in (55–56 % wobec 27 % na płytce autora).
+
 Jasność ustawia się przy kompilacji, osobno dla każdego typu wyświetlacza, w
 `gpsdo_config.h`: `TM1637_BRIGHTNESS` (0-7) i `HT16K33_BRIGHTNESS` (0-15).
 Żadna nie ma komendy CLI - ustawia się je raz, pod zamontowany moduł i światło
@@ -1109,7 +1288,7 @@ w pomieszczeniu.
 
 | LED | Znaczenie |
 |---|---|
-| **Żółta (PB8)** | WYŁ = brak fixa GPS *i* brak holdoveru · świeci = fix OK · wolne miganie (1 s) = ręczny holdover, z fixem albo bez · szybkie miganie (200 ms) = fix utracony, auto holdover |
+| **Żółta (PB8)** | WYŁ = brak fixa GPS *i* brak holdoveru · świeci = fix OK · wolne miganie (1 s) = ręczny holdover, z fixem albo bez · szybkie miganie (200 ms) = utracony fix albo 1PPS, auto holdover |
 | **Niebieska (PC13)** | **tylko awaria** — szybkie miganie znaczy złapaną usterkę firmware (asercja / przepełnienie stosu / brak pamięci), z powodem na serialu. To *nie* jest pulsometr; ciemna niebieska LED to stan dobry. |
 
 ---
@@ -1141,9 +1320,9 @@ Linia po linii:
 | 1 | uptime (liczony z PPS, godny zaufania od v1.06) + data/czas UTC z GPS |
 | 2 | pozycja (6 miejsc), wysokość (wysokość GPS **plus Twój `AO`**), satelity, HDOP — albo słowo `TIME`, gdy odbiornik timingowy jest w trybie stałej pozycji; brak fixa → `GPS: no position fix yet` |
 | 3 | suwa liczona częstotliwość (albo `---` przed pierwszym zliczeniem) i uśrednione okna błędu 10 s / 100 s / 1 ks / 10 ks — każde pojawia się dopiero, gdy jego bufor się wypełni |
-| 4 | kod PWM 16-bit, zmierzone napięcie sterujące, słowo trendu (`hit`, `ACQ`, `DPLL`, `LOCK`, `PLL`, `CORR`, `ZC`, `NOPH`, `NoCT`, `ARM`, `NoPL`, …) — w holdoverze `[HOLDOVER]` zastępuje trend |
+| 4 | kod PWM 16-bit, zmierzone napięcie sterujące, słowo trendu (`hit`, `ACQ`, `DPLL`, `LOCK`, `PLL`, `CORR`, `ZC`, `NOPH`, `NoCT`, `ARM`, `NoPL`, …) — w holdoverze `[HOLDOVER]` zastępuje trend; `RAILS` zastępuje go, gdy pętla idzie od jednego końca zakresu DAC do drugiego bez locka pomiędzy (build 65 — patrz Część 10) |
 | 5 | linia Learn zależna od algorytmu (niżej) + `qErr`, gdy działa `SAW 1` |
-| 6 | temperatura/ciśnienie BMP280 (**surowe + Twój `PO`**), temperatura/wilgotność AHT, napięcie/prąd INA, napięcie detektora `Vphase`, faza `dph` w ns (z odjętą piłą, tak jak w samej pętli) oraz `CPU:` — udział ostatniej sekundy, którego procesor nie spędził bezczynnie. Przy `TL 1` idzie za tym pole `TL:` z rozbiciem na zadania. |
+| 6 | temperatura/ciśnienie BMP280 (**surowe + Twój `PO`**), temperatura/wilgotność AHT, napięcie/prąd INA, napięcie detektora `Vphase`, faza `dph` w ns (z odjętą piłą, tak jak w samej pętli) oraz `CPU:` — udział ostatniej sekundy, którego procesor nie spędził bezczynnie. Gdy przy starcie znaleziono LM75 (build 68), za nim idzie `LM75:` — temperatura w °C z trzema miejscami po przecinku, `LM75:---`, gdy czujnik przestaje odpowiadać. Przy `TL 1` idzie dalej pole `TL:` z rozbiciem obciążenia na zadania. |
 
 Linia Learn per rodzina:
 
@@ -1152,7 +1331,7 @@ Linia Learn per rodzina:
   nagromadzona faza, ostatni działający poziom, korekty, zbrojenia, bieżący
   szacunek szumu, przejścia przez zero, sekundy
 - algo 13: `ph=<ns> f=<ps/s> sig=<ns> R=<ns> rej=<n> arm=<n>`, a w holdoverze
-  `HOLD=<s>` — estymaty filtru, nie odczyt z tej sekundy
+  `HOLD=<s>`, w czasie zakłócenia `KF` (build 69) — estymaty filtru, nie odczyt z tej sekundy
 - algo 10: `state=ACQ|DPLL|LOCK`
 - algorytmy 3–9: wyuczony dryf/nachylenie/tłumienie, algo 9 dokleja wyuczony
   tempco
@@ -1203,18 +1382,21 @@ właśnie trafiłeś:
 | `DV [v]` | 2,50..5,50 V | napięcie przy pełnym kodzie, dla "zadane" w raporcie — **zapisuje się samo**. `3.30` (domyślne) to model PWM; na płytce z AD5680 ustaw `5.00`. Zachowywane są trzy miejsca po przecinku (`4.096` dla referencji 4,096 V). |
 | `AV [x]` | 1,00..10,00 | stosunek dzielnika przed pinem ADC, dla "zmierzone" i każdego wyświetlenia Vctl — **zapisuje się samo**. `1.00` (domyślne) = bez dzielnika. |
 | `VS [VCC\|VREF]` | — | do czego zworką podpięty jest dzielnik na PA0 — **zapisuje się samo**. `VCC` (domyślnie) to szyna 5 V, jak na każdej płytce przed V3. `VREF` to referencja napięcia, a raport `DAC` porównuje wtedy odczyt z `DV` i protestuje powyżej 5 %. |
-| `SPAN [CLR FULL\|REDUCED]` | — | zworka zakresu EFC na PB14 (`GPSDO_SPAN_SENSE`): bez argumentu = pozycja, w której jest zworka, i kalibracja `CT`, którą niesie każda pozycja. `CLR` zapomina kalibrację jednej pozycji — tej zmierzonej w złym miejscu. Raport `DAC` wypisuje te same linie. |
+| `SPAN [CLR FULL\|REDUCED]` | — | zworka zakresu EFC na PB14 (`GPSDO_SPAN_SENSE`): bez argumentu = pozycja, w której jest zworka, i kalibracja `CT` (K i zero), którą niesie każda pozycja. `CLR` zapomina kalibrację jednej pozycji — tej zmierzonej w złym miejscu. Raport `DAC` wypisuje te same linie. |
 
 **Trzy ścieżki, jeden węzeł.** Wszystkie trzy ścieżki wyjścia można kompilować
 razem; komenda `DAC` wybiera, którą firmware pisze, a zworka na płytce
 decyduje, który sygnał trafia do filtra EFC (nie ma programowego multipleksera
 — dwa sterowniki na jednym węźle to błąd sprzętowy). Przy starcie każda
 skompilowana ścieżka jest inicjowana, żeby przełączenie nie zrobiło glitcha,
-ale krok sterujący pisze **tylko na wybraną ścieżkę**; pozostałe stoją
-zamrożone na ostatnim kodzie. `PWM` to zwykły PWM 16-bit na PB9 (na buildzie z
+ale krok sterujący pisze **tylko na wybraną ścieżkę**: niewybrany AD5680
+trzyma ostatni kod, a gdy żywa jest ścieżka `EXT`, pin PWM jest trzymany nisko
+(od buildu 69; wcześniej odtwarzał dalej swój ostatni kod, czyli nośną na
+filtrze PWM). `PWM` to zwykły PWM 16-bit na PB9 (na buildzie z
 silnikiem ditheru: ten silnik z rozdzielczością całych LSB — to samo napięcie,
 bez rekonfiguracji). `DITH` to nośna 13-bit + dither sigma-delta 1-bit na
-PB9/TIM4 CH4, efektywne 24 bity w średniej czasowej (nośna ≈12,2 kHz, DMA).
+PB9/TIM4 CH4, efektywne 24 bity w średniej czasowej (nośna ≈11,7 kHz przy
+zegarze timerów BlackPilla 96 MHz — `DAC` podaje wartość z płytki — DMA).
 `EXT` to AD5680 na SPI bit-bang po PB4/PB0/PB2, zapisywany mniej więcej raz na
 sekundę (~20 µs z zamaskowanymi przerwaniami).
 
@@ -1244,26 +1426,38 @@ Oba zapisują się same.
 **Dwa zakresy, dwie kalibracje (`GPSDO_SPAN_SENSE`, PB14).** Płytka z
 przesuwnikiem poziomu EFC może sterować oscylatorem w pełnym zakresie napięcia
 albo w zawężonym, a to są dwa różne obiekty — na prototypie V3 w pozycji
-zawężonej K jest od czterech do pięciu razy mniejsze. Podłącz drugi biegun
-zworki zakresu do **PB14** (zworka założona = PB14 do masy = REDUCED;
-zdjęta albo niepodłączona = FULL), a firmware będzie trzymał osobną
-kalibrację `CT` dla każdej pozycji:
+zawężonej K jest około 3,5 razy mniejsze (3,3–3,6 razy, obie pozycje zmierzone
+na jednej referencji). Podłącz drugi biegun zworki zakresu do **PB14** (zworka
+założona = PB14 do masy = REDUCED; zdjęta albo niepodłączona = FULL), a firmware
+będzie trzymał osobną kalibrację `CT` dla każdej pozycji:
 
 - gdy zworka się przestawi (po odfiltrowaniu drgań styku, około pół sekundy),
-  współczynniki pętli są wyliczane od nowa z K tej pozycji, a kod sterujący
-  jest przeliczany tak, żeby pin EFC zachował napięcie — częstotliwość przed
+  współczynniki pętli są wyliczane od nowa z K tej pozycji, a kod sterujący jest
+  przeliczany tak, żeby pin EFC zachował napięcie — częstotliwość przed
   przestawieniem jest częstotliwością po nim. Przeliczenie potrzebuje jednej
   pary kodów, o której wiadomo, że daje to samo napięcie w obu pozycjach;
   firmware uczy się jej sam — kod, na którym pętla była zablokowana przed
   przestawieniem, w parze z kodem, na którym zablokuje się potem, albo z kodem
-  10 MHz wyznaczonym tam przez `CT`. Dopóki jej nie ma, przestawienie zostawia
-  kod, a pętla łapie od nowa;
+  10 MHz wyznaczonym tam przez `CT`. Liczy się tylko kod, który naprawdę jest
+  zerem: nie ten trzymany w holdoverze, nie ustawiony ręcznie (`SP`, `up`/`dp`),
+  dopóki pętla nie straci locka i nie złapie go od nowa, i nie taki, który leży
+  daleko od miejsca, gdzie `CT` znalazło 10 MHz w tej pozycji — musi leżeć w
+  granicach 5e-8 od zera tej pozycji i nie bliżej zera drugiej (w granicach 5e-9
+  od własnego zera liczy się zawsze). Ten ostatni test łapie pętlę zablokowaną
+  na złym obiekcie, a to właśnie daje stanowisko łączone przewodami, gdy
+  przesuwnik wejdzie w tor albo z niego wyjdzie, zanim PB14 za nim pójdzie.
+  Każda odmowa jest wypisywana. Dopóki pary nie ma, przestawienie zostawia kod,
+  a pętla łapie od nowa;
 - pozycja, która nigdy nie była kalibrowana, jedzie na współczynnikach drugiej
   — jak zawsze jechała płytka z jedną kalibracją — a `CT` startuje samo, gdy
   tylko jest fix GPS (nigdy w holdoverze), z maksymalnie trzema kolejnymi
   próbami 10, 20 i 40 minut po nieudanej;
 - zworka przestawiona przy wyłączonym zasilaniu jest obsłużona przy starcie,
-  zanim ruszy pętla.
+  zanim ruszy pętla. Od buildu 65 zapisany kod jest przeliczany ze spanu, w
+  którym według slotu live store został zapisany, a nie ze spanu, który podaje
+  rekord ustawień — to dwa osobne zapisy, a zanik zasilania między nimi po
+  przestawieniu zworki albo rekord, którego zapis się nie udał, potrafiły
+  wystartować oscylator ponad 1e-7 obok.
 
 `SPAN` pokazuje stan, a raport `DAC` wypisuje go pod linią obiektu. Płytka
 skalibrowana, zanim podłączono PB14, ma swoją jedną kalibrację przypisaną do
@@ -1274,11 +1468,17 @@ zapomni błędną; `SPAN CLR` robi to samo ręcznie. Ręczne wzmocnienia w LSB
 (`LG`, `MG`, `LTK`) nie są przeskalowywane — przestawienie ostrzega o każdym,
 które jest ustawione.
 
+`SPAN` wypisuje też **zero** każdej pozycji — kod, na którym `CT` znalazło
+10 MHz, odnawiany przez pary zmierzone od tego czasu — i właśnie z nim
+porównuje test opisany wyżej. Zera pochodzą wyłącznie z `CT`, więc płytka
+skalibrowana przed buildem 58 nie ma żadnego: uruchom `CT` raz w każdej
+pozycji i test działa. `SPAN CLR` zapomina K i zero pozycji, i parę.
+
 ### Kalibracja
 | Komenda | Czas | Co robi |
 |---|---|---|
 | `C` | ~2 min | starsze dwupunktowe centrowanie PWM |
-| `CT` | ~3 min (+3 przy małym K) | **czułość oscylatora K + autostrojenie PID 3–9 i LTIC; sam zapisuje PID** — uruchom najpierw to. Przy łagodnej roślinie (małe Hz/LSB — zredukowany span EFC, zewnętrzny DAC) drugi przebieg mierzy ponownie na szerszym, wycentrowanym rozstawie kodów, żeby dopasowanie miało sygnał |
+| `CT` | ~3 min (+8 przy małym K) | **czułość oscylatora K + autostrojenie PID 3–9 i LTIC; sam zapisuje PID** — uruchom najpierw to. Przy łagodnym obiekcie (małe Hz/LSB — zredukowany span EFC, zewnętrzny DAC) drugi przebieg mierzy ponownie wokół dopasowanego kodu 10 MHz: 0,8 Hz huśtawki niezależnie od zakresu, każdy punkt jako średnia ze 100 s, więc K wychodzi z dokładnością około 1 % |
 | `LC` | ~5 min | **kalibracja detektora fazy (ns/V, offset, zakres); sam zapisuje się przy PASS** — uruchom jako drugie |
 | `ACG g [cap]` | — | napęd centrowania ACQ: wzmocnienie 50..20000 LSB/V, maks. krok 5..1000 LSB |
 | `AP` | — | ręczne zbrojenie dzielnika picDIV |
@@ -1308,13 +1508,15 @@ które jest ustawione.
 |---|---|---|
 | `LNV` | 0..1e6 | nachylenie detektora, ns na wolt (mierzy LC) |
 | `LZO` | 0..3,3 V | przesunięcie zera detektora, w woltach |
-| `LRN` | 2..1e9 ns albo `0`/`1`/`R` | zakres detektora, ns (mierzy go `LC`). Ta sama komenda steruje samouczeniem — feed-forwardem dryfu i tłumieniem algorytmów 3–10: `LRN 0` je zamraża (to, czego się nauczyło, nadal działa), `LRN 1` wznawia (domyślnie włączone), `LRN R` przywraca dryf i tłumienie do wartości teoretycznych, samo `LRN` pokazuje stan. `LRN 0`/`LRN 1` zapisuje `ES FLAGS` (patrz osobliwości niżej) |
+| `LRN` | 2..1e9 ns albo `0`/`1`/`R` | zakres detektora, ns (mierzy go `LC`; ułamek i wykładnik są w porządku — `LRN 2500.7`, `LRN 1e3`). Ta sama komenda steruje samouczeniem — feed-forwardem dryfu i tłumieniem algorytmów 3–10: dokładnie `LRN 0` je zamraża (to, czego się nauczyło, nadal działa), `LRN 1` wznawia (domyślnie włączone), `LRN R` przywraca dryf i tłumienie do wartości teoretycznych i od razu to zapisuje, samo `LRN` pokazuje stan. Wszystko inne jest odrzucane. `LRN 0`/`LRN 1` zapisuje `ES FLAGS` |
 | `LAT` | 0,001..1e9 ns (100) | próg fazy ACQ |
 | `LDT` | 1e-13..1,0 (5e-10) | próg dryfu DPLL→LOCK |
 | `LIV` | 1..600 s (300) | odstęp korekt w LOCK |
 | `AQP/AQI/AQD/AQL`, `DPP/DPI/DPD/DPL`, `LKP/LKI/LKD/LKL` | 0..100000 | PID stopni |
 | `LPOL` | −1 / 0 / +1 | polaryzacja PWM→faza (0 = nieustawiona: pętla czeka i mówi o tym; `LC` ją mierzy) |
 | `LCV` | 0..3,3 V | cel centrowania ACQ |
+| `LRM` | 0 / 1 (1), nie zapisuje się | jak czytana jest seria z detektora: 1 = prosta przez 64 pomiary, odczytana na samym zboczu; 0 = mediana z 16, jak do buildu 60 |
+| `LB` | — | liczniki od startu (zbocze złapane, prosta odrzucona i dlaczego, odczyt wstrzymany, pominięta trzecia część i przesunięte typowe wygięcie — build 71), potem ostatnia seria: wzięta na zboczu czy później, dlaczego jej prosta została odrzucona, czas i kod każdego pomiaru, prosta, rozrzut, wygięcie i typowe dla płytki, jak daleko od siebie są jej trzecie części, tempo spadku |
 | `FA`/`FAD`/`FAL` | 10 / 100 / 1000 s | okno uśredniania dla członu tłumiącego (oba / DPLL / LOCK) |
 
 ### LTIC-Lars (algo 11) — zapis przez `ES LTIC`
@@ -1324,15 +1526,16 @@ które jest ustawione.
 0=wył.), `LTR` (0..3,300 V) — znaczenia w Części 4.4.
 
 ### Algo 12 (akumulator wielopoziomowy) — zapis `ES ALGO12`, lista `ML`
-`MG` (0..10000 LSB/ns, 0=auto z CT), `MR` (0..10, domyślnie 7), `MF` (0..3
-źródło limitów, domyślnie 0), `MFT` (0=3600 s, albo 2048..65535 s),
+`MG` (0..10000 LSB/ns, 0=auto z CT), `MR` (0..10, domyślnie 7), `MM` (0..1,
+domyślnie 1 = spokojny), `MF` (0..3 źródło limitów, domyślnie 0), `MFT` (0=3600 s, albo 2048..65535 s),
 `MLP <poziom> <ns>` (poziom 0..10) — znaczenia w Części
 4.5.
 
 ### Algo 13 (Kalman) — zapis w chwili wpisania, bez `ES`
 `KR` (0..1000 ns, 0 = mierz), `KQ` (0..1, 0 = adaptuj), `KT` (10..10000 s,
-domyślnie 100), `KC` (10..10000 s, 0 = auto KT/3; działa po pierwszym
-zablokowaniu), `KL` (wypisz stan filtru) — znaczenia w części 4.6.
+domyślnie 100), `KC` (10..10000 s, 0 = auto = KT/3; działa po pierwszym
+zablokowaniu), `KF` (10..250 s, 0 = wyłączone, domyślnie 16: horyzont na czas
+zakłócenia), `KL` (wypisz stan filtru) — znaczenia w części 4.6.
 
 ### GPS, czas, czujniki
 | Komenda | Zakres | Co robi |
@@ -1379,19 +1582,12 @@ jawnie włączony — domyślne ustawienie nie może odbierać pinu świadomej d
 | `RB` | ciepły restart (zachowuje ustawienia — ale **nie** zapisuje ich najpierw sam) |
 | `CR YES` | zimny restart: wymaż ustawienia + dane wyuczone, domyślne fabryczne (YES jest wymagany, bo model wyuczony odbudowuje się dniami) |
 
-### Znane osobliwości v1.07 (uczciwa lista)
+### Znane osobliwości v1.08 (uczciwa lista)
 
-1. `LRN` ma dwa zadania i rozróżnia je po liczbie: `0` i `1` przełączają
-   samouczenie, każda inna liczba całkowita to zakres detektora w ns. Liczba
-   jest czytana jako całkowita, więc część ułamkowa przepada (`LRN 2500.7`
-   ustawia 2500), a zapisu wykładniczego komenda nie rozumie — `LRN 1e3`
-   zostaje odczytane jako 1 i włącza uczenie, zamiast ustawić 1000 ns. Słowo
-   inne niż `R` liczy się jako 0, więc `LRN ON` wyłącza uczenie. Zakres
-   wpisuj w pełnej postaci. Pole `LRN` w tunerze wysyła liczbę tak samo: 0
-   albo 1 przełącza w nim uczenie, zamiast ustawić zakres.
-2. Po `LRN R` firmware podpowiada `ES FLAGS`, a to zapisuje tylko przełącznik
-   wł./wył. Dryf i tłumienie ustawione przez `LRN R` to dane live (Część 9):
-   zapisują się same w ciągu 20 minut, a pełne `ES` zapisuje je od razu.
+W chwili pisania żadne nie są znane. Obie wymienione dla v1.07 — `LRN`
+czytające argument jako liczbę całkowitą (`LRN 1e3` włączało uczenie,
+`LRN ON` je wyłączało) i `LRN R` podpowiadające `ES FLAGS`, które nie
+zapisuje resetu — są poprawione w buildzie 58.
 
 ## Część 8 — Tuner na PC
 
@@ -1461,13 +1657,16 @@ Raw monitor → **Start logging**, format Full log / CSV only / Both:
 
 ## Część 9 — Ustawienia, flash ring i zużycie
 
-Wszystko, co trwałe, mieszka w jednym **pierścieniu z wyrównywaniem zużycia** we
-flash sektorze 7: 255 slotów po 512 bajtów. Każdy zapis ( `ES`, zdany `LC`,
-aktualizacja danych wyuczonych) pisze kolejny pusty slot; sektor jest wymazywany
-dopiero, gdy pierścień zawija się — raz na 255 zapisów. Przy tempie zapisów tego
-firmware (nawet zapracowany stole robi ~73 zapisy dzi ennie) wymazanie wypada co
-~3,5 dnia, a flash F411 znosi ~10 000 cykli na sektor: **mniej więcej 96 lat**.
-Nie zużyjesz tego. `EW` pokazuje realne liczniki, gdybyś był ciekawy.
+Wszystko, co trwałe, mieszka w jednym **pierścieniu z wyrównywaniem zużycia**
+we flash sektorze 7: 255 slotów po 512 bajtów. Każdy zapis (`ES`, zdany `LC`,
+aktualizacja danych wyuczonych) pisze kolejny pusty slot; sektor jest
+wymazywany dopiero, gdy pierścień zawija się — raz na 255 zapisów — a przy
+zawinięciu najnowsze rekordy ustawień, Kalmana i danych live są przenoszone za
+kasowanie (od buildu 65; wcześniej zostawał tylko zapisywany slot i następny
+start mógł pójść na domyślnych). Przy tempie zapisów tego firmware (nawet
+zapracowany stole robi ~73 zapisy dziennie) wymazanie wypada co ~3,5 dnia, a
+flash F411 znosi ~10 000 cykli na sektor: **mniej więcej 96 lat**. Nie
+zużyjesz tego. `EW` pokazuje realne liczniki, gdybyś był ciekawy.
 
 Dwa rodzaje rekordów dzielą pierścień:
 
@@ -1475,10 +1674,21 @@ Dwa rodzaje rekordów dzielą pierścień:
   Twoje polecenie. Zapisy grupowe (`ES PID` itd.) piszą *cały* blok ustawień
   wyseedyowany ostatnim zapisanym — więc zapis jednej grupy nie może nadpisać
   innej.
-- **Dane live** — to, czego urządzenie nauczyło się samo: kalibracja `LC`, model
-  dryfu/tłumienia, ostatni punkt pracy. Zapisywane automatycznie, ale z
-  histerezą (tylko gdy coś realnie zmieniło się o sensowny krok, i najwyżej
-  co 20 minut).
+- **Dane live** — to, czego urządzenie nauczyło się samo: kalibracja `LC`,
+  model dryfu/tłumienia, ostatni punkt pracy. Zapisywane automatycznie, ale z
+  histerezą (tylko gdy coś realnie zmieniło się o sensowny krok, i najwyżej co
+  20 minut); `LC`, `LRN R` i przestawienie zworki zakresu zapisują je od razu.
+  Punkt pracy jest zapisywany sam (od buildu 65), gdy odszedł o ponad 0,02 Hz
+  od zapisanego (w LSB przez K z `CT`; bez `CT` 64 LSB), a pętla jest w locku
+  od 20 minut bez przerwy i bez skoku (kod wpisany przez `SP`, `up` albo `dp`,
+  choćby o jeden LSB, albo zostawiony przez kalibrację liczy 20 minut od nowa)
+  — nigdy w holdoverze, w trakcie kalibracji ani w trakcie przestawiania
+  zworki zakresu; algorytmy 0–9 nie mają locka i w ten sposób go nie zapisują.
+  Do buildu 64 trafiał do flasha tylko razem z modelem dryfu, którego
+  algorytmy 11–13 nie ruszają, więc zimny start potrafił zaczynać pół herca
+  obok. Slot mówi też, do którego spanu należy jego kod; slot zapisany przez
+  build 64 nadal się ładuje. Zapis odrzucony przez flash jest ponawiany po 20
+  minutach.
 
 Aktualizacje firmware: ustawienia z v1.04/v1.05 są migrowane przy przywołaniu
 (v4→v5 dokładają blok algo-12 z domyślnymi); blok z radykalnie innej wersji albo
@@ -1510,7 +1720,7 @@ Praktyczna checklista, ostatni raz:
 | Ustawienia/kalibracja zniknęły po wgrywaniu | ktoś użył **Erase Chip** — to zasada sektora 7 (Część 2.2); powtórz `CT`, `LC`, `ES` |
 | Żółta LED wyłączona | brak fixa GPS i brak holdoveru — antena, widok nieba, kabel. W holdoverze dioda zawsze miga, więc ciemna dioda nigdy nie oznacza zamrożonego wyjścia |
 | `HDOP:TIME` się nie pojawia | survey-in nieukończony (wymaga odbiornika timingowego + `SV 1` + dobrego nieba); powtarza się po każdym zaniku zasilania |
-| `CT` kończy się porażką / odrzuca K | okablowanie EFC albo czułość oscylatora poza zakresem 0,02–2 mHz/LSB — sprawdź bufor DAC i zakres EFC |
+| `CT` kończy się porażką / odrzuca K | okablowanie EFC albo czułość oscylatora poza zakresem 0,01–2 mHz/LSB — sprawdź bufor DAC i zakres EFC |
 | `LC` kończy się porażką | najpierw `CT`; nie ruszaj jednostki przez te 5 minut |
 | Trend stoi na `NoCT` (algo 12) | wzmocnienie auto, ale CT nigdy nie biegło → `CT` |
 | Trend stoi na `ACQ` / `NoPL`, algorytmy 10–13 | nieustawione `LPOL` (pętla drukuje ostrzeżenie i czeka) — ustaw `LPOL -1` albo `1`, potem `ES LTIC` |
@@ -1520,6 +1730,7 @@ Praktyczna checklista, ostatni raz:
 | Niebieska LED szybko miga | złapana usterka firmware (asercja / stos / heap) — przeczytaj komunikat na serialu; zgłoś |
 | Jednostka sama się resetuje | sprawdź szynę 3V3 pod obciążeniem OCXO; baner startowy drukuje przyczynę resetu |
 | Wyświetlacz żyje, serialu brak | jesteś tylko na Bluetooth? 57600 na Serial2; albo wpisano `RP` — `RR` wznawia |
+| `LOOP: rail to rail with no lock …` na konsoli, trend `RAILS` | pętla przeprowadziła PWM od jednego końca zakresu DAC do drugiego bez locka po drodze: rozbiega się, a nie dociąga (tak robił algorytm 13 buildu 64 przy pół hercu odejścia; naprawione w 65). `LA 11` dociąga z daleka; jeśli to sam algorytm 11, błędne jest `CT` (K) albo `LPOL`. Bez detektora (brak `GPSDO_LTIC`) linia kończy się „Check CT.”. Ostrzeżenie znika przy locku, przy zmianie algorytmu, gdy kod przestawi coś innego niż pętla (`SP`, `CT`, `LC`), albo po 30 minutach bez dotknięcia któregoś końca |
 
 Jeśli nic z tego nie pomaga: złap pełny log tunerem (Część 8.5), zanotuj wersję
 z `V` i pytaj — z dołączonym logiem. Tydzień CSV-a 1 Hz to różnica między
@@ -1674,9 +1885,17 @@ jakiekolwiek uśrednianie.
 Gdy GPS znika (przecięta antena, martwy odbiornik), pętli brakuje prawdy, którą
 mogłaby prowadzić. Właściwy ruch to **zamrożenie** ostatniego dobrego napięcia
 sterującego i pozwolenie OCXO płynąć na własnej stabilności — to holdover (`MH`
-ręczny albo automatyczny po utracie fixa; żółta LED miga, wyświetlacz robi się
-pomarańczowy, `[HOLDOVER]` zastępuje trend w raporcie). Oscylator dryfuje wtedy
-ze starzenia i temperatury — powoli, ale niepowstrzymanie, dopóki GPS nie wróci.
+ręczny albo automatyczny, gdy znika fix albo przez 10 s nie ma 1PPS; żółta LED
+miga, wyświetlacz robi się pomarańczowy, `[HOLDOVER]` zastępuje trend w
+raporcie). Oscylator dryfuje wtedy ze starzenia i temperatury — powoli, ale
+niepowstrzymanie, dopóki GPS nie wróci. Od buildu 68 sprawdzany jest impuls, nie
+tylko fix, bo odbiornik timingowy w Time Mode podaje swoją stałą pozycję jako
+ważną bez żadnego sygnału; a automatyczny holdover kończy się dopiero, gdy fix
+wraca razem z 10 s nieprzerwanych impulsów, więc antena, która łapie i gubi
+sygnał, nie kończy go impulsem czy dwoma. Ręczny holdover zostaje ręczny mimo
+takiej utraty (build 68): utrata jest ogłaszana (`GPS fix lost — manual
+holdover kept` albo `GPS 1PPS lost — …`), a zakończyć go możesz tylko Ty,
+komendą `MD` — nie powrót GPS.
 
 ### A.6 Jak ocenia się wyniki: dewiacja Allana w jednym akapicie
 
@@ -1881,31 +2100,65 @@ Od buildu 36 to dwa osobne pokrętła, i warto rozumieć różnicę:
 - **KT** to cierpliwość **rozumu**: jak szeroko filtr rozkłada wiarę w
   czasie i jak szybki wolno być jego wnioskowaniu (stawia też sufit
   adaptacji Q — filtr nie może biegać szybciej niż jego horyzont).
-- **KC** to szybkość **rąk**: skoro filtr już *wie*, że faza siedzi 5 ns
-  za daleko — po jakim czasie to domknąć? Domyślnie KT/3, ale dopiero
-  **po pierwszym zablokowaniu**: po zimnym starcie pętla wchodzi do
-  pasma spokojnym krokiem KT, a szybkie ręce włączą się same, gdy będzie
-  czego szybko domykać. Szybsze ręce to mniejszy błąd fazy (ADEV lepsze
-  o ~23% na średnich tau), ale większy dither DAC — budżet, nie
-  darmo.
+- **KC** to szybkość **rąk**: skoro filtr już *wie*, że faza siedzi 5 ns za
+  daleko — po jakim czasie to domknąć? Domyślnie KT/3 (w buildach 61–67
+  KT/6), ale dopiero **po pierwszym zablokowaniu**: po zimnym starcie pętla
+  wchodzi do pasma spokojnym krokiem KT (od buildu 67 najwyżej 100 s), a
+  szybkie ręce włączą się same, gdy będzie czego szybko domykać. Szybsze
+  ręce to mniejszy *logowany* błąd fazy (ADEV lepsze o ~23% na średnich
+  tau), ale większy dither DAC — budżet, nie darmo.
+- **KF** to ręce **w pośpiechu**: gdy coś mocno wybije fazę — spadek
+  zasilania, skok kwarcu — domykają ją w 16 s, aż przez dwie minuty będzie w
+  domu, potem wracają do KC (build 69). Spokojna praca tego nie widzi.
 
 ### D.4 Zdrowy sceptycyzm, czyli co filtr robi, gdy coś nie gra
 
 - **Bramka 4σ.** Odczyt zbyt dziki jak na własne przewidywania jest
   odmawiany — pojedynczo i parami przy zdarzeniach GPS to normalna
   rzecz (noc na buildzie 42: 320 odrzutów w 20 godzin, największa seria
-  dwa).
+  dwa). Dziesięć z rzędu i bramka puszcza: błędny jest stan, nie dane.
 - **Test zaufania.** Faza i częstotliwość to to samo widowisko z dwóch
   stron: jeśli licznik mówi, że częstotliwość jest przenoszona, faza
   *musi* rosnąć. Detektor, który nie rusza się, kiedy musiał — kłamie.
   Test ignoruje mrugnięcia mniejsze niż własna rozdzielczość licznika
-  (żeby nie skazywał zdrowego detektora na szumie samego wzorca), a
-  skazany detektor dostaje po pół godziny ponowny głos.
+  (żeby nie skazywał zdrowego detektora na szumie samego wzorca) i pyta,
+  co częstotliwość robi *teraz*: średnia licznika spóźnia się nawet o sto
+  sekund, więc pętla dolicza do niej poprawki, które zrobiła od tamtej
+  pory (build 65 — wcześniej dociąganie mogło skazać zdrowy detektor za
+  ruch sprzed pięćdziesięciu sekund). Skazany detektor dostaje ponowny
+  głos po pół godzinie albo przy najbliższym uzbrojeniu, jeśli jego odczyt
+  skoczy razem z dzielnikiem, czego zamrożony nie potrafi.
 - **Cisza po uzbrojeniu.** Uzbrojenie dzielnika zatrzymuje go na sekundę,
   a rampa czyta wtedy górną szynę (~1400 ns — wygląda jak faza, ale nią
   nie jest). Przez cztery sekundy po armie filtr słowa „faza" po prostu
-  nie słyszy. Cztery sekundy `HOLD` zaraz po `ARM` w logu to znak
+  nie słyszy. Cztery sekundy `NOPH` zaraz po `ARM` w logu to znak
   zdrowia, nie błędu.
+- **Bez odczytu nie ma fazy.** Po restarcie i po uzbrojeniu, a także po
+  dziesięciu sekundach bez odczytu, filtr nie trzyma własnej fazy: steruje
+  samą częstotliwością, dopóki detektor znowu nie zacznie czytać w paśmie.
+  Do buildu 65 niósł fazę zbudowaną z własnej oceny częstotliwości i
+  sterował tak, żeby ją wyzerować; 07.10, przy starcie 0,48 Hz obok i
+  detektorze na szynie, popchnęło to oscylator o 0,8 Hz w drugą stronę.
+  Bez fazy odczyt licznika odrzucony dziesięć razy z rzędu jest
+  przyjmowany, a nie przycinany — skoro nie ma nic innego, odczyt, który
+  uparcie się nie zgadza, ma raczej rację niż filtr.
+- **Poniżej okna.** Okno detektora to ±0,55 rozpiętości z `LC` wokół jego
+  zera i wyświetlacz się go trzyma. Algorytm 13 czyta też poniżej, do 0,9
+  rozpiętości (nigdy poniżej 0,15 V): tam rampa RC jest najbardziej stroma
+  i wciąż jednoznaczna, i tam właśnie ląduje dzielnik po uzbrojeniu. Taki
+  odczyt jest brany za piętnaście razy bardziej zaszumiony niż odczyt przy
+  zerze (build 66 — wcześniej lądowanie poniżej okna nie było żadnym
+  odczytem, a ponowne uzbrojenie ląduje tam, gdzie poprzednie).
+- **Brzegi ważą mniej.** Dalej niż ćwierć pasma od zera odczyt jest brany
+  za tym bardziej zaszumiony, im dalej leży — dziesięć razy na brzegu
+  pasma (build 66): tam detektor szumi bardziej, a jego prostoliniowy
+  odczyt jest mniej prawdziwy, i dwa odczyty różniące się o 19 ns tuż po
+  lądowaniu uszły kiedyś za nachylenie 17 ns/s. Pętla w locku tego nie
+  odczuwa: to zaczyna się poza pasmem, które wyznacza `LAT`.
+- **Powtórzony odczyt.** Kiedy firmware nie potrafi odczytać serii przy
+  zboczu, publikuje poprzedni odczyt jeszcze raz, a trend pokazuje `KEPT`:
+  filtr nie bierze z niego fazy, ale to też nie przerwa. Przy locku co
+  tysięczna sekunda; w trakcie dociągania co trzecia to norma.
 - **Cisza TIM2 po restarcie.** Przez pierwsze sto sekund po starcie
   stumianowa średnia licznika niesie jeszcze rozgrzewkę oscylatora;
   filtr czeka na czysty pomiar, zamiast wierzyć w przeszłość.
@@ -1913,12 +2166,13 @@ Od buildu 36 to dwa osobne pokrętła, i warto rozumieć różnicę:
 ### D.5 Jak wygląda dobra noc
 
 Trend `KAL` przez ~99% czasu. Pojedyncze `REJ` przy zdarzeniach GPS.
-`HOLD` tylko cztery sekundy po `ARM`. R trzyma się ~2,9 ns, `sig` ~1 ns.
-Przy Q widoczne `[at ceiling]` — na tym stanowisku mikrozdarzenia GPS
-naciskają adaptację przez całą noc, więc Q spędza ją na suficie; to
-własność nieba, nie usterka. `KL` po nocy dorzuca ratio adaptacji i znaki
-wodne Q (`lo..hi`) — z nich widać, czy Q nocą kiedykolwiek zeszło z
-sufitu.
+`NOPH` tylko cztery sekundy po `ARM`, `KEPT` mniej więcej co tysięczna
+sekunda. R trzyma się ~1,3 ns na płytce autora (noc buildu 64; starsze
+noce na stanowisku ~2,9), `sig` ~1 ns. Przy Q widoczne `[at ceiling]` — na
+tym stanowisku mikrozdarzenia GPS naciskają adaptację przez całą noc, więc
+Q spędza ją na suficie; to własność nieba, nie usterka. `KL` po nocy
+dorzuca ratio adaptacji i znaki wodne Q (`lo..hi`) — z nich widać, czy Q
+nocą kiedykolwiek zeszło z sufitu.
 
 ### D.6 Kiedy niczego nie ruszać
 

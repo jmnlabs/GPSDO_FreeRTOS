@@ -1,7 +1,7 @@
 /*
  * gpsdo_dac_ext.h — external SPI DAC on the control-voltage output: AD5680.
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.59rt
  *
  * IMPLEMENTED for the AD5680 (18-bit, external reference), bit-banged GPIO.
  * See gpsdo_dac_ext.cpp for the word format, clocking and the critical section.
@@ -64,17 +64,13 @@
  *          AF4 behind the firmware's back (see the TM1637 note in
  *          gpsdo_tasks.cpp, which has to re-assert it).
  *
- * WHAT STILL HAS TO BE DECIDED
- * ----------------------------
- *   - the part, and with it the word length and format
- *   - the reference, and whether it is internal to the DAC
- *   - the output span against the OCXO's EFC range
- *
- * Candidates considered: AD5680 (18-bit, external reference), AD5683R (16-bit
- * with internal reference and output buffer), AD5761R (16-bit, configurable
- * span including 0-5 V). AD5680 with a REF5045 gives 18 bits over 4.5 V — about
- * 17 uV per step, near 9e-12 fractional on a 5.3 Hz/V oscillator, against
- * 2.7e-11 for the PWM in use today.
+ * WHY AD5680 OVER THE ALTERNATIVES
+ * ---------------------------------
+ * Considered against AD5683R (16-bit, internal reference and output
+ * buffer) and AD5761R (16-bit, configurable span including 0-5 V). The
+ * AD5680 with an external REF5045 gives 18 bits over 4.5 V — about 17 uV
+ * per step, near 9e-12 fractional on a 5.3 Hz/V oscillator, against
+ * 2.7e-11 for the PWM path.
  */
 #ifndef GPSDO_DAC_EXT_H
 #define GPSDO_DAC_EXT_H
@@ -92,16 +88,13 @@
  *
  * Change freely — nothing in the firmware depends on these three.
  *
- * IF A CHOSEN PART NEEDS LDAC, RESET OR A BUSY INPUT, take the pin from the
- * inventory at the top of this file and from nowhere else. There used to be a
- * second list here that named PA4, PA6, PA8, PA9, PA10, PB2, PC14 and PC15 as
- * "also free" — four of those are the exact entries the inventory above is
- * headed "what earlier versions of this list got wrong", reappearing forty
- * lines later in the same file. PA9 and PA10 are Serial1 and the GPS, so they
- * are taken in every build; PA4 and PA6 are the display's chip select and
- * TFT_MISO, so they are taken in every build with a TFT. Believing this line
- * over the inventory is what costs a board revision, which is what the
- * inventory itself warns about.
+ * IF A CHOSEN PART NEEDS LDAC, RESET OR A BUSY INPUT, take the pin from
+ * the inventory at the top of this file and from nowhere else, not from
+ * a shorter "also free" list that skips why a pin is actually taken.
+ * PA9 and PA10 are Serial1 and the GPS in every build; PA4 and PA6 are
+ * the display's chip select and TFT_MISO in every build with a TFT.
+ * Trusting a pin as free without checking the inventory is what costs
+ * a board revision.
  *
  * What is actually available, shortest first:
  *

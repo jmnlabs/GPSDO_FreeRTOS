@@ -1,4 +1,4 @@
-# GPSDO v1.07.57rt
+# GPSDO v1.08.71rt
 
 [English](README_EN.md) | **Polski** | [Español](README_ES.md)
 
@@ -17,6 +17,7 @@ na platformie STM32 BlackPill (WeAct F411CE / F401CCU6).
 | Asystenci programowania | **Claude Opus 5 (Anthropic) · GLM-5.3 Max (Z.ai) · Qwen3.8-Max** |
 | Pomiary i testy terenowe, algorytmy 10–12 | **Dan Wiering** — przebiegi ADEV względem wzorca rubidowego, które wykryły cykl graniczny algorytmu 10, rozstrzygnęły kwestię tłumienia `FA`, zgłosiły zablokowanie ACQ i ustaliły porównanie dla algorytmu 11; teraz dociska algorytm 12 |
 | Obsługa ILI9486 / ILI9488 — impuls do implementacji; a tuner na PC wyrósł ze skryptu monitorującego, który skleił z Claude | **lucido** (forum EEVBlog) |
+| Poprawki z jego forka (build 68): holdover z wymogiem impulsu, `LC` z jednym uzbrojeniem i czekaniem, telemetria osobno do każdego portu, tunel GPS; i pomysł z LM75 | **Zsolt Zsiros** (ZsZs73) — [fork](https://github.com/ZsZs73/GPSDO_FreeRTOS) |
 | Autor v0.06c — inspiracja portu RTOS | **André Balsa** — [repozytorium](https://github.com/AndrewBCN/STM32-GPSDO) |
 | Ciągła pętla PI (algorytm 11) — projekt oryginalny | **Lars Walenius** (pamięci) — kontroler GPSDO udostępniony społeczności [time-nuts](http://www.leapsecond.com/time-nuts.htm) i EEVBlog. Rozwinięty tutaj o auto-kalibrację z CT, gałąź akwizycji prowadzoną częstotliwością i pomost przechwytywania fazy picDIV. |
 | Akumulator wielopoziomowy (algorytm 12) — projekt oryginalny | **Alan Cashin** (MIS42N, forum EEVBlog) — [profil](https://www.eevblog.com/forum/profile/?u=121386) — jego Budget GPSDO jest źródłem algorytmu 12, korekcji przejścia przez zero, ditherowanego PWM osiągającego 24 bity z krótkiego przebiegu oraz pomysłu na samoocenę `CS`. Zaimplementowane tutaj na detektorze fazy LTIC, z granicami poziomów pozostawionymi do edycji, bo tylko ta dla 128 s została kiedykolwiek wyprowadzona ze specyfikacji. |
@@ -93,6 +94,9 @@ w długim okresie, przy zachowaniu krótkookresowej stabilności OCXO.
 - **AHT10/20** — temperatura i wilgotność wewnątrz obudowy
 - **BMP280** — temperatura i ciśnienie atmosferyczne
 - **INA219** — napięcie zasilania i prąd pobierany przez OCXO
+- **LM75** (albo PCT2075, TMP75/175, TMP1075) — termometr tam, gdzie go
+  przykleisz, najlepiej na obudowie OCXO; logowany w raporcie `RH` jako
+  `LM75:` (build 68)
 
 **Wyświetlacze** (opcjonalne):
 
@@ -201,7 +205,8 @@ Rząd 6: UTC:14:32:45 Mon        ← czas UTC + dzień
 Rząd 7: PWM:40908 hit H          ← PWM + trend + holdover (H/A blink)
 ```
 
-Sygnalizacja holdovera na rzędzie 7: `H` (ręczny) lub `A` (automatyczny, utrata fixa).
+Sygnalizacja holdovera na rzędzie 7: `H` (ręczny) lub `A` (automatyczny, utrata
+fixa albo 1PPS).
 
 ---
 
@@ -250,7 +255,7 @@ sposób renderowania tekstu, a ta różnica jest na tyle duża, że ma znaczenie
 
 ```
  ┌──────────────────────────────────────────────────┐
- │ GPSDO v1.07.57rt                LMT 14:32:45 Pon │   nagłówek: wersja + czas lokalny
+ │ GPSDO v1.08.71rt                LMT 14:32:45 Pon │   nagłówek: wersja + czas lokalny
  │                                                  │
  │          1 0 0 0 0 0 0 0 . 0 0 0 0  H z          │   częstotliwość, duży font
  │                                                  │
@@ -367,7 +372,7 @@ połączeniach poniżej.
 | Częstotliwość | czerwony | brak sygnału |
 | Pasek statusu | zielony | dyscyplinowany, fix OK |
 | Pasek statusu | pomarańczowy | holdover ręczny |
-| Pasek statusu | czerwony | auto-holdover (utrata fixa) / oczekiwanie na fix |
+| Pasek statusu | czerwony | auto-holdover (utrata fixa albo 1PPS) / oczekiwanie na fix |
 
 Aktualizacje są selektywne — każda komórka wartości pamięta poprzedni
 tekst i jest przerysowywana tylko przy zmianie, minimalizując ruch SPI
@@ -571,7 +576,7 @@ sekundach.
 | Brak fixa GPS | Po starcie, brak sygnału | OFF |
 | Fix OK, tryb dyscyplinowany | Normalna praca | ON stale |
 | Holdover ręczny (`MH`) | Użytkownik włączył holdover | Wolne pulsowanie 1000 ms |
-| Auto-holdover | Fix utracony podczas pracy | Szybkie pulsowanie 200 ms |
+| Auto-holdover | Fix albo 1PPS utracony podczas pracy | Szybkie pulsowanie 200 ms |
 
 ---
 
@@ -589,8 +594,9 @@ bezpośrednio do pinu Sync.
 3. STM32 zwalnia Arm (HIGH)
 4. Divider startuje zsynchronizowany z najbliższym zboczem narastającym GPS 1PPS
 
-Uzbrojenie jest odraczane gdy brak fixa GPS — bez zbocza 1PPS na Sync
-divider pozostałby zatrzymany z martwym wyjściem.
+Uzbrojenie jest odraczane, dopóki nie ma fixa GPS i impulsu 1PPS w ostatnich
+1,5 s (build 68; wcześniej wystarczał fix) — bez zbocza 1PPS na Sync divider
+pozostałby zatrzymany z martwym wyjściem. Tak samo własne uzbrojenia `LC`.
 
 **Synchronizacja długoterminowa — ważne:**
 
@@ -616,16 +622,22 @@ natychmiast rozpoczyna dryf fazy.
 
 ## Automatyczny holdover
 
-Gdy GPS traci fix podczas normalnej pracy (np. odłączenie anteny):
+Gdy GPS traci odniesienie podczas normalnej pracy (np. odłączenie anteny):
 
-1. `vControlTask` wykrywa przejście `pos_valid: true→false`
+1. `vControlTask` widzi, że znika fix (`pos_valid: true→false`) albo że przez
+   10 s nie ma 1PPS, choć fix jest nadal zgłaszany (build 68 — odbiornik
+   timingowy w Time Mode trzyma swoją stałą pozycję jako ważną bez sygnału)
 2. Automatycznie ustawia `holdover_mode=true`, `holdover_auto=true`
 3. PWM zostaje zamrożony na ostatniej wartości — OCXO pracuje swobodnie
 4. LED żółta pulsuje szybko (200 ms), wyświetlacze pokazują `A` (blink)
-5. Po odzyskaniu fixa: automatyczne wyłączenie holdovera, powrót do `ON`
+5. Gdy fix wraca razem z 10 s nieprzerwanych impulsów: automatyczne wyłączenie
+   holdovera, powrót do `ON` (przed buildem 68 kończył go pierwszy ważny fix)
 
 Ręczna komenda `MH` ustawia holdover niezależnie (sygnalizowany jako `H`).
-`MD` wyłącza holdover (zarówno ręczny jak i automatyczny).
+Utrata odniesienia w jego trakcie jest ogłaszana (`… — manual holdover kept`)
+i zostawia go ręcznym (build 68; wcześniej utrata zamieniała go w holdover
+automatyczny, który powrót fixa kończył). `MD` wyłącza holdover (zarówno
+ręczny, jak i automatyczny).
 
 ---
 
@@ -647,7 +659,7 @@ liter** (`LA`, `la` i `La` są równoważne), więc działa dowolna wielkość l
 | `T [baud]` | Tunel GPS na USB dla u-center — czysty dwukierunkowy NMEA/UBX (telemetria na Bluetooth jeśli jest, inaczej wyciszona); opcjonalny baud UART GPS, zachowany po wyjściu; wyłącza się po 300 s |
 | `SP <n>` | Ustaw PWM DAC bezpośrednio (1–65535), omija algorytm |
 | `DAC` | Wyjście napięcia sterującego: ścieżka, kod 24/16-bitowy i dokładny, zmierzone Vctl, wielkość kroku w µHz i df/f (liczby w Hz wymagają `CT`) |
-| `SPAN [CLR FULL\|REDUCED]` | Zworka zakresu EFC na PB14 (`GPSDO_SPAN_SENSE`): pozycja, w której jest, i kalibracja `CT` każdej pozycji — jedna na zakres, przełączana i przeliczana, gdy zworka się przestawi; `CLR` zapomina jedną |
+| `SPAN [CLR FULL\|REDUCED]` | Zworka zakresu EFC na PB14 (`GPSDO_SPAN_SENSE`): pozycja, w której jest, i kalibracja `CT` każdej pozycji (K i zero) — jedna na zakres, przełączana i przeliczana, gdy zworka się przestawi; `CLR` zapomina jedną |
 | `RH` | Tryb raportowania: czytelny (domyślny) |
 | `RD` | Tryb raportowania: rozdzielany tabulatorem |
 | `RP` | Wstrzymaj strumień danych serial/BT |
@@ -764,15 +776,17 @@ zapisuje `ES`.
 | `LL` | Lista wszystkich parametrów LTIC + bieżący stan |
 | `LNV [v]` | Kalibracja: ns na wolt (nachylenie napięcie TIC→czas) |
 | `LZO [v]` | Kalibracja: napięcie TIC przy zerowej różnicy faz |
-| `LRN [v]` | Zakres jednoznaczności detektora (ns, dla zawinięcia) |
+| `LRN [v]` | Zakres jednoznaczności detektora (ns, 2..1e9, dla zawinięcia). Dokładnie `0`/`1` zamiast tego wyłączają/włączają samouczenie LRN, `R` je resetuje (zapis od razu) |
 | `AQP/AQI/AQD/AQL [v]` | PID etapu ACQ: Kp / Ki / Kd / I_LIMIT |
 | `DPP/DPI/DPD/DPL [v]` | PID etapu DPLL: Kp / Ki / Kd / I_LIMIT |
 | `LKP/LKI/LKD/LKL [v]` | PID etapu LOCK: Kp / Ki / Kd / I_LIMIT |
 | `LAT [v]` | Próg ACQ→DPLL (faza w zakresie, ns) |
 | `LDT [v]` | Próg DPLL→LOCK (błąd częstotliwości) |
 | `LIV [v]` | Interwał aktualizacji LOCK (sekundy, domyślnie 300, 1..600 s) |
-| `LPOL [-1/0/1]` | Polaryzacja detektora fazy (0 = auto) |
+| `LPOL [-1/0/1]` | Polaryzacja detektora fazy (0 = nie ustawiona — pętla czeka, aż będzie; mierzy ją `LC`) |
 | `LCV` | Pokaż bieżące napięcie TIC (pomoc przy kalibracji) |
+| `LRM [0/1]` | Jak czytana jest seria z detektora: 1 (domyślnie) = prosta przez 64 pomiary względem ich czasów z TIM2, odczytana na samym zboczu; 0 = mediana z 16 wywołań `analogRead()`, jak do buildu 60. Nie zapisuje się |
+| `LB` | Pokaż liczniki od startu (zbocze złapane, prosta odrzucona i dlaczego, odczyt wstrzymany, pominięta trzecia część i przesunięte typowe wygięcie — build 71), potem ostatnią serię: czy wzięta na zboczu, dlaczego jej prosta została odrzucona, czas każdego pomiaru po zboczu i jego kod, dopasowaną prostą, rozrzut, wygięcie obok typowego dla płytki, jak daleko od siebie są jej trzecie części oraz tempo spadku |
 
 ### Kolejność kalibracji: najpierw `CT`, potem `LC`
 
@@ -795,7 +809,8 @@ Kolejność dla nowej płytki:
 4. `LA 10` albo `LA 11`, potem `ES ALGO`
 
 `LC` ostrzega, gdy `CT` nie zostało wykonane, ale i tak kontynuuje — powtórzenie
-kosztuje trzy minuty, a bywają uzasadnione powody, by przemiatać najpierw.
+kosztuje trzy minuty (jedenaście przy łagodnym obiekcie), a bywają uzasadnione
+powody, by przemiatać najpierw.
 
 ### Algorytm 11 — LTIC-Lars (ciągła pętla PI)
 
@@ -877,8 +892,9 @@ a kończy na narastającym zboczu 1PPS z picDIV**, więc szerokość impulsu
 *równa się interwałowi fazowemu* między nimi. Impuls bramkuje diodę Schottky
 (1N5711), która ładuje C13 przez R8 — **rampa czas-napięcie**, dokładnie jak
 w oryginale Larsa Waleniusa, tylko z przerzutnikiem zamiast HC4046. MCU czyta
-szczyt rampy raz na sekundę, a ładunek następnie spływa (~25 ms) przed
-kolejnym impulsem.
+szczyt rampy raz na sekundę, a potem rozładowuje kondensator przez ten sam pin
+(`GPSDO_LTIC_ACTIVE_RESET`); pozostawiony sam sobie, ładunek spływałby w ciągu
+kilkudziesięciu ms.
 
 Wynikają z tego dwie rzeczy, obie okupione czasem przy stole:
 
@@ -890,14 +906,22 @@ Wynikają z tego dwie rzeczy, obie okupione czasem przy stole:
   dużego filtra 51 kΩ/1 µF) — to był błąd. Przy 51 kΩ/1 µF impuls µs ledwie
   ruszał kondensator (≈14 mV span w `LC`); przy 1 kΩ/1 nF rampa ma ~1,5–2 V
   i `LC` działa.
-- **Odczyt musi trafiać w szczyt.** Rampa osiąga szczyt na końcu impulsu
-  (≤ ~2 µs po zboczu GPS) i trzyma go poniżej ~1 ms, zanim opadnie.
-  Próbkowanie z 2-sekundowej pętli czujników zawsze łapało rozładowany
-  kondensator (~0,065 V, niezależnie od fazy — pierwotna przyczyna tygodni
-  „nieudanych kalibracji”). Vphase jest teraz czytany ~50 µs po zboczu PPS, z
-  budzonego zboczem PPS zadania przekaźnika, trafiając w szczyt. Bez aktywnego
-  rozładowania: dioda odcina, a upływ ~25 ms czyści kondensator przed kolejnym
-  impulsem 1 Hz.
+- **Odczyt musi trafiać w szczyt.** Rampa osiąga szczyt na końcu impulsu (ok.
+  1 µs po zboczu GPS przy locku, ~3 µs na krawędzi pasma), a pozostawiony sam
+  sobie ładunek upływałby powoli (kilkadziesiąt ms). Próbkowanie z
+  2-sekundowej pętli czujników zawsze łapało rozładowany kondensator
+  (~0,065 V, niezależnie od fazy — pierwotna przyczyna tygodni „nieudanych
+  kalibracji”). Vphase jest teraz czytany na samym zboczu PPS, z zadania
+  przekaźnika (od buildu 62: seria od 5 µs po zboczu, jej prosta odczytana na
+  zboczu), a zaraz po niej firmware rozładowuje kondensator przez PA1. Do
+  buildu 64 te notatki mówiły, że aktywne rozładowanie nie jest potrzebne, bo
+  dioda odcina, a upływ czyści kondensator długo przed kolejnym impulsem. Tyle
+  że upływ to najpewniej prąd wsteczny diody Schottky (na płytce autora, bez
+  rezystora upływowego: kilkadziesiąt ms w 48 °C), który na zimnej płytce
+  maleje kilkukrotnie i mógłby zostawić część ładunku z jednej sekundy pod
+  odczytem następnej. Rozładowanie zrobione po odczycie usuwa to bez żadnego
+  kosztu (`GPSDO_LTIC_ACTIVE_RESET`, domyślnie włączone, przy obu
+  detektorach).
 
 ### Rola picDIV
 
@@ -926,19 +950,32 @@ kotwicy, `LC` wraca do średniej range/span i to sygnalizuje.
 
 ### Rozdzielczość
 
-Rampa 1 kΩ/1 nF pokrywa ~1,5–2 V 12-bitowego ADC w użytecznym oknie fazy, a
-16× oversampling z medianą odrzuca glitche — porównywalnie lub lepiej niż
-pojedynczy odczyt HC4046 Larsa przy ~1 ns. Zjazd ~25 ms jest bez znaczenia dla
-pasma pętli: LOCK aktualizuje się co kilka sekund (znacznie poniżej 0,2 Hz),
-więc stała czasowa detektora jest o rzędy wielkości z dala od pętli.
+Rampa 1 kΩ/1 nF pokrywa ~1,5–2 V 12-bitowego ADC w użytecznym oknie fazy.
+Do buildu 60 odczytem była mediana szesnastu pomiarów robionych, gdy
+kondensator się rozładowuje — co przy napięciu, które tylko spada, oznacza
+jeden środkowy pomiar, stojący na nierównych kodach tego ADC (kod będący
+wielokrotnością 4 ma ok. 2,4 LSB szerokości, kod o trzy wyżej 0,1). Build 61
+prowadził przez szesnaście pomiarów prostą względem ich czasów z TIM2 i
+odczytywał ją 200 µs po zboczu. Od buildu 62 seria to 64 pomiary robione
+bezpośrednio na rejestrach przetwornika od 5 µs po zboczu, przy zablokowanych
+przerwaniach, tak że w czasie, gdy impuls ładuje kondensator, na układzie nic
+innego nie pracuje; prosta przez nie odczytywana jest na samym zboczu, zanim
+cokolwiek z ładunku upłynie — rozdzielczość poniżej 1 LSB, niezależna już od
+tempa upływu (`LB` to pokazuje, `LRM 0` przywraca medianę). Sam upływ
+(kilkadziesiąt ms, na zimnej płytce wolniej — dlatego firmware rozładowuje
+kondensator po odczycie; ~1,4 ms, które pokazuje `LB`, to głównie przetwornik
+— każdy pomiar zabiera ok. 0,12 % ładunku) jest bez znaczenia dla pasma pętli:
+LOCK aktualizuje się co kilka sekund (znacznie poniżej 0,2 Hz), więc stała
+czasowa detektora jest o rzędy wielkości z dala od pętli.
 
 ### Wejście fazy LTIC (Lars' TIC)
 
 Przy włączonym `GPSDO_LTIC` firmware odczytuje sprzętowy licznik interwału
-czasu (TIC Larsa Waleniusa): kondensator 1 nF jest ładowany stałym prądem w
-interwale GPS-1PPS → OCXO-1PPS, a zatrzaśnięte napięcie na PA1 jest próbkowane
-na szczycie rampy ~50 µs po zboczu PPS; aktywne rozładowanie nie jest potrzebne
-— dioda odcina, a upływ ~25 ms czyści kondensator przed kolejnym impulsem 1 Hz.
+czasu (TIC Larsa Waleniusa): kondensator 1 nF jest ładowany w interwale
+GPS-1PPS → OCXO-1PPS (przez rezystor w detektorze RC Kaashoeka, ze źródła
+prądowego w drugim wariancie), a zatrzaśnięte napięcie na PA1 jest odczytywane
+na szczycie rampy, na samym zboczu PPS; zaraz po odczycie firmware rozładowuje
+kondensator przez PA1 (`GPSDO_LTIC_ACTIVE_RESET`), więc każdy impuls zaczyna od 0 V.
 Napięcie to bezpośrednia,
 wysokorozdzielcza miara różnicy faz między oboma impulsami — znacznie
 dokładniejsza niż licznik cykli TIM2 używany przez algorytmy częstotliwościowe
@@ -950,9 +987,7 @@ się w raporcie serial (`Vphase:` i `dph:` w ns), jako wiersz `Vph:`/`dph:` na
 TFT oraz jako pozycja `LTIC phase (PA1)` w checkliście startowej. Po kalibracji
 przez `LC` faza jest raportowana w nanosekundach względem skalibrowanego
 `zero_offset`, przy użyciu zmierzonego `ns_per_volt`; przed kalibracją
-pokazywane są tylko wolty. (Stała kompilacyjna `LTIC_NS_PER_VOLT` w
-`gpsdo_config.h` to przestarzały fallback i normalnie zostaje 0 — `LC` mierzy
-realne nachylenie per płytka i zapisuje je w parametrach żywych.)
+pokazywane są tylko wolty.
 
 ---
 
@@ -989,19 +1024,27 @@ przypadkach odpowiedź mówi, co zastosowano — patrz uwagi o trwałości przy 
 ### Równoważenie zużycia Flasha (dane żywe)
 
 Dane “żywe” — nauczony dryf/tłumienie (`LRN`), kalibracja LC i ostatni PWM —
-zmieniają się znacznie częściej niż ustawienia, więc są przechowywane osobno
-razem z blokiem ustawień, w **buforze pierścieniowym z równoważeniem zużycia**
-zajmującym sektor 6 Flasha (0x08040000, 128 KB). Przełącznik `FR 0|1` (zapis
-`ES`, domyślnie włączone); zużycie sprawdzisz komendą `EW`.
+zmieniają się znacznie częściej niż ustawienia. Są osobnym rekordem w tym
+samym **buforze pierścieniowym z równoważeniem zużycia** co ustawienia i
+rekord Kalmana, w sektorze 7 Flasha (0x08060000, 128 KB). Przełącznik `FR 0|1`
+(zapis `ES`, domyślnie włączone); zużycie sprawdzisz komendą `EW`.
 
-Każdy zapis używa kolejnego 32-bajtowego slotu; sektor kasowany jest dopiero
-przy zawinięciu pierścienia (raz na 4095 zapisów). Przy 100 zapisach/dobę to
-~9 kasowań/rok, więc wytrzymałość Flasha (~10 000 cykli) starczy na rzędu
-tysiąca lat. Zapis następuje tylko gdy wartość ustabilizuje się na nowym
-poziomie — dryf zmienił się o > 8 LSB lub tłumienie o > 0.03, i minęło ≥ 20 min
-od ostatniego zapisu — a udana kalibracja `LC` zapisuje od razu. Każdy slot ma
-CRC i numer sekwencji, więc zanik zasilania w trakcie zapisu jest wykrywany i
-używany jest poprzedni dobry slot.
+Każdy zapis używa kolejnego 512-bajtowego slotu; sektor kasowany jest dopiero
+przy zawinięciu pierścienia (raz na 255 zapisów), a od buildu 65 najnowsze
+rekordy ustawień, Kalmana i danych żywych są przenoszone za to kasowanie
+(wcześniej zawinięcie zostawiało tylko zapisywany slot i następny start mógł
+pójść na domyślnych). Przy ~73 zapisach na dobę, na zapracowanym stole, to
+kasowanie co ~3,5 dnia, więc wytrzymałość Flasha (~10 000 cykli) starczy na
+mniej więcej 96 lat. Zapis następuje tylko gdy wartość ustabilizuje się na
+nowym poziomie — dryf zmienił się o > 8 LSB lub tłumienie o > 0.03, i minęło ≥
+20 min od ostatniego zapisu — a udana kalibracja `LC` zapisuje od razu. Od
+buildu 65 ostatni PWM ma własny powód zapisu: trafia do flasha, gdy odszedł
+o > 0,02 Hz od zapisanego (bez `CT` 64 LSB), a pętla jest w locku od 20 min
+bez przerwy i kodu nie ruszało nic poza nią (żaden skok, `SP`, `up` ani `dp`,
+żadna kalibracja po drodze; nigdy w holdoverze ani w trakcie przestawiania
+zworki zakresu), a slot zapisuje, do którego spanu należy jego kod, więc start
+przelicza go z właściwego. Każdy slot ma CRC i numer sekwencji, więc zanik
+zasilania w trakcie zapisu jest wykrywany i używany jest poprzedni dobry slot.
 
 Gdy bufor jest **włączony**, `ES` nigdy nie nadpisuje kalibracji ani wartości
 nauczonych — zapisuje tylko prawdziwe ustawienia (nastawy PID, progi, flagi).
@@ -1096,20 +1139,25 @@ Gdy żadna opcja nie jest zdefiniowana, moduły NEO używają dotychczasowej
 PID dla wszystkich algorytmów — bez ręcznego strojenia, bez ryzykownego
 wymuszania oscylacji.
 
-Procedura (~3 minuty, deterministyczna):
+Procedura (~3 minuty, około jedenastu przy łagodnym obiekcie; deterministyczna):
 
 1. Ustawia PWM na trzy punkty (1,5 / 2,0 / 2,5 V), z czasem ustalania.
 2. Regresja liniowa częstotliwości względem PWM → **K** [Hz/LSB], czyli
    wzmocnienie obiektu, oraz PWM dający dokładnie 10 MHz.
+   - Przy łagodnym obiekcie (K poniżej 0,12 mHz/LSB — zawężony zakres EFC,
+     zewnętrzny DAC) mierzy jeszcze raz wokół tego kodu: trzy punkty rozstawione
+     na 0,8 Hz huśtawki, każdy czytany jako średnia ze 100 s po ustaleniu. Jego
+     K zastępuje pierwsze.
 3. Wylicza współczynniki z K:
    - **PLL (4, 5, 7):** Kp = 0,40/K na częstotliwości; Kd = 2,0, Ki = 0,02 na fazie
    - **FLL (3, 6):** Kp = 0,35/K; Ki = Kp/300; Kd = Kp·73
    - **NN (9):** max krok = 0,05/K
 4. Stosuje wycentrowany PWM i nowe współczynniki, drukuje przed/po.
 
-Wynik jest kontrolowany (K musi mieścić się w 0,1–2 mHz/LSB, GPS musi mieć
-fix); przy błędzie parametry pozostają bez zmian. Po zakończeniu uruchom
-`ES`, by zapisać nastawy do flash ringu. W przeciwieństwie do auto-strojenia
+Wynik jest kontrolowany (K musi mieścić się w 0,01–2 mHz/LSB, GPS musi mieć
+fix); przy błędzie parametry pozostają bez zmian, a pętla dostaje z powrotem
+swój kod. Po udanym pomiarze grupa PID zapisuje się do flash ringu sama, a
+pętla startuje od nowa z nowego kodu. W przeciwieństwie do auto-strojenia
 metodą relay-feedback, `CT` nigdy nie destabilizuje pętli — stała czasowa
 pętli to setki sekund, więc wymuszona oscylacja trwałaby godzinami i byłaby
 zaburzona dryfem termicznym; wyliczenie wzmocnień wprost ze zmierzonego K
@@ -1145,6 +1193,7 @@ przy starcie, dając pełny obraz wykrytego sprzętu:
 HW: AHT10/AHT20 sensor    OK  (I2C 0x38)
 HW: BMP280 sensor         OK  (I2C 0x77)
 HW: INA219 sensor         not found
+HW: LM75 sensor           OK  (I2C 0x48)
 HW: OLED 128x64           OK  (I2C 0x3C)
 HW: LCD 20x4              OK  (I2C expander)
 HW: HT16K33 clock display OK  (I2C 0x70)
@@ -1222,6 +1271,7 @@ tablicę zapisaną ręcznie.
 | `LA 12` | Wybór algorytmu |
 | `MG [v]` | Wzmocnienie w LSB na ns. 0 = wylicz z kalibracji `CT` i strój progi automatycznie |
 | `MR [n]` | Wymuś korekcję po osiągnięciu poziomu n, niezależnie od granic |
+| `MM [0\|1]` | 1 (domyślnie): spokojny — korekty narastają o 1 LSB/s, a od poziomu 128 s człon częstotliwości idzie w całości; 0: pierwotna ścieżka korekcji |
 | `MLP <n> [ns]` | Granica fazy dla poziomu n; bez wartości wypisuje bieżącą |
 | `MF [0-3]` | Skąd biorą się limity, niezależnie od `MG`: 0 śledź `MG`, 1 tablica zapisana, 2 formuła sigma, 3 mierzone |
 | `MFT [s]` | Tylko `MF 3`: docelowy odstęp w sekundach między korekcjami wywołanymi samym szumem (domyślnie 3600) |
@@ -1301,9 +1351,14 @@ siedzi nad zakresem filtru:
 
 | | nośna | zakres filtru | stała czasowa |
 |---|---|---|---|
-| PWM 16-bitowy | 2 kHz | 0,7 Hz | 230 ms |
-| dither 13-bitowy (domyślny) | 12,2 kHz | 4,2 Hz | 38 ms |
-| dither 12-bitowy | 24,4 kHz | 8,4 Hz | 19 ms |
+| PWM 16-bitowy | 1,9 kHz | 0,7 Hz | 240 ms |
+| dither 13-bitowy (domyślny) | 11,7 kHz | 4,0 Hz | 40 ms |
+| dither 12-bitowy | 23,4 kHz | 8,0 Hz | 20 ms |
+
+Nośne przy zegarze timerów BlackPilla 96 MHz — rdzeń STM32duino taktuje tam
+F411, żeby USB dostało swoje 48 MHz. Do buildu 66 te tabele i komenda `DAC`
+zakładały 100 MHz (2; 12,2 i 24,4 kHz); od buildu 67 `DAC` odczytuje zegar i
+podaje nośną z płytki.
 
 Opóźnienie filtru wchodzi do pętli wprost jako przesunięcie fazy, więc
 sześciokrotnie krótszy filtr jest wart więcej niż sama rozdzielczość. Ta dochodzi
@@ -1322,8 +1377,8 @@ konstrukcji do wartości 24-bitowej. Odtwarzanie jej nie może dryfować.
 
 | `GPSDO_PWM_DITHER_BITS` | tablica | RAM (dwa bufory) | nośna | CPU |
 |---|---|---|---|---|
-| 12 | 4096 wpisów | 16 KB | 24,4 kHz | 0,025% |
-| 13 (domyślnie) | 2048 wpisów | 8 KB | 12,2 kHz | 0,012% |
+| 12 | 4096 wpisów | 16 KB | 23,4 kHz | 0,025% |
+| 13 (domyślnie) | 2048 wpisów | 8 KB | 11,7 kHz | 0,012% |
 
 Ten sam pin co zwykły PWM — **PB9, TIM4 CH4** — więc dotychczasowy filtr i
 okablowanie zostają bez zmian. TIM4_UP steruje DMA1 Stream 6 Channel 2; takt 2 Hz
@@ -1422,6 +1477,7 @@ Plik `gpsdo_config.h` steruje konfiguracją. Najważniejsze przełączniki:
 #define GPSDO_AHT10              // AHT10/20 temperatura+wilgotność
 #define GPSDO_BMP280_I2C         // BMP280 temperatura+ciśnienie
 #define GPSDO_INA219             // INA219 napięcie+prąd
+#define GPSDO_LM75               // termometr z rodziny LM75 pod 0x48 (build 68)
 
 // Komunikacja:
 #define GPSDO_BLUETOOTH          // HC-06 na Serial2 (57600 Bd)

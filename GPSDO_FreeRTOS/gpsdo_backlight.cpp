@@ -1,7 +1,7 @@
 /**
  * gpsdo_backlight.cpp — TFT backlight dimming on PB5 (TIM3 CH2)
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.67rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * AI:       Claude Opus 5 (Anthropic), GLM-5.3 Max (Z.ai), Qwen3.8-Max
@@ -17,7 +17,8 @@
 #if defined(GPSDO_TFT_BL_PWM)
 #include "stm32f4xx_hal.h"
 
-/* 100 MHz / 5000 = 20.0 kHz.
+/* 96 MHz / 5000 = 19.2 kHz on the BlackPill (20.0 kHz at the 100 MHz assumed
+ * up to build 66; the STM32duino core runs the F411 at 96 MHz for USB).
  *
  * Chosen high rather than convenient. Twenty kilohertz is above the audio
  * band, so nothing in the enclosure sings; it is far above anything the loop
@@ -59,7 +60,7 @@ void backlight_begin(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
     /* PB5 -> AF2 (TIM3_CH2), push-pull. Speed is deliberately LOW rather than
-     * HIGH: this drives a gate through 47 ohm at 20 kHz, and the slowest edge
+     * HIGH: this drives a gate through 47 ohm at ~20 kHz, and the slowest edge
      * that still switches cleanly is the one that puts least on the 3.3 V rail
      * — which is the same rail VDDA and therefore the ADC reference sits on. */
     GPIO_InitTypeDef g = {0};
@@ -71,7 +72,7 @@ void backlight_begin(void)
     HAL_GPIO_Init(GPIOB, &g);
 
     TIM3->CR1  = 0;
-    TIM3->PSC  = 0;                     /* TIM3 is on APB1: 100 MHz here */
+    TIM3->PSC  = 0;                     /* TIM3 is on APB1: 96 MHz on the BlackPill */
     TIM3->ARR  = BL_PERIOD - 1u;
     TIM3->CCR2 = 0;                     /* full brightness until bl_apply runs */
 

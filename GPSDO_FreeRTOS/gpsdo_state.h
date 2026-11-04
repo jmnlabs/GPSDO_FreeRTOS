@@ -1,7 +1,7 @@
 /**
  * gpsdo_state.h — Shared application state and FreeRTOS handles
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.71rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -145,7 +145,7 @@ typedef struct {
  * notices first. The report is printed on the PPS and the counter advanced on
  * TIM9, so the two edges slid across each other once every ~6530 s (= 1/159
  * ppm) and each crossing threw a short burst of repeated and skipped seconds
- * before settling. The bursts in the 19.08 record start at 325, 6854, 13383
+ * before settling. The bursts in one recorded run start at 325, 6854, 13383
  * and 19907 s — spacing 6529, 6529, 6524.
  *
  * So: one monotonic seconds counter, advanced by whoever is qualified.
@@ -154,14 +154,14 @@ typedef struct {
  *     printed cannot be a beat between two clocks, by construction.
  *   - vUptimeTask from the 2 Hz tick, but ONLY after the PPS has been silent
  *     for over 1.5 s. Holdover still counts; it just counts on the crystal,
- *     which is the best available then and is now the exceptional case rather
+ *     which is the best available then and is the exceptional case rather
  *     than the normal one.
  * The 1.5 s guard band is what keeps the two writers from ever incrementing
  * concurrently, which is why a plain 32-bit counter needs no mutex here: a
  * word write is atomic on this core, and the two paths are mutually exclusive
  * in time rather than by locking.
  *
- * Uptime_t is now a FORMATTING result, filled on demand by uptime_snapshot()
+ * Uptime_t is a FORMATTING result, filled on demand by uptime_snapshot()
  * from the counter, not a piece of shared state with a lock of its own.
  */
 typedef struct {
@@ -231,6 +231,8 @@ extern CtrlData_t  gCtrl;
 extern float  g_bmp_temp, g_bmp_pres;
 extern float  g_aht_temp, g_aht_humi;
 extern float  g_ina_volt, g_ina_curr;
+extern float  g_lm75_temp;            /* LM75 [degC], build 68 - RH report only */
+extern bool   g_lm75_valid;           /* the LM75 answered at boot and lately   */
 extern uint16_t g_freq_damp_win_dpll; /* FAD: 10/100/1000 (default 100) */
 extern uint16_t g_freq_damp_win_lock; /* FAL: 10/100/1000 (default 100) */
 extern bool   g_persist_valid;        /* true = settings loaded from flash ring */
@@ -275,4 +277,75 @@ extern volatile uint16_t g_svin_acc_m;       /* current mean 3D accuracy [m] */
   extern int16_t        g_ltic_adc_raw;     /* last ADC reading          */
   extern int16_t        g_ltic_adc_avg;     /* 10-sample moving average  */
   extern float          g_ltic_voltage;     /* averaged voltage (V)      */
+  extern volatile bool  g_ltic_kept;        /* ...is the last reading again (build 66) */
+  /* How a burst becomes one reading (LRM; see ltic_read_fast). */
+  #define LTIC_READ_MEDIAN  0u                /* build 60: 16 analogRead() */
+  #define LTIC_READ_EDGE    1u                /* line, read at the edge    */
+  extern uint8_t        g_ltic_read_mode;   /* LRM, not saved; default 1 */
+  /* What became of the last burst (ltic_burst_t.how). */
+  #define LTIC_HOW_MEDIAN   0u                /* LRM 0                     */
+  #define LTIC_HOW_LINE     1u                /* the line at the edge      */
+  #define LTIC_HOW_REFUSED  2u                /* line refused: the median  */
+  #define LTIC_HOW_HELD     3u                /* the last reading kept     */
+  #define LTIC_HOW_NOEDGE   4u                /* no new edge: the median   */
+  /* Why the line was refused (ltic_burst_t.why). */
+  #define LTIC_WHY_NONE     0u
+  #define LTIC_WHY_FEW      1u                /* too few conversions       */
+  #define LTIC_WHY_OFF      2u                /* too many off the line     */
+  #define LTIC_WHY_BEND     3u                /* it bends: not a decay     */
+  #define LTIC_WHY_OTHER    4u                /* timing, TIM2, off scale   */
+  /* The last burst, as LB prints it. Times are TIM2 ticks (0.1 us) from
+   * the PPS edge to the start of each conversion (edge 0: from the first
+   * conversion), lengths whole ticks. */
+  typedef struct {
+      uint32_t seq;                         /* ppscount at the read: the */
+                                            /* edge is counted after it  */
+      int16_t  code[LTIC_EDGE_N];
+      uint16_t t[LTIC_EDGE_N];              /* conversion start, ticks   */
+      uint8_t  dur[LTIC_EDGE_N];            /* conversion length, ticks  */
+      uint64_t used;                        /* bit i: in the fit         */
+      float    level;                       /* the line at the edge      */
+      float    slope;                       /* codes per us              */
+      float    rms;                         /* off the line, codes       */
+      float    bend;                        /* its curvature, as codes   */
+                                            /* at the edge               */
+      float    bend_ref;                    /* the board's own, averaged */
+      float    third_off;                   /* the furthest third of the */
+                                            /* burst from the other two  */
+      float    accepted;                    /* after the gate, codes     */
+      int16_t  median;
+      int16_t  vref;                        /* VREFINT before, -1 none   */
+      uint8_t  n;                           /* conversions               */
+      uint8_t  how;                         /* LTIC_HOW_*                */
+      uint8_t  sync;                        /* 1: taken at the edge      */
+      uint8_t  fit;                         /* 1: the line stood         */
+      uint8_t  edge;                        /* 1: t[] from the edge      */
+      uint8_t  why;                         /* LTIC_WHY_*                */
+      int8_t   third;                       /* 1-3: every third, from    */
+                                            /* #0-#2, left out; 0 none;  */
+                                            /* -1 not judged             */
+  } ltic_burst_t;
+  void ltic_burst_get(ltic_burst_t *out);
+  /* What became of each second since boot, as LB prints it. */
+  typedef struct {
+      uint32_t caught;                      /* the edge caught: the burst */
+      uint32_t early;                       /* the edge came first        */
+      uint32_t stuck;                       /* TIM2 did not get there     */
+      uint32_t missed;                      /* no edge in the window      */
+      uint32_t untried;                     /* no second to go by, tunnel */
+      uint32_t line;                        /* the line stood             */
+      uint32_t few, off, bend, other;       /* refused: LTIC_WHY_*        */
+      uint32_t kept;                        /* the last reading kept      */
+      uint32_t noedge;                      /* no new edge to read at     */
+      uint32_t third;                       /* a third of it left out     */
+      uint32_t bendjump;                    /* the board's bend moved to  */
+                                            /* the last bursts' median    */
+  } ltic_counts_t;
+  void ltic_counts_get(ltic_counts_t *out);
+  /* True from shortly before the next PPS edge until the read after it: the
+   * CLI holds its output then (ltic_quiet_now in gpsdo_tasks.cpp). */
+  bool ltic_quiet_now(void);
 #endif
+/* TIM2 at the last GPS PPS edge, stored by the capture ISR (gpsdo_isr.cpp)
+ * for a reader that must not touch CCR3 itself. */
+extern volatile uint32_t g_pps_ccr3;

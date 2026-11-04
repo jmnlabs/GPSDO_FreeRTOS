@@ -1,7 +1,7 @@
 /* ======================================================================
  * gpsdo_span.cpp  —  two EFC spans, two calibrations, one jumper on PB14
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.65rt
  *
  * See gpsdo_span.h for what this is for. This file is the state machine; the
  * arithmetic that matters is span_map(), and the reasoning for it is there.
@@ -24,12 +24,13 @@
 
 /* ---- the pin, and the one way it can collide ---------------------------
  *
- * PB14 is the pin the audit in gpsdo_dac_ext.h found free in every
- * configuration, and until now that audit also offered it as the place to move
- * the AD5680's chip select if a board wanted the TM1637 back. Both cannot
- * happen: INPUT_PULLUP here would take the pin away from the DAC, and the DAC's
- * select pulses would read as a jumper. Caught at compile time rather than on a
- * bench, for all three DAC pins because all three can be overridden. */
+ * PB14 is the pin the audit in gpsdo_dac_ext.h finds free in every
+ * configuration — including as the place to move the AD5680's chip
+ * select if a board wants the TM1637 back. Both cannot happen:
+ * INPUT_PULLUP here would take the pin away from the DAC, and the DAC's
+ * select pulses would read as a jumper. Caught at compile time rather
+ * than on a bench, for all three DAC pins because all three can be
+ * overridden. */
 #ifdef GPSDO_SPAN_SENSE
 #ifndef PIN_SPAN_SENSE
 #define PIN_SPAN_SENSE PB14
@@ -64,20 +65,91 @@ static_assert(PIN_SPAN_SENSE != PIN_DAC_MOSI, "PIN_SPAN_SENSE collides with PIN_
  * on the reduced span's K, about 5x too much loop gain — the mismatch this
  * module exists to remove (see gpsdo_span.h for what it costs).
  *
- * 1.5 is a guard band, not a tuning: CT's own run-to-run scatter on a reduced
- * span was 14 % on Dan Wiering's board (46711 and 40873 LSB/Hz, 20.09 and
- * 22.09), and any reduction worth building is several times — his is ~5x.
- * Below 2x a reduced span buys less than CT's own scatter, so a board where
- * the two positions really differ by less than 1.5 is not a configuration
- * this has to serve. */
+ * 1.5 is a guard band, not a tuning: CT's own run-to-run scatter on a
+ * reduced span was 14 % on a V3 board (46711 and 40873 LSB/Hz), and any
+ * reduction worth building is several times — 3.3-3.6x measured on one
+ * reference. Below 2x a reduced span buys less than CT's own scatter, so
+ * a board where the two positions really differ by less than 1.5 is not
+ * a configuration this has to serve. */
 #define SPAN_SAME_PLANT     1.5
 
 /* A pair of codes is only a measurement if both halves describe the same
- * oscillator: the code the loop in the old span held when it was switched away,
- * and the code the loop in the new span settles on. Between the two the
- * oscillator ages; three hours at the 1.7e-10/day Dan's board showed is 2e-11,
- * a few codes, and after that the anchor is dropped rather than trusted. */
+ * oscillator: the code the loop in the old span held when it was switched
+ * away, and the code the loop in the new span settles on. Between the two
+ * the oscillator ages; three hours at the 1.7e-10/day a V3 board showed is
+ * 2e-11, a few codes, and after that the anchor is dropped rather than
+ * trusted. */
 #define SPAN_ANCHOR_MAX_MS  (3UL * 3600UL * 1000UL)
+
+/* WHEN A LOCKED LOOP'S CODE IS NOT A NULL.
+ *
+ * The anchor takes the code the old span's loop holds at the move as that
+ * span's null, on the strength of the loop saying it is locked. Testing on
+ * a V3 prototype exposed three ways that is not enough — the first two by
+ * what was being done there (DMM readings in holdover, codes typed with
+ * SP), the third by the two false pairs it actually recorded:
+ *
+ *   HOLDOVER. The loop is not steering, and a loop that does not run does
+ *   not update its lock flag either: whatever it said when holdover began —
+ *   locked, typically — it goes on saying. The code is whatever was held, or
+ *   typed. No anchor is taken in holdover, manual or automatic, and none
+ *   completes in it.
+ *
+ *   A CODE SET BY HAND. SP, up and dp write the DAC under a loop whose lock
+ *   flag has not noticed yet — for a second or so when it is running, for as
+ *   long as the holdover lasts when it is not, and for good after a nudge too
+ *   small to unlock it. After one (span_note_manual) no anchor is taken, and
+ *   none completes, until the loop has been seen unlocked: a lock after that
+ *   is the loop's own again.
+ *
+ *   THE WRONG PLANT. On a hand-wired bench the shifter can go into or out of
+ *   the EFC path before PB14 follows. The loop then locks on one position's
+ *   plant under the other's name, and its code is the OTHER position's null.
+ *   Both false pairs recorded on that board came from this: FULL 54295 =
+ *   REDUCED 54156, taken with the shifter already out of the path and PB14
+ *   still on REDUCED, and FULL 38660 = REDUCED 39051, with the shifter back
+ *   in before PB14 left FULL.
+ *
+ * The last one is recognised by where the code is. CT stores the code it found
+ * 10 MHz at in each position (span_store_t.null), and a code is taken as
+ * position x's null only if it lies within SPAN_NULL_TOL of x's null and not
+ * nearer to the other position's. Both distances are in hertz, each through
+ * its own position's K, because that is the question being asked: how far
+ * would the oscillator have had to move for this to be x's null, and how far
+ * for it to be the other's? 38660 as FULL is 1.37 Hz from FULL's null and
+ * 0.01 Hz from where REDUCED locked; 54156 as REDUCED is about 0.4 Hz from
+ * anything REDUCED locks at and 0.01 Hz from FULL's null. The first fails both
+ * tests, the second the nearer one. Both halves of a pair are tested, and the
+ * old span's half again when the new span's null is known — which is how the
+ * second is caught when FULL has no null of its own until the CT that
+ * completes the pair.
+ *
+ * 5e-8 (0.5 Hz at 10 MHz) is the backstop for a code far from both nulls, and
+ * what the oscillator really does between two renewals of a null has to fit
+ * inside it: the 1.7e-10/day of aging a V3 board showed takes ten months. The
+ * nearer test is the sharper one and has a price: an oscillator that has moved
+ * more than halfway, in hertz, towards the other position's null since the
+ * last renewal is taken for the wrong plant — about 3e-8 on that board, whose
+ * two nulls are 15 000 codes apart. What that costs is a pair not measured at
+ * that move, not a wrong one: the pair already held is voltage-true and is
+ * carried as before, and CT in that position renews the null.
+ *
+ * SPAN_NULL_SURE: within 5e-9 of its own null a code is taken as that null,
+ * whatever else it is near. Without it the nearer test cannot work on a board
+ * whose two nulls sit at nearly the same code — where the shifter's line
+ * crosses the full span's at the oscillator's null — because there every code
+ * a hair from its own null is nearer the other's, in hertz, for the position
+ * with the larger K. And it costs nothing: if such a code were really the
+ * other plant's null, the pair taken on it would put the next move no more
+ * than those 5e-9 off, since that is how far the code is from this position's
+ * null, which is where the voltage it claims really is.
+ *
+ * Nulls come from CT and only from CT; a measured pair renews a null it has
+ * just passed the test against, and never creates one. A record written before
+ * build 58 has none, and in a position without one a locked code is taken as
+ * it always was — until the next CT there. */
+#define SPAN_NULL_TOL       5.0e-8
+#define SPAN_NULL_SURE      5.0e-9
 
 /* A POSITION WITHOUT A CALIBRATION OF ITS OWN GETS ONE BY ITSELF.
  *
@@ -131,6 +203,9 @@ static bool     s_anc_unlocked = false;       /* the new span's loop has been
 static uint8_t  s_anc_from  = 0u;
 static uint16_t s_anc_code  = 0u;
 static uint32_t s_anc_ms    = 0u;
+/* a code was set by hand and the loop has not been seen unlocked since (the
+ * CLI task sets it, the control task clears it) */
+static volatile bool s_manual = false;
 #endif
 
 const char *span_name(uint8_t s) { return (s == SPAN_REDUCED) ? "REDUCED" : "FULL"; }
@@ -223,10 +298,11 @@ bool span_pin_moved_since(uint8_t s)
  * code and the mapped one are such a pair by construction — see do_switch for
  * why that is not circular), and it is MEASURED whenever the old span was
  * locked at the move and the new one locks afterwards, or CT runs there: two
- * nulls of the same oscillator are the same voltage. The error of a map is the
- * error of the K ratio times the distance from the pair, which is why keeping
- * the pair close to where the loop actually is matters more than anything
- * else here. */
+ * nulls of the same oscillator are the same voltage — provided both codes are
+ * nulls, which a lock flag alone does not prove (SPAN_NULL_TOL). The error of
+ * a map is the error of the K ratio times the distance from the pair, which is
+ * why keeping the pair close to where the loop actually is matters more than
+ * anything else here. */
 #ifdef GPSDO_SPAN_SENSE
 static double span_map(uint8_t a, uint8_t b, double c_a)
 {
@@ -271,7 +347,61 @@ static void span_warn_manual(void)
     if (g_lars.temp_coeff != 0)
         OUT_SERIAL.println("SPAN: LTK is in DAC bits per ADC step - set for the other span");
 }
+
+/* Holdover, manual or automatic: the loop is not steering, so the code on the
+ * DAC is not a null whatever the lock flag says (SPAN_NULL_TOL). Not knowing —
+ * the mutex was not had — counts as holdover: a wrong "yes" costs one pair
+ * not measured, a wrong "no" a pair that is not one. Control task only, and
+ * never at boot (no mutex yet). */
+static bool span_in_holdover(void)
+{
+    bool ho = true;
+    if (xSemaphoreTake(xCtrlMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ho = gCtrl.holdover_mode;
+        xSemaphoreGive(xCtrlMutex);
+    }
+    return ho;
+}
+
+/* Can c, the code a loop locked in position x holds, be x's null? nx is x's
+ * null and ny the other position's, 0 = not known — the callers pass the
+ * stored ones, or a null just measured in place of a stored one. The test is
+ * SPAN_NULL_TOL's: within SPAN_NULL_SURE of nx, or within the tolerance of nx
+ * and not nearer ny, each distance in hertz through its own position's K.
+ * Without nx there is nothing to test against and the answer is yes, as it
+ * always was. Says why not. */
+static bool span_null_fits(uint8_t x, double c, uint16_t nx, uint16_t ny)
+{
+    const uint8_t y = (uint8_t)(x ^ 1u);
+    if (nx == 0u || !(s_st.k[x] > 0.0f)) return true;
+    const double dx   = fabs(c - (double)nx) * (double)s_st.k[x];
+    const bool   hasy = ny != 0u && s_st.k[y] > 0.0f;
+    const double dy   = hasy ? fabs(c - (double)ny) * (double)s_st.k[y] : 0.0;
+    if (dx <= SPAN_NULL_SURE * (double)BASE_FREQ) return true;
+    if (dx <= SPAN_NULL_TOL * (double)BASE_FREQ && !(hasy && dy < dx)) return true;
+    OUT_SERIAL.print("SPAN: ");            OUT_SERIAL.print(span_name(x));
+    OUT_SERIAL.print(" code ");            OUT_SERIAL.print((unsigned)span_round16(c));
+    OUT_SERIAL.print(" is ");              OUT_SERIAL.print(dx, 3);
+    OUT_SERIAL.print(" Hz from its null "); OUT_SERIAL.print((unsigned)nx);
+    if (hasy) {
+        OUT_SERIAL.print(", ");            OUT_SERIAL.print(dy, 3);
+        OUT_SERIAL.print(" Hz from ");     OUT_SERIAL.print(span_name(y));
+        OUT_SERIAL.print("'s ");           OUT_SERIAL.print((unsigned)ny);
+    }
+    OUT_SERIAL.println(" - not a null");
+    OUT_SERIAL.print("SPAN:    (the shifter and PB14 did not switch together, or the null is old - CT in ");
+    OUT_SERIAL.print(span_name(x));
+    OUT_SERIAL.println(" renews it)");
+    return false;
+}
 #endif /* GPSDO_SPAN_SENSE */
+
+void span_note_manual(void)
+{
+#ifdef GPSDO_SPAN_SENSE
+    s_manual = true;
+#endif
+}
 
 /* ---- CT for a position that has none ------------------------------------ */
 static void span_ct_arm(bool on)
@@ -376,32 +506,27 @@ static void span_ct_auto(void)
  * the control task between two loop steps, so nothing else writes the DAC
  * while it does. */
 #ifdef GPSDO_SPAN_SENSE
+/* At boot: the span the recalled code is in (span_begin sets it from the
+ * live store's slot, build 65). */
+static uint8_t s_boot_code = 0xFFu;
+
 static void do_switch(uint8_t a, uint8_t b, bool at_boot)
 {
     const bool   ka   = s_st.k[a] > 0.0f;
     const bool   kb   = s_st.k[b] > 0.0f;
     const bool   pair = span_pair_valid();
     const double c_a  = at_boot ? (double)gCtrl.pwm_output : gpsdo_dac_last16f();
+    /* THE CODE MAY ALREADY BE b's (build 65). At boot the span record says
+     * a, but the live store's slot - written after it, the record's own save
+     * having failed - says its code is b's. Then it is the record that lagged
+     * behind: the code stays as it is, and so does the learned state stored
+     * with it. Remapping it again would move the oscillator by the whole
+     * difference between the two paths. */
+    const bool   own  = at_boot && s_boot_code == b;
     double       c_b  = c_a;
     bool         mapped = false, reach = true;
 
-    /* Anchor candidate for the pair: only a LOCKED loop's code is a null, and
-     * only a null in each span makes a measured pair. Never at boot — no loop
-     * has run yet, so nothing is known to be locked. A new move cancels an old
-     * candidate: it described a span we have just left.
-     *
-     * Armed whether or not the new span is calibrated: when it is not, CT is
-     * about to run there, and CT's null is the other half (span_ct_done). */
-    s_anc_armed = false;
-    if (!at_boot && ka && health_loop_locked()) {
-        s_anc_armed    = true;
-        s_anc_unlocked = false;
-        s_anc_from     = a;
-        s_anc_code  = span_round16(c_a);
-        s_anc_ms    = millis();
-    }
-
-    if (ka && kb && pair) {
+    if (!own && ka && kb && pair) {
         c_b    = span_map(a, b, c_a);
         mapped = true;
         if (c_b < SPAN_RAIL_GUARD || c_b > 65535.0 - SPAN_RAIL_GUARD) reach = false;
@@ -411,6 +536,34 @@ static void do_switch(uint8_t a, uint8_t b, bool at_boot)
     OUT_SERIAL.print(" -> ");   OUT_SERIAL.print(span_name(b));
     OUT_SERIAL.print(b == SPAN_REDUCED ? " (PB14 low" : " (PB14 high");
     OUT_SERIAL.println(at_boot ? ", moved while powered off)" : ")");
+
+    /* Anchor candidate for the pair: only a LOCKED loop's code is a null, and
+     * only a null in each span makes a measured pair. Never at boot — no loop
+     * has run yet, so nothing is known to be locked. A new move cancels an old
+     * candidate: it described a span we have just left. And a lock flag alone
+     * does not make a code a null — not in holdover, not after a code set by
+     * hand, not where the other position's plant would have put it
+     * (SPAN_NULL_TOL). Each is said: a pair the operator expected and did not
+     * get is otherwise a mystery.
+     *
+     * Armed whether or not the new span is calibrated: when it is not, CT is
+     * about to run there, and CT's null is the other half (span_ct_done). */
+    s_anc_armed = false;
+    if (!at_boot && ka && health_loop_locked()) {
+        if (span_in_holdover()) {
+            OUT_SERIAL.println("SPAN: in holdover - the code is not a null; no pair is measured at this move");
+        } else if (s_manual) {
+            OUT_SERIAL.println("SPAN: the code was set by hand (SP/up/dp) - not a null; no pair is measured at this move");
+        } else if (!span_null_fits(a, c_a, s_st.null[a], s_st.null[b])) {
+            OUT_SERIAL.println("SPAN: no pair is measured at this move");
+        } else {
+            s_anc_armed    = true;
+            s_anc_unlocked = false;
+            s_anc_from     = a;
+            s_anc_code     = span_round16(c_a);
+            s_anc_ms       = millis();
+        }
+    }
 
     if (mapped) {
         OUT_SERIAL.print("SPAN: code "); OUT_SERIAL.print(c_a, 1);
@@ -433,6 +586,10 @@ static void do_switch(uint8_t a, uint8_t b, bool at_boot)
             s_st.pair[a] = span_round16(c_a);
             s_st.pair[b] = span_round16(c_b);
         }
+    } else if (own) {
+        OUT_SERIAL.print("SPAN: the stored code is already ");
+        OUT_SERIAL.print(span_name(b));
+        OUT_SERIAL.println("'s (the live store saved it after the move) - kept");
     } else if (ka && kb) {
         OUT_SERIAL.println("SPAN: no code pair known for these two positions yet - code kept,");
         OUT_SERIAL.println("SPAN: the loop re-acquires (the pair is learned when it locks)");
@@ -444,7 +601,7 @@ static void do_switch(uint8_t a, uint8_t b, bool at_boot)
 
     if (kb) {
         span_apply_k(b);
-        if (ka) algo_rescale_lsb((double)s_st.k[a] / (double)s_st.k[b]);
+        if (ka && !own) algo_rescale_lsb((double)s_st.k[a] / (double)s_st.k[b]);
         OUT_SERIAL.print("SPAN: K "); OUT_SERIAL.print((double)s_st.k[b] * 1000.0, 5);
         OUT_SERIAL.print(" mHz/LSB (CT in ");
         OUT_SERIAL.print(span_name(b));
@@ -493,6 +650,45 @@ static void do_switch(uint8_t a, uint8_t b, bool at_boot)
 }
 #endif /* GPSDO_SPAN_SENSE */
 
+#ifdef GPSDO_SPAN_SENSE
+/* ---- boot: a code filed under the wrong span (build 65) --------------------
+ *
+ * The jumper is where the span record says, but the live store's slot says
+ * its code is the OTHER span's. That is a move the record reached flash for
+ * and the live slot did not: do_switch() saves the record at once and asks
+ * the live store for its slot on the next tick, and a power cut between the
+ * two leaves the old span's code to be recalled - up to build 64 straight
+ * onto the new span's path. Remapped here exactly as do_switch() would have,
+ * and both records written again by the first span_poll(). */
+static void span_boot_remap(uint8_t a, uint8_t b)
+{
+    const double c_a = (double)gCtrl.pwm_output;
+    OUT_SERIAL.print("SPAN: the stored code is ");
+    OUT_SERIAL.print(span_name(a));
+    OUT_SERIAL.print("'s - the span record moved to ");
+    OUT_SERIAL.print(span_name(b));
+    OUT_SERIAL.println(" and the live store had not followed");
+    const bool kk = s_st.k[a] > 0.0f && s_st.k[b] > 0.0f;
+    if (kk && span_pair_valid()) {
+        const double c_b = span_map(a, b, c_a);
+        OUT_SERIAL.print("SPAN: code "); OUT_SERIAL.print(c_a, 1);
+        OUT_SERIAL.print(" -> ");        OUT_SERIAL.print(c_b, 1);
+        OUT_SERIAL.println("  (same voltage on the EFC pin)");
+        if (c_b < SPAN_RAIL_GUARD || c_b > 65535.0 - SPAN_RAIL_GUARD)
+            OUT_SERIAL.println("SPAN: ** the oscillator is outside the reach of this span.");
+        gCtrl.pwm_output = span_round16(c_b);
+    } else {
+        OUT_SERIAL.println("SPAN: no code pair known for these two positions yet - code kept,");
+        OUT_SERIAL.println("SPAN: the loop re-acquires (the pair is learned when it locks)");
+    }
+    /* The learned state was stored with a's code, in a's LSB, whether or not
+     * the code itself could be mapped: rescaled whenever both K are known, as
+     * do_switch() does. */
+    if (kk) algo_rescale_lsb((double)s_st.k[a] / (double)s_st.k[b]);
+    s_need_save = true;
+}
+#endif
+
 /* ---- boot ---------------------------------------------------------------- */
 void span_begin(void)
 {
@@ -501,6 +697,13 @@ void span_begin(void)
     delayMicroseconds(100);          /* let the pull-up charge the wire */
     const uint8_t now = span_read_vote();
     s_raw_last = now;
+
+    /* Which span the recalled code is in: the live store's slot says, from
+     * build 65; a slot from before says nothing, and the span record's is
+     * taken, as every build before did. */
+    const uint8_t rec  = (s_st.last >= 1u) ? (uint8_t)(s_st.last - 1u) : now;
+    uint8_t       code = live_store_code_span();
+    if (code > SPAN_REDUCED) code = rec;
 
     if (s_st.last == 0u) {
         /* FIRST BOOT WITH SPAN SENSING. The board may already have a CT
@@ -517,10 +720,12 @@ void span_begin(void)
         }
         s_st.last   = (uint8_t)(now + 1u);
         s_need_save = true;
-    } else if ((uint8_t)(s_st.last - 1u) != now) {
-        do_switch((uint8_t)(s_st.last - 1u), now, true);
+    } else if (rec != now) {
+        s_boot_code = code;
+        do_switch(rec, now, true);
     } else {
         s_active = now;
+        if (code != now) span_boot_remap(code, now);
         /* Powered off before CT succeeded here, powered on in the same
          * position: CT is still what is missing, and a power-on is a new
          * set of attempts. */
@@ -561,7 +766,22 @@ void span_poll(void)
      * unmoved code as the new span's null, and the next move mapped from a
      * pair that was not one (spansim caught it: a REDUCED->FULL->REDUCED
      * sequence landing 45 000 codes off the rail). So the new span's loop has
-     * to be seen unlocked first, and then earn its lock. */
+     * to be seen unlocked first, and then earn its lock.
+     *
+     * AND BOTH HALVES ARE NULLS (SPAN_NULL_TOL). Not in holdover, not on a
+     * code set by hand; the anchor is tested again now that the new span's
+     * null is in hand — this lock — and this lock is tested against the stored
+     * nulls, which catches the mirror of what the anchor test catches: the
+     * jumper moved first and the shifter later, so the new span's loop locked
+     * on the old span's plant. Where the old position has no null of its own
+     * yet, the anchor stands in for it: it is the old plant's null either way.
+     * A null renewed here is one the pair has just passed the test against.
+     *
+     * The code is read BEFORE the manual flag is looked at. SP sets the flag
+     * before it writes the DAC, so a code read first and a flag found clear
+     * after it is a code no SP had touched. */
+    if (s_manual && !health_loop_locked()) s_manual = false;   /* a code set by hand */
+
     if (s_anc_armed) {
         if ((uint32_t)(millis() - s_anc_ms) > SPAN_ANCHOR_MAX_MS ||
             s_anc_from == s_active) {
@@ -569,16 +789,30 @@ void span_poll(void)
         } else if (!health_loop_locked()) {
             s_anc_unlocked = true;
         } else if (s_anc_unlocked && !g_calib_active) {
-            s_anc_armed = false;
-            uint16_t c = gpsdo_dac_last16();
-            s_st.pair[s_anc_from] = s_anc_code;
-            s_st.pair[s_active]   = c;
-            OUT_SERIAL.print("SPAN: pair measured - ");
-            OUT_SERIAL.print(span_name(s_anc_from)); OUT_SERIAL.print(" ");
-            OUT_SERIAL.print(s_anc_code); OUT_SERIAL.print(" = ");
-            OUT_SERIAL.print(span_name(s_active));   OUT_SERIAL.print(" ");
-            OUT_SERIAL.println(c);
-            settings_save_partial(SET_SPAN);
+            const uint16_t c = gpsdo_dac_last16();
+            /* in holdover, or after a code set by hand: wait (see above) */
+            if (!span_in_holdover() && !s_manual) {
+                s_anc_armed = false;
+                const uint8_t  a  = s_anc_from, b = s_active;
+                const uint16_t na = s_st.null[a] ? s_st.null[a] : s_anc_code;
+                if (span_null_fits(a, (double)s_anc_code, s_st.null[a], c) &&
+                    span_null_fits(b, (double)c, s_st.null[b], na)) {
+                    s_st.pair[a] = s_anc_code;
+                    s_st.pair[b] = c;
+                    if (s_st.null[a] != 0u) s_st.null[a] = s_anc_code;
+                    if (s_st.null[b] != 0u) s_st.null[b] = c;
+                    OUT_SERIAL.print("SPAN: pair measured - ");
+                    OUT_SERIAL.print(span_name(a)); OUT_SERIAL.print(" ");
+                    OUT_SERIAL.print(s_anc_code);   OUT_SERIAL.print(" = ");
+                    OUT_SERIAL.print(span_name(b)); OUT_SERIAL.print(" ");
+                    OUT_SERIAL.println(c);
+                    settings_save_partial(SET_SPAN);
+                } else {
+                    OUT_SERIAL.println(span_pair_valid()
+                        ? "SPAN: no pair is measured - the pair already held stays"
+                        : "SPAN: no pair is measured");
+                }
+            }
         }
     }
 
@@ -616,23 +850,39 @@ void span_ct_done(double k, uint16_t null16)
             s_st.k[o]    = 0.0f;
             s_st.pair[o] = 0u;
             s_st.pair[s] = 0u;
+            s_st.null[o] = 0u;
             s_anc_armed  = false;
         }
     }
+    /* This position's K from here on — before the anchor test below, which
+     * weighs a distance in this position's codes by it. The re-pin uses k
+     * itself either way. */
+    s_st.k[s] = (float)k;
 
     /* Keep the pair pinned to one voltage across the CT. What CT moved in THIS
      * span is aging (or a better null), and aging is common to both: carried
      * into the other span through the new K, exactly as a move would carry
      * it. If the move that brought us here left an anchor — the old span was
      * locked, and CT has just found this span's null — that IS a measured
-     * pair, and it wins. */
+     * pair, and it wins: once the anchor has passed the null test again with
+     * CT's null standing for this position's (SPAN_NULL_TOL — the test that
+     * catches an anchor taken on this position's plant under the other's
+     * name, when this position had no null of its own until now). */
+    bool measured = false;
     if (s_anc_armed && s_anc_from == o &&
         (uint32_t)(millis() - s_anc_ms) <= SPAN_ANCHOR_MAX_MS) {
-        s_st.pair[o] = s_anc_code;
-        s_st.pair[s] = null16;
-        s_anc_armed  = false;
-        OUT_SERIAL.println("SPAN: pair measured by CT");
-    } else if (s_st.pair[s] != 0u && s_st.pair[o] != 0u && s_st.k[o] > 0.0f) {
+        s_anc_armed = false;
+        if (span_null_fits(o, (double)s_anc_code, s_st.null[o], null16)) {
+            s_st.pair[o] = s_anc_code;
+            s_st.pair[s] = null16;
+            if (s_st.null[o] != 0u) s_st.null[o] = s_anc_code;
+            measured = true;
+            OUT_SERIAL.println("SPAN: pair measured by CT");
+        } else {
+            OUT_SERIAL.println("SPAN: no pair is measured by CT");
+        }
+    }
+    if (!measured && s_st.pair[s] != 0u && s_st.pair[o] != 0u && s_st.k[o] > 0.0f) {
         double p_o = (double)s_st.pair[o] +
                      (k / (double)s_st.k[o]) * ((double)null16 - (double)s_st.pair[s]);
         if (p_o >= 1.0 && p_o <= 65535.0) {
@@ -643,14 +893,14 @@ void span_ct_done(double k, uint16_t null16)
         }
     }
 
-    s_st.k[s]  = (float)k;
-    s_st.last  = (uint8_t)(s + 1u);
+    /* Where nulls come from: see SPAN_NULL_TOL. */
+    s_st.null[s] = null16;
+    s_st.last    = (uint8_t)(s + 1u);
 #ifdef GPSDO_LTIC
     ltic_autotune();
 #endif
-    /* No loop restart here. CT has already asked for one before calling
-     * this (do_calibrate_tune, where the reason is), in every build: build 55
-     * had it here, where a build without GPSDO_SPAN_SENSE compiled it away. */
+    /* No loop restart here: CT has already asked for one before calling
+     * this (do_calibrate_tune, where the reason is). */
     if (s_ct_due || s_ct_fails > 0u) {
         OUT_SERIAL.print("SPAN: "); OUT_SERIAL.print(span_name(s));
         OUT_SERIAL.println(" has its own calibration now");
@@ -667,6 +917,7 @@ void span_clear(uint8_t s)
 {
     if (s > 1u) return;
     s_st.k[s]    = 0.0f;
+    s_st.null[s] = 0u;
     s_st.pair[0] = 0u;
     s_st.pair[1] = 0u;
     s_anc_armed  = false;
@@ -693,11 +944,15 @@ void span_report(void (*putln)(const char *))
     putln(l);
     for (uint8_t i = 0; i < 2; i++) {
         if (s_st.k[i] > 0.0f) {
-            /* dtostrf and not %f: the core's printf is built without floats */
+            /* dtostrf and not %f: the core's printf is built without floats.
+             * The null is where CT found 10 MHz here, as the pairs measured
+             * since have renewed it (SPAN_NULL_TOL). */
             dtostrf((double)s_st.k[i] * 1000.0, -1, 5, b0);
-            snprintf(l, sizeof(l), "        %-7s K %s mHz/LSB = %s LSB/Hz",
-                     span_name(i), b0,
-                     dtostrf(1.0 / (double)s_st.k[i], -1, 0, b1));
+            int n = snprintf(l, sizeof(l), "        %-7s K %s mHz/LSB = %s LSB/Hz",
+                             span_name(i), b0,
+                             dtostrf(1.0 / (double)s_st.k[i], -1, 0, b1));
+            if (s_st.null[i] != 0u && n > 0 && (size_t)n < sizeof(l))
+                snprintf(l + n, sizeof(l) - (size_t)n, ", null %u", (unsigned)s_st.null[i]);
         } else if (i == s_active && span_needs_ct()) {
             char st[48];
             if (s_ct_seen) {
@@ -732,4 +987,14 @@ void span_report(void (*putln)(const char *))
             snprintf(l, sizeof(l), "        ratio %sx, no code pair yet (moves re-acquire)", b0);
         putln(l);
     }
+}
+
+/* ---- span_settled (build 65) ----------------------------------------------- */
+bool span_settled(void)
+{
+#ifdef GPSDO_SPAN_SENSE
+    return !s_need_save && !s_anc_armed && !s_ct_due && s_raw_run == 0u;
+#else
+    return !s_ct_due;
+#endif
 }

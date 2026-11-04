@@ -7,12 +7,11 @@
  *
  * Why this file exists
  * --------------------
- * v1.04 was hanging at boot with a white TFT screen and no diagnostic.
- * The root cause is invisible without the stack-overflow / malloc-failed
- * hooks: configCHECK_FOR_STACK_OVERFLOW and configUSE_MALLOC_FAILED_HOOK
+ * configCHECK_FOR_STACK_OVERFLOW and configUSE_MALLOC_FAILED_HOOK
  * default to 0, so a blown task stack (Cortex-M) silently corrupts a
  * neighbour or HardFaults, and configASSERT traps in a for(;;) with
- * interrupts off — a dead, white panel with nothing on the serial port.
+ * interrupts off — a dead, white panel with nothing on the serial port
+ * and no diagnostic.
  *
  * This override turns BOTH hooks on and defines configASSERT to print
  * instead of silently looping, so the next failure names itself on the
@@ -20,8 +19,8 @@
  * vApplicationMallocFailedHook live in GPSDO_FreeRTOS.ino.
  *
  * Approach: include the full Default config (so every other knob stays
- * exactly as the library ships it) and re-define only the few macros we
- * need to change. The Default header is guarded, so this is safe.
+ * exactly as the library ships it) and re-define only the few macros
+ * that need to change. The Default header is guarded, so this is safe.
  * ====================================================================== */
 #ifndef STM32FREERTOSCONFIG_H
 #define STM32FREERTOSCONFIG_H

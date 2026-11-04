@@ -1,7 +1,7 @@
 /**
  * gpsdo_gps.cpp — vGpsTask — GPS NMEA parsing and UBX configuration
  *
- * Part of GPSDO v1.07.57rt
+ * Part of GPSDO v1.08.68rt
  * Author:   J. M. Niewiński
  * GitHub:   https://github.com/jmnlabs/GPSDO_FreeRTOS
  * Based on: GPSDO v0.06c by André Balsa
@@ -73,13 +73,11 @@ static void ubx_cksum(uint8_t *msg, uint8_t len)
  * Two independent byte-level state machines run in parallel so that
  * NMEA bytes flowing in parallel do not confuse the matcher.
  *
- * Key improvement over original:
- *   The inner loop drains Serial1 CONTINUOUSLY — it does NOT call delay()
- *   unless the FIFO is empty.  At 38400 baud ~3840 B/s arrive; the old
- *   code called delay(1) every time no byte was immediately available,
- *   allowing up to 3-4 bytes to pile up per ms. Over a 2000 ms window
- *   the 256-byte ring buffer overflows ~30 times, silently dropping the
- *   10-byte ACK.
+ * The inner loop drains Serial1 CONTINUOUSLY — it does NOT call delay()
+ * unless the FIFO is empty. At 38400 baud ~3840 B/s arrive; a delay(1)
+ * whenever no byte is immediately available lets 3-4 bytes pile up per
+ * ms, and over a 2000 ms window that overflows the 256-byte ring buffer
+ * roughly 30 times, silently dropping the 10-byte ACK.
  *
  * Returns: +1 = ACK-ACK, -1 = ACK-NAK, 0 = timeout
  */
@@ -212,9 +210,9 @@ static uint8_t ubx_reduce_nmea(void)
  *   2. CFG-TMODE  (0x06 0x1D), 28-byte payload  — LEA-6T (u-blox 6)
  *   3. CFG-VALSET (0x06 0x8A), CFG-TMODE-* keys  — ZED-F9T (Gen9)
  *      Gen9 deprecates the legacy CFG-TMODE* frames (gone as of firmware
- *      TIM 2.24) in favour of the configuration-key interface, and reports
- *      survey-in via NAV-SVIN (not TIM-SVIN). Tested on real hardware by
- *      EEVblog user danieljw. The accuracy key is in 0.1 mm units (×10).
+ *      TIM 2.24) in favour of the configuration-key interface, and
+ *      reports survey-in via NAV-SVIN (not TIM-SVIN), confirmed on real
+ *      hardware. The accuracy key is in 0.1 mm units (×10).
  * Returns true on the first ACK. Caller logs which (if any) succeeded. */
 static bool ubx_start_survey_in(void)
 {
@@ -261,8 +259,8 @@ static bool ubx_start_survey_in(void)
     flush_rx(150);
 
     /* ---- Variant 3: CFG-VALSET (0x8A) with CFG-TMODE-* keys (ZED-F9T) ----
-     * Gen9 configuration-key interface. Tested on real hardware by EEVblog
-     * user danieljw. One VALSET frame sets three keys:
+     * Gen9 configuration-key interface, confirmed on real hardware. One
+     * VALSET frame sets three keys:
      *   CFG-TMODE-MODE         0x20030001  U1  = 1 (survey-in)
      *   CFG-TMODE-SVIN_MIN_DUR 0x40030010  U4  = dur [s]
      *   CFG-TMODE-SVIN_ACC_LIMIT 0x40030011 U4 = acc [0.1 mm]  (NOTE the unit!)
@@ -312,14 +310,12 @@ static bool ubx_poll_svin(uint32_t *dur, uint32_t *acc_mm,
     ubx_cksum(poll, sizeof(poll));
     send_ubx(poll, sizeof(poll));
 
-    /* Read the response with a yielding window. The previous (pre-v0.47)
-     * version waited up to 1000 ms with a busy delay(), which starved the
-     * display task. This version yields with vTaskDelay() between reads, so
-     * the display task keeps running even though the window is generous
-     * enough (~500 ms) to reliably catch the module's TIM-SVIN reply (its
-     * response latency can be 100-200 ms). Non-UBX bytes (NMEA) seen while
-     * scanning are forwarded to TinyGPS++ so the position fix is not
-     * disrupted by polling. */
+    /* Read the response with a yielding window. Yields with vTaskDelay()
+     * between reads, so the display task keeps running even though the
+     * window is generous enough (~500 ms) to reliably catch the module's
+     * TIM-SVIN reply (its response latency can be 100-200 ms). Non-UBX
+     * bytes (NMEA) seen while scanning are forwarded to TinyGPS++ so the
+     * position fix is not disrupted by polling. */
     uint8_t buf[44]; uint8_t n = 0;
     int state = 0;
     const uint8_t MAX_SLICES = 50;          /* 50 × 10 ms = 500 ms cap */
@@ -366,8 +362,7 @@ done:
 
 
 /* Poll NAV-SVIN (0x01 0x3B) and parse the survey-in status — the Gen9/F9T
- * channel (TIM-SVIN may not answer on an F9T). Tested on real hardware by
- * EEVblog user danieljw.
+ * channel (TIM-SVIN may not answer on an F9T), confirmed on real hardware.
  * Same out-params as ubx_poll_svin(). 40-byte payload, from u-blox docs:
  *   iTOW(u4)@0, dur(u4)@4 [s], meanX/Y/Z(i4)@8..19, meanXHP/YHP/ZHP@20..22,
  *   reserved@23, meanAcc(u4)@24 [0.1 mm], obs(u4)@28, valid(u1)@32,
@@ -396,25 +391,16 @@ static bool ubx_poll_svin_nav(uint32_t *dur, uint32_t *acc_mm,
                    if (n >= sizeof(buf)) goto done2; }
         }
         if (n >= 40) break;                 /* full payload already in */
-        /* SAME GUARD AS ubx_poll_svin(). This one was missed when that fix went
-         * in, and it is a boot hang, not a cosmetic difference: vTaskDelay()
-         * before vTaskStartScheduler() writes through pxCurrentTCB, which is
-         * still NULL, so the board takes a hard fault and the default handler
-         * spins with interrupts off — no output, no watchdog, nothing but the
-         * reset button.
+        /* Same guard as ubx_poll_svin(): vTaskDelay() before
+         * vTaskStartScheduler() writes through pxCurrentTCB, which is still
+         * NULL, so the board takes a hard fault and the default handler spins
+         * with interrupts off — no output, no watchdog, nothing but the reset
+         * button.
          *
-         * It hid because of the order in gpsdo_gps_init(): NAV-SVIN is only
-         * polled when TIM-SVIN did not answer inside its 500 ms window. A
-         * LEA-6T that replies boots normally; one that is still starting up —
-         * which is exactly the cold power-on case, as against a reset where the
-         * receiver keeps running — falls through to here and the board stops
-         * dead at the same line every time. Hence "it needs a few resets".
-         *
-         * Symptom-matched to the 20.08 16:04 log: four boots, each ending after
-         * "UBX: CFG-NAV5 ACK" and before "LEA-T: starting survey-in", with the
-         * reset cause reading PIN/NRST every time — the operator's button, not
-         * a watchdog and not a brown-out. A supply fault does not stop at the
-         * same source line four times. */
+         * This path is reached because NAV-SVIN is only polled when TIM-SVIN
+         * did not answer inside its 500 ms window: a LEA-6T still starting up
+         * — the cold power-on case, as against a reset where the receiver
+         * keeps running — falls through to here. */
         if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
             vTaskDelay(pdMS_TO_TICKS(10));
         else
@@ -547,12 +533,8 @@ static bool ubx_config(void)
 {
     /* UBX-CFG-NAV5 stationary mode — 44-byte frame, CK_A=0x12 CK_B=0x54
      *
-     * Previous frame was CORRUPTED: payload was 38 bytes instead of 36.
-     * Two extra bytes (0x10,0x27,0x00,0x00) appeared after dgpsTimeOut —
-     * a duplicate of the fixedAltVar field that was mistakenly included
-     * as "reserved". The module performs checksum verification FIRST; a
-     * checksum mismatch causes silent discard with NO ACK and NO NAK,
-     * which is why all 3 attempts timed out.
+     * The module performs checksum verification FIRST; a checksum mismatch
+     * causes silent discard with NO ACK and NO NAK.
      *
      * CFG-NAV5 v0 payload fields per u-blox protocol spec 7.01 p.106:
      *   [0-1]   mask              0xFFFF  (apply all fields)
@@ -568,8 +550,8 @@ static bool ubx_config(void)
      *   [20-21] tAcc              300 m
      *   [22]    staticHoldThresh  0
      *   [23]    dgpsTimeOut       0
-     *   [24]    cnoThreshNumSVs   0       ← was MISSING (caused 2-byte overrun)
-     *   [25]    cnoThresh         0       ← was MISSING
+     *   [24]    cnoThreshNumSVs   0
+     *   [25]    cnoThresh         0
      *   [26-27] reserved2         0
      *   [28-29] staticHoldMaxDist 0
      *   [30]    utcStandard       0
@@ -578,7 +560,7 @@ static bool ubx_config(void)
      * Total payload: 36 bytes  Header+length: 6  Checksum: 2  Frame: 44 bytes
      *
      * Checksum computed by ubx_cksum() over bytes [2..41] (class through
-     * last payload byte), verified by independent Python calculation.
+     * last payload byte), verified by independent calculation.
      */
     static const uint8_t setNav[44] = {
         0xB5, 0x62,                         /* UBX sync chars               */
@@ -635,14 +617,13 @@ static bool ubx_config(void)
 }
 #endif /* UBX_CONFIG */
 
-/* ---- Tunnel mode ------------------------------------------------------ */
-/*
+/* ---- Tunnel mode ----
  * run_tunnel_mode — transparent serial bridge between CLI_SER and Serial1.
  *
- * Fix: notifies DisplayTask once per second so OLED and TM1637 keep
- * updating with the last valid gGps snapshot during the bridge session.
- * Without this notification both displays froze for the entire tunnel
- * timeout (up to 300 s).
+ * Notifies DisplayTask once per second so OLED and TM1637 keep updating
+ * with the last valid gGps snapshot during the bridge session. Without
+ * this notification both displays freeze for the entire tunnel timeout
+ * (up to 300 s).
  */
 volatile uint32_t g_tunnel_baud = 0;   /* T <baud>: GPS UART rate for the bridge (0 = keep) */
 
@@ -668,8 +649,23 @@ static void run_tunnel_mode(void)
     uint32_t last_notify   = millis();
 
     while (millis() < end_ms) {
-        if (Serial1.available())  Serial.write(Serial1.read());
-        if (Serial.available())   Serial1.write(Serial.read());
+        /* More than one byte each way per 1 ms pass (build 68). One byte is
+         * 1000 bytes/s: enough for a receiver at 9600 baud (960 bytes/s), not
+         * for one at 38400 - a ZED-F9T's default - whose NMEA burst at the
+         * top of each second arrives 3.8 times faster, so any burst past
+         * ~350 bytes overflowed the 256-byte RX buffer and u-center saw
+         * broken frames. From Zsolt Zsiros's fork. GPS to host: everything
+         * the receiver has sent, which the USB queue takes far faster than
+         * the UART delivers it. Host to GPS: only as much as the UART's TX
+         * buffer has room for. Past that HardwareSerial::write() waits for
+         * the UART, and a host sending a large file (a configuration, a
+         * firmware update) would keep this task - above the CLI, the sensors
+         * and the displays - spinning in it with the other direction
+         * unserved; held to the room, USB's own flow control holds the host
+         * off instead. */
+        while (Serial1.available()) Serial.write((uint8_t)Serial1.read());
+        for (int room = Serial1.availableForWrite(); room > 0 && Serial.available(); room--)
+            Serial1.write((uint8_t)Serial.read());
 
         /* Notify DisplayTask ~1 Hz so displays stay alive */
         uint32_t now = millis();
@@ -921,62 +917,21 @@ void vGpsTask(void *pvParameters)
     }
 }
 
-/*
- * gpsdo_gps_init — robust GPS hardware initialisation
- *
- * Problems fixed vs previous version:
- *
- * 1. BLIND BAUD-RATE ASSUMPTION
- *    Original always opened at 9600 and sent PUBX,41 to switch to 38400.
- *    After an STM32 reset (without GPS power cycle) the module is already
- *    at 38400 — PUBX sent at 9600 is ignored, ubx_config() loops forever.
- *    Fix: auto-detect the current baud rate before sending any config.
- *
- * 2. UNVERIFIED BAUD-RATE SWITCH (PUBX,41)
- *    PUBX,41 has no UBX-ACK reply — the module switches baud mid-sentence.
- *    Original waited 100ms blindly, which could land in the middle of a
- *    last NMEA sentence still draining at 9600 baud.
- *    Fix: flush TX completely, then wait 150ms (> max NMEA sentence time
- *    at 9600 = 82ms for longest sentence) before reopening at 38400,
- *    then flush the RX buffer to discard framing garbage.
- *
- * 3. taskYIELD() IN get_ubx_ack() BEFORE SCHEDULER
- *    Called from setup() before vTaskStartScheduler() → taskYIELD() is
- *    either a no-op or causes undefined behaviour on STM32duino port.
- *    Fix: get_ubx_ack() now detects scheduler state and uses delay(1)
- *    before scheduler, vTaskDelay(1) after.
- *
- * 4. LONG BLOCKING delay(3000) × 2 IN setup()
- *    Fix: first delay reduced to 500ms (enough for module cold-start
- *    to emit first NMEA); second delay eliminated — ubx_config() waits
- *    for ACK itself with a proper timeout.
- *
- * Auto-detect strategy:
- *   Try each candidate baud rate in descending order. At each rate,
- *   send a UBX-CFG-PRT poll request (B5 62 06 00 01 00 01 ...) and
- *   wait up to 300ms for any UBX or NMEA response. First rate that
- *   gets a response wins. Falls back to 9600 if nothing responds.
- *
- * Called from setup() before vTaskStartScheduler().
- */
-
 /* Candidate baud rates, most likely first.
  *
- * 19200 was missing: it is one of the rates u-blox modules ship configured to
- * and a board on it would have fallen through the whole sweep.
+ * 19200 must be included: it is one of the rates u-blox modules ship
+ * configured to, and a board on it would otherwise fall through the
+ * whole sweep.
  *
- * ORDER IS NOT LOAD-BEARING — but only because of the checksum test in
- * nmea_sentence_ok() below, and that is worth recording. With the earlier
- * criterion of "a single 0x24 arrived", it WAS: simulated across every pair of
- * these five rates, a module at 38400 listened to to at 57600 produces a '$' out
- * of framing garbage in 24 runs out of 24, so a list with 57600 ahead of 38400
- * would have mis-detected every 38400 board. Requiring a whole sentence with a
- * valid checksum removes every false positive in the 5x5 matrix, which is what
- * frees the order to be about boot speed alone. Do not weaken the test back to
- * a byte match and keep the order.
+ * ORDER IS NOT LOAD-BEARING, only because of the checksum test in
+ * nmea_sentence_ok() below (see its comment for why a lone '$' is not
+ * enough): a weaker single-byte test would make order matter, since a
+ * module at 38400 heard at 57600 produces a false '$' from framing
+ * garbage almost every time. Do not weaken the test back to a byte
+ * match and keep the order.
  *
- * 38400 first because that is what the boards in the field are set to; 9600
- * second because it is the u-blox factory default. */
+ * 38400 first because that is what the boards in the field are set to;
+ * 9600 second because it is the u-blox factory default. */
 static const uint32_t BAUD_CANDIDATES[] = { 38400, 9600, 19200, 57600, 115200 };
 static const uint8_t  N_BAUD_CANDIDATES = sizeof(BAUD_CANDIDATES)/sizeof(BAUD_CANDIDATES[0]);
 
@@ -1073,8 +1028,7 @@ static uint32_t detect_nmea_baud(void)
      * sent. Chinese clones auto-baud their RX onto whatever binary poll
      * arrives and ACK it, while their NMEA TX keeps running at its own rate —
      * the ACK then names the wrong baud and the display sits on "acquiring"
-     * forever (field report, Solder Junkie). Listening disturbs nothing: no
-     * bytes leave the STM32. */
+     * forever. Listening disturbs nothing: no bytes leave the STM32. */
     for (uint8_t i = 0; i < N_BAUD_CANDIDATES; i++) {
         uint32_t baud = BAUD_CANDIDATES[i];
         Serial1.end();
@@ -1137,15 +1091,11 @@ static uint32_t detect_gps_baud(void)
  * 1. detect_gps_baud() probes all candidate baud rates and returns the
  *    one the module is currently using.
  *
- * 2. ubx_config() is sent AT THE DETECTED BAUD RATE.
- *    Root cause of the "3 attempts all fail" hang: the code previously
- *    switched to 38400 via PUBX,41 then sent UBX at 38400 — but the
- *    NEO-6M on GY-NEO6MV2 defaults to 9600 on power-up (the PUBX,41
- *    may not take effect reliably in every flash variant). The module
- *    received UBX at a baud rate it wasn't listening on → no ACK → hang.
- *    Sending UBX at the detected baud rate avoids this entirely.
- *    GPSDO operation does not require 38400 baud; NMEA at 1 Hz is well
- *    within the 9600 capacity.
+ * 2. ubx_config() is sent AT THE DETECTED BAUD RATE. Budget modules
+ *    commonly power up at 9600 regardless of how they were last left,
+ *    and a UBX command sent at the wrong baud gets no ACK — sending at
+ *    the detected baud avoids that. GPSDO operation does not require
+ *    38400 baud; NMEA at 1 Hz is well within the 9600 capacity.
  *
  * 3. Optional upgrade to 38400 (GPSDO_PREFER_38400):
  *    Enabled by default. After a successful ubx_config() at the detected
@@ -1192,12 +1142,12 @@ void gpsdo_gps_init(void)
      * survey-in and TIM-TP, and the stream of unanswered binary config
      * frames can upset their auto-baud engine — the module then stops
      * producing NMEA and the display sits on "acquiring" until a T-tunnel
-     * re-probe rescues it (field report, Solder Junkie). Here: probe the
-     * baud, send NOTHING else, and let NMEA do the talking. Discipline is
-     * unaffected — PPS capture and the counter/detector never needed UBX.
-     * Lost with the config: NMEA silencing, stationary mode, survey-in /
-     * Time Mode (position stays 3D-nav; the extra phase wander is exactly
-     * what the loose default algo-12 limits were sized for) and qErr. */
+     * re-probe rescues it. Here: probe the baud, send NOTHING else, and
+     * let NMEA do the talking. Discipline is unaffected — PPS capture and
+     * the counter/detector never needed UBX. Lost with the config: NMEA
+     * silencing, stationary mode, survey-in / Time Mode (position stays
+     * 3D-nav; the extra phase wander is exactly what the loose default
+     * algo-12 limits were sized for) and qErr. */
     OUT_SERIAL.println("GPS: clone/compatible module — baud probe only, no UBX config");
     OUT_SERIAL.println("GPS init done");
     return;
@@ -1205,15 +1155,11 @@ void gpsdo_gps_init(void)
 
     /* ---- Step 2: silence noisy NMEA sentences ----
      *
-     * Root cause of the CFG-NAV5 ACK loss: at 38400 baud NMEA output
-     * fills the 256-byte STM32 RX ring buffer in ~67 ms. The 10-byte
-     * ACK response for CFG-NAV5 arrives ~100 ms after the command and
-     * can be overwritten / dropped before get_ubx_ack() reads it.
-     *
-     * ubx_reduce_nmea() disables GLL, GSA, GSV, VTG (keeps GGA + RMC).
-     * Residual NMEA rate drops from ~500 B/s to ~150 B/s.
-     * At 150 B/s the 256-byte buffer holds 1.7 s — safe for a 1500 ms
-     * ACK wait with no overflow risk.
+     * At 38400 baud, full NMEA output fills the 256-byte STM32 RX ring
+     * buffer in ~67 ms, while the 10-byte CFG-NAV5 ACK arrives ~100 ms
+     * after the command — so without reduction the ACK is reliably
+     * overwritten before get_ubx_ack() reads it. See ubx_reduce_nmea()
+     * for the sentences disabled and the resulting margin.
      *
      * CFG-MSG commands for each disabled sentence receive their own ACK,
      * which also verifies that UBX write commands work on this firmware.
@@ -1237,16 +1183,18 @@ void gpsdo_gps_init(void)
     if (!g_svin_enabled) {
         OUT_SERIAL.println("LEA-T: survey-in DISABLED (SV 0) — staying in nav mode");
     } else {
-        /* Ask first, command second. After a warm reboot (RB) the receiver keeps
-         * its own power and its own state, so a survey completed before the reset
-         * is still valid — the position it established has not moved. Starting a
-         * fresh one there discards a result that took minutes to reach and drops
-         * the module out of Time Mode while it repeats work already done.
+        /* Ask first, command second. After a warm reboot (RB) the receiver
+         * keeps its own power and its own state, so a survey completed
+         * before the reset is still valid — the position it established
+         * has not moved. Starting a fresh one there discards a result that
+         * took minutes to reach and drops the module out of Time Mode
+         * while it repeats work already done.
          *
-         * TIM-SVIN reports valid=1 with active=0 exactly when the receiver is in
-         * Time Mode with a finished survey behind it, which is the condition worth
-         * skipping for. This runs before the scheduler, which is why ubx_poll_svin()
-         * had to stop calling vTaskDelay() unconditionally. */
+         * TIM-SVIN reports valid=1 with active=0 exactly when the receiver
+         * is in Time Mode with a finished survey behind it — the condition
+         * worth skipping for. This runs before the scheduler, so
+         * ubx_poll_svin() calls vTaskDelay() only once the scheduler is
+         * running. */
         bool already_timing = false;
         {
             uint32_t d0 = 0, a0 = 0;
